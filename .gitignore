@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Local config / secrets
+.env
+.env.local
+
+# Runtime data
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+/backend/*.db
+/backend/*.sqlite*
+
+# Frontend build / deps
+frontend/node_modules/
+frontend/dist/
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Windows ADS artifact
+*:Zone.Identifier

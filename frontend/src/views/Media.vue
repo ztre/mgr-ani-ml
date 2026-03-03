@@ -1,0 +1,792 @@
+<template>
+  <div class="media">
+    <div class="header">
+      <h1 class="page-title">媒体记录</h1>
+      <div class="header-actions">
+        <el-input
+          v-model="filters.search"
+          placeholder="搜索文件名..."
+          clearable
+          style="width: 220px"
+          @clear="onFilterChanged"
+          @keyup.enter="onFilterChanged"
+        />
+        <el-select v-model="filters.type" placeholder="类型" clearable style="width: 100px" @change="onFilterChanged">
+          <el-option label="TV" value="tv" />
+          <el-option label="电影" value="movie" />
+        </el-select>
+        <el-select v-model="filters.category" placeholder="分类" style="width: 120px" @change="onFilterChanged">
+          <el-option label="全部" value="all" />
+          <el-option label="正片" value="main" />
+          <el-option label="SPs/Extras" value="sps" />
+        </el-select>
+        <el-button @click="loadMedia" :loading="loading">
+          <el-icon><Refresh /></el-icon>
+        </el-button>
+        <el-button type="warning" plain @click="deduplicateRecords">
+          记录去重
+        </el-button>
+      </div>
+    </div>
+
+    <el-card shadow="never" class="table-card">
+      <el-table :data="seasonRows" stripe v-loading="loading" style="width: 100%">
+        <el-table-column label="资源" min-width="520">
+          <template #default="{ row }">
+            <div class="title-cell" @click="openSeasonDrawer(row)">
+              <img
+                v-if="getPosterUrl(row)"
+                class="poster-thumb"
+                :src="getPosterUrl(row)"
+                alt="poster"
+                loading="lazy"
+              />
+              <div v-else class="poster-fallback">
+                <el-icon class="media-icon" :size="20">
+                  <Monitor v-if="row.type === 'tv'" />
+                  <Film v-else />
+                </el-icon>
+              </div>
+
+              <div class="title-info">
+                <div class="main-title">{{ getResourceName(row) }}</div>
+                <div class="sub-info">
+                  <el-tag size="small" effect="plain" class="type-tag">
+                    {{ row.type === 'tv' ? 'TV' : 'Movie' }}
+                  </el-tag>
+                  <span class="season-link">{{ row.season_label }}</span>
+                  <span v-if="row.tmdb_id">TMDB: {{ row.tmdb_id }}</span>
+                  <span>记录 {{ row.record_count }}</span>
+                </div>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="最近更新时间" width="180" align="right">
+          <template #default="{ row }">
+            {{ formatTime(row.latest_updated_at) }}
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div class="pagination-container">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          @size-change="refreshPagedRows"
+          @current-change="refreshPagedRows"
+        />
+      </div>
+    </el-card>
+
+    <el-dialog v-model="fixDialogVisible" title="手动修正识别" width="500px">
+      <el-form :model="fixForm" label-width="100px">
+        <el-form-item label="文件名">
+          <div class="text-ellipsis" :title="currentFixRow?.original_path">
+            {{ extractFilename(currentFixRow?.original_path) }}
+          </div>
+        </el-form-item>
+        <el-form-item label="TMDB ID" required>
+          <el-input v-model.number="fixForm.tmdb_id" placeholder="例如: 45782" />
+        </el-form-item>
+        <el-form-item label="标题" required>
+          <el-input v-model="fixForm.title" placeholder="TMDB 标准标题 (如: 刀剑神域)" />
+        </el-form-item>
+        <el-form-item label="年份" required>
+          <el-input v-model.number="fixForm.year" placeholder="首播年份 (如: 2012)" />
+        </el-form-item>
+        <el-form-item label="季号 (Season)">
+          <el-input-number v-model="fixForm.season" :min="0" />
+        </el-form-item>
+        <el-form-item label="集号 (Episode)">
+          <el-input-number v-model="fixForm.episode" :min="0" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="fixDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="fixing" @click="submitFix">提交修正</el-button>
+        </span>
+      </template>
+    </el-dialog>
+
+    <el-drawer
+      v-model="seasonDrawerVisible"
+      direction="rtl"
+      size="58%"
+      :title="seasonDrawerTitle"
+      destroy-on-close
+    >
+      <div class="drawer-path">{{ seasonDrawerDir }}</div>
+      <div class="drawer-header-actions">
+        <el-input
+          v-model="filters.search"
+          placeholder="搜索文件名..."
+          clearable
+          style="width: 220px"
+          @clear="onFilterChanged"
+          @keyup.enter="onFilterChanged"
+        />
+        <el-select v-model="filters.type" placeholder="类型" clearable style="width: 100px" @change="onFilterChanged">
+          <el-option label="TV" value="tv" />
+          <el-option label="电影" value="movie" />
+        </el-select>
+        <el-select v-model="filters.category" placeholder="分类" style="width: 120px" @change="onFilterChanged">
+          <el-option label="全部" value="all" />
+          <el-option label="正片" value="main" />
+          <el-option label="SPs/Extras" value="sps" />
+        </el-select>
+        <el-button @click="loadMedia" :loading="loading">
+          <el-icon><Refresh /></el-icon>
+        </el-button>
+      </div>
+      <el-table :data="seasonDrawerItems" v-loading="seasonDrawerLoading" stripe style="width: 100%">
+        <el-table-column label="文件名" min-width="300">
+          <template #default="{ row }">
+            <div class="path-flow">
+              <div class="path-row source" :title="row.original_path">
+                <span class="label">源</span>
+                <span class="path">{{ extractFilename(row.original_path) }}</span>
+              </div>
+              <div class="arrow-row" v-if="row.target_path">
+                <el-icon><Bottom /></el-icon>
+              </div>
+              <div class="path-row target" v-if="row.target_path" :title="row.target_path">
+                <span class="label">标</span>
+                <span class="path">{{ extractFilename(row.target_path) }}</span>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="方式" width="90" align="center">
+          <template #default>
+            <el-tag effect="light" round>硬链接</el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="大小" width="110" align="right">
+          <template #default="{ row }">{{ formatSize(row.size) }}</template>
+        </el-table-column>
+
+        <el-table-column label="时间/状态" width="150" align="right">
+          <template #default="{ row }">
+            <div class="status-cell">
+              <div class="time">{{ formatTime(row.created_at) }}</div>
+              <el-tag :type="statusType(row.status)" size="small" effect="dark">
+                {{ statusText(row.status) }}
+              </el-tag>
+            </div>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="操作" width="80" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              type="primary"
+              link
+              size="small"
+              :disabled="row.is_directory_pending"
+              :title="row.is_directory_pending ? '目录级待办不支持直接修正，请先手动整理目录后重扫' : ''"
+              @click="openFixDialog(row)"
+            >
+              修正
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
+import { mediaApi, syncGroupsApi } from '../api/client'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import dayjs from 'dayjs'
+
+const route = useRoute()
+const rawItems = ref([])
+const allSeasonRows = ref([])
+const seasonRows = ref([])
+const total = ref(0)
+const loading = ref(false)
+const page = ref(1)
+const pageSize = ref(20)
+const filters = reactive({ type: '', category: 'all', search: '' })
+
+const fixDialogVisible = ref(false)
+const fixing = ref(false)
+const currentFixRow = ref(null)
+const seasonDrawerVisible = ref(false)
+const seasonDrawerLoading = ref(false)
+const seasonDrawerTitle = ref('')
+const seasonDrawerDir = ref('')
+const seasonDrawerItems = ref([])
+const posterCache = reactive({})
+const tmdbMetaCache = reactive({})
+const syncGroupRootNames = reactive({})
+const globalRootNames = ref(new Set())
+const fixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode: 1 })
+
+function extractFilename(path) {
+  if (!path) return ''
+  return path.split(/[/\\]/).pop()
+}
+
+function extractRootName(path) {
+  if (!path) return ''
+  const normalized = String(path).replace(/\\/g, '/').replace(/\/+$/, '')
+  if (!normalized) return ''
+  const seg = normalized.split('/').filter(Boolean)
+  return (seg.pop() || '').trim()
+}
+
+function normalizePath(path) {
+  return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+function splitPathParts(path) {
+  return normalizePath(path).split('/').filter(Boolean)
+}
+
+function isAncestorPath(ancestor, child) {
+  const a = normalizePath(ancestor).toLowerCase()
+  const c = normalizePath(child).toLowerCase()
+  if (!a || !c) return false
+  return c === a || c.startsWith(`${a}/`)
+}
+
+function extractTargetDir(path) {
+  if (!path) return ''
+  const parts = path.split(/[/\\]/).filter(Boolean)
+  if (parts.length <= 1) return path
+  return path.replace(/[/\\][^/\\]+$/, '')
+}
+
+function extractSeasonDir(path) {
+  if (!path) return ''
+  const normalized = String(path).replace(/\\/g, '/')
+  const m = normalized.match(/^(.*\/Season\s+\d{1,2})(?:\/|$)/i)
+  if (m?.[1]) return m[1]
+  return extractTargetDir(path)
+}
+
+function extractSeasonLabelFromPath(path) {
+  if (!path) return 'Season --'
+  const normalized = String(path).replace(/\\/g, '/')
+  const m = normalized.match(/\/(Season\s+\d{1,2})(?:\/|$)/i)
+  if (!m?.[1]) return 'Season --'
+  const n = m[1].match(/\d+/)?.[0]
+  return n ? `Season ${String(Number(n)).padStart(2, '0')}` : m[1]
+}
+
+function extractResourceName(path, type) {
+  if (!path) return '-'
+  if (type === 'movie') {
+    const base = extractFilename(path).replace(/\.[^/.]+$/, '')
+    return base.replace(/\s*-\s*[\w.\- ]{2,20}$/i, '').trim()
+  }
+  const seasonDir = extractSeasonDir(path)
+  const showDir = extractTargetDir(seasonDir)
+  return String(extractFilename(showDir) || '-').replace(/\s*\[tmdbid=\d+\]/i, '').trim()
+}
+
+function buildPosterUrl(path) {
+  if (!path) return ''
+  return `https://image.tmdb.org/t/p/w185${path}`
+}
+
+function extractSeasonNumber(label) {
+  const n = String(label || '').match(/\d+/)?.[0]
+  return n ? Number(n) : null
+}
+
+function metaKeyForRow(row) {
+  return `${row?.type || 'tv'}:${row?.tmdb_id || ''}`
+}
+
+function posterKeyForRow(row) {
+  const base = metaKeyForRow(row)
+  const seasonNum = row?.type === 'tv' ? extractSeasonNumber(row?.season_label) : null
+  return seasonNum !== null ? `${base}:s${seasonNum}` : base
+}
+
+function getPosterUrl(row) {
+  const key = posterKeyForRow(row)
+  if (!row?.tmdb_id || !key) return ''
+  if (!posterCache[key]) {
+    loadTmdbMeta(row)
+    return ''
+  }
+  if (posterCache[key] === '__loading__') return ''
+  return posterCache[key]
+}
+
+function getResourceName(row) {
+  const key = metaKeyForRow(row)
+  const meta = tmdbMetaCache[key]
+  if (meta?.title) {
+    return meta.year ? `${meta.title} (${meta.year})` : meta.title
+  }
+  if (row?.tmdb_id) {
+    loadTmdbMeta(row.sample || row)
+    return `TMDB: ${row.tmdb_id}`
+  }
+  const fallback = String(row?.resource_name || '').trim()
+  return isSyncGroupRootFallbackName(row, fallback) ? '未识别资源' : (fallback || '未识别资源')
+}
+
+function isSyncGroupRootFallbackName(row, name) {
+  const value = String(name || '').trim().toLowerCase()
+  if (!value) return true
+  const groupId = row?.sample?.sync_group_id
+  if (groupId) {
+    const roots = syncGroupRootNames[groupId]
+    if (roots && roots.size) return roots.has(value)
+  }
+  return globalRootNames.value.has(value)
+}
+
+function saveSyncGroupRootNames(groups) {
+  const allNames = new Set()
+  for (const group of groups || []) {
+    const gid = group?.id
+    if (!gid) continue
+    const names = new Set()
+    const groupName = String(group?.name || '').trim()
+
+    const srcParts = splitPathParts(group?.source)
+    const dstParts = splitPathParts(group?.target)
+    for (const seg of [...srcParts, ...dstParts]) {
+      if (!seg) continue
+      const lowered = seg.toLowerCase()
+      names.add(lowered)
+      allNames.add(lowered)
+    }
+    if (groupName) {
+      const lowered = groupName.toLowerCase()
+      names.add(lowered)
+      allNames.add(lowered)
+    }
+    syncGroupRootNames[gid] = names
+  }
+  globalRootNames.value = allNames
+}
+
+async function loadSyncGroupsMeta() {
+  try {
+    const { data } = await syncGroupsApi.list()
+    saveSyncGroupRootNames(data || [])
+  } catch {
+    // ignore: fallback name filtering becomes no-op when sync groups are unavailable
+  }
+}
+
+async function loadTmdbMeta(row) {
+  const tmdbId = row?.tmdb_id
+  const mediaType = row?.type || 'tv'
+  const metaKey = `${mediaType}:${tmdbId || ''}`
+  const posterKey = posterKeyForRow(row)
+  if (!tmdbId || !posterKey || posterCache[posterKey] === '__loading__') return
+  posterCache[posterKey] = '__loading__'
+  try {
+    const seasonNum = mediaType === 'tv' ? extractSeasonNumber(row?.season_label) : null
+    if (seasonNum !== null) {
+      const { data: seasonData } = await mediaApi.seasonPoster({ tmdb_id: tmdbId, season: seasonNum })
+      const seasonPoster = buildPosterUrl(seasonData?.poster_path)
+      if (seasonPoster) {
+        posterCache[posterKey] = seasonPoster
+      }
+    }
+    const { data } = await mediaApi.searchTmdb({ q: String(tmdbId), media_type: mediaType, limit: 1 })
+    const item = data?.items?.[0]
+    if (!posterCache[posterKey] || posterCache[posterKey] === '__loading__') {
+      posterCache[posterKey] = buildPosterUrl(item?.poster_path) || ''
+    }
+    tmdbMetaCache[metaKey] = {
+      title: item?.title || '',
+      year: item?.year || null,
+    }
+  } catch {
+    posterCache[posterKey] = ''
+    tmdbMetaCache[metaKey] = { title: '', year: null }
+  }
+}
+
+function groupRows(records) {
+  const collapseByBucket = new Map()
+  const rowsWithDir = (records || []).map((row) => {
+    const basePath = row.target_path || row.original_path || ''
+    const displayDir = row.type === 'tv' ? extractSeasonDir(basePath) : extractTargetDir(basePath)
+    const bucket = `${row.type || ''}:${row.tmdb_id || 0}`
+    if (!collapseByBucket.has(bucket)) collapseByBucket.set(bucket, [])
+    collapseByBucket.get(bucket).push(displayDir)
+    return { row, basePath, displayDir, bucket }
+  })
+
+  const canonicalDirMap = new Map()
+  for (const [bucket, dirs] of collapseByBucket.entries()) {
+    const sorted = Array.from(new Set(dirs.map((d) => normalizePath(d)).filter(Boolean))).sort(
+      (a, b) => splitPathParts(a).length - splitPathParts(b).length
+    )
+    const selected = []
+    for (const dir of sorted) {
+      const parent = selected.find((x) => isAncestorPath(x, dir))
+      if (parent) {
+        canonicalDirMap.set(`${bucket}|${dir}`, parent)
+      } else {
+        selected.push(dir)
+        canonicalDirMap.set(`${bucket}|${dir}`, dir)
+      }
+    }
+  }
+
+  const map = new Map()
+  for (const x of rowsWithDir) {
+    const { row, basePath, displayDir, bucket } = x
+    const canonicalDir = canonicalDirMap.get(`${bucket}|${normalizePath(displayDir)}`) || displayDir
+    const key = `${bucket}:${canonicalDir}`
+    const latest = new Date(row.updated_at || row.created_at || 0).getTime()
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        type: row.type,
+        tmdb_id: row.tmdb_id,
+        season_dir: canonicalDir,
+        season_label: extractSeasonLabelFromPath(basePath),
+        resource_name: extractResourceName(basePath, row.type),
+        record_count: 1,
+        latest_updated_at: row.updated_at || row.created_at,
+        latest_ts: latest,
+        sample: row,
+      })
+      continue
+    }
+    const item = map.get(key)
+    item.record_count += 1
+    if (latest > item.latest_ts) {
+      item.latest_ts = latest
+      item.latest_updated_at = row.updated_at || row.created_at
+      item.sample = row
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => b.latest_ts - a.latest_ts)
+}
+
+function refreshPagedRows() {
+  total.value = allSeasonRows.value.length
+  const start = (page.value - 1) * pageSize.value
+  seasonRows.value = allSeasonRows.value.slice(start, start + pageSize.value)
+}
+
+function onFilterChanged() {
+  page.value = 1
+  loadMedia()
+}
+
+function openFixDialog(row) {
+  if (row.is_directory_pending) {
+    ElMessage.warning('目录级待办不支持直接修正，请先手动整理目录后重扫')
+    return
+  }
+  currentFixRow.value = row
+  fixForm.tmdb_id = row.tmdb_id || ''
+  fixForm.title = ''
+  fixForm.year = ''
+  fixForm.season = undefined
+  fixForm.episode = undefined
+  fixDialogVisible.value = true
+}
+
+async function submitFix() {
+  if (!fixForm.tmdb_id || !fixForm.title || !fixForm.year) {
+    ElMessage.warning('请填写完整的 TMDB 信息 (ID, 标题, 年份)')
+    return
+  }
+
+  fixing.value = true
+  try {
+    await mediaApi.reidentify(currentFixRow.value.id, {
+      tmdb_id: fixForm.tmdb_id,
+      title: fixForm.title,
+      year: fixForm.year,
+      season: fixForm.season,
+      episode: fixForm.episode,
+    })
+    ElMessage.success('修正成功')
+    fixDialogVisible.value = false
+    await loadMedia()
+    if (seasonDrawerVisible.value && seasonDrawerDir.value) {
+      const { data } = await mediaApi.byTargetDir({ target_dir: seasonDrawerDir.value, limit: 1000 })
+      seasonDrawerItems.value = data.items || []
+    }
+  } catch (e) {
+    ElMessage.error(`修正失败: ${e.response?.data?.detail || e.message}`)
+  } finally {
+    fixing.value = false
+  }
+}
+
+function statusType(s) {
+  const map = { pending: 'info', pending_manual: 'warning', linked: 'warning', scraped: 'success', error: 'danger' }
+  return map[s] || 'info'
+}
+
+function statusText(s) {
+  const map = { pending: '待处理', pending_manual: '待办(需确认)', linked: '已链接', scraped: '成功', error: '失败' }
+  return map[s] || s
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '-'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let n = Number(bytes)
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i += 1
+  }
+  return `${n.toFixed(2)} ${units[i]}`
+}
+
+function formatTime(t) {
+  if (!t) return '-'
+  return dayjs(t).format('YYYY-MM-DD HH:mm')
+}
+
+async function openSeasonDrawer(row) {
+  const seasonDir = row?.season_dir
+  if (!seasonDir) return
+  seasonDrawerVisible.value = true
+  seasonDrawerDir.value = seasonDir
+  seasonDrawerTitle.value = `${getResourceName(row)} · ${row.season_label}`
+  seasonDrawerLoading.value = true
+  try {
+    const { data } = await mediaApi.byTargetDir({ target_dir: seasonDir, limit: 1000 })
+    seasonDrawerItems.value = data.items || []
+  } catch (e) {
+    seasonDrawerItems.value = []
+    ElMessage.error(e?.response?.data?.detail || '加载季目录记录失败')
+  } finally {
+    seasonDrawerLoading.value = false
+  }
+}
+
+async function loadMedia() {
+  loading.value = true
+  try {
+    const { data } = await mediaApi.list({
+      type: filters.type || undefined,
+      category: filters.category || 'all',
+      search: filters.search || undefined,
+      offset: 0,
+      limit: 2000,
+    })
+    rawItems.value = (data.items || []).filter((x) => String(x?.target_path || '').trim())
+    allSeasonRows.value = groupRows(rawItems.value)
+    refreshPagedRows()
+    for (const row of allSeasonRows.value) {
+      getPosterUrl(row)
+    }
+  } catch {
+    rawItems.value = []
+    allSeasonRows.value = []
+    seasonRows.value = []
+    total.value = 0
+  } finally {
+    loading.value = false
+  }
+}
+
+async function deduplicateRecords() {
+  try {
+    await ElMessageBox.confirm('将按“同步组 + 源路径”只保留最新一条媒体记录。是否继续？', '确认去重', { type: 'warning' })
+    const { data } = await mediaApi.deduplicate()
+    ElMessage.success(data.message || '去重完成')
+    loadMedia()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('去重失败')
+  }
+}
+
+onMounted(() => {
+  if (route.query.search) filters.search = String(route.query.search)
+  loadSyncGroupsMeta()
+  loadMedia()
+})
+</script>
+
+<style scoped>
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.header-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.table-card {
+  border: none;
+  background: transparent;
+}
+
+:deep(.el-table) {
+  background-color: transparent;
+  --el-table-tr-bg-color: transparent;
+}
+
+.title-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.media-icon {
+  margin-top: 2px;
+  color: #94a3b8;
+}
+
+.poster-thumb {
+  width: 44px;
+  height: 66px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+  background: #e5e7eb;
+}
+
+.poster-fallback {
+  width: 44px;
+  height: 66px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: #f1f5f9;
+}
+
+.title-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.main-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #111827;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.sub-info {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.season-link {
+  color: #2563eb;
+  font-weight: 500;
+}
+
+.type-tag {
+  transform: scale(0.9);
+  transform-origin: left;
+}
+
+.path-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.path-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #64748b;
+}
+
+.path-row.source .path {
+  color: #64748b;
+}
+
+.path-row.target .path {
+  color: #111827;
+}
+
+.label {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.6;
+  width: 14px;
+}
+
+.path {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.arrow-row {
+  padding-left: 22px;
+  color: #94a3b8;
+  line-height: 1;
+}
+
+.status-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.time {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.pagination-container {
+  margin-top: 24px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.drawer-path {
+  margin-bottom: 10px;
+  color: #64748b;
+  word-break: break-all;
+}
+
+.drawer-header-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+</style>

@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  anime-media-manager:
+    build:
+      context: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-100}
+    volumes:
+      - /media:/media
+      - amm-data:/app/data
+      - amm-logs:/app/logs
+
+volumes:
+  amm-data:
+  amm-logs:

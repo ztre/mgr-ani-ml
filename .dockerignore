@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+logs/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*:Zone.Identifier

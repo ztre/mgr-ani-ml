@@ -1,0 +1,93 @@
+"""Task log file utilities and APIs."""
+from __future__ import annotations
+
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from fastapi import APIRouter, Query
+
+from ..config import settings
+
+router = APIRouter()
+
+LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+current_task_id: ContextVar[int | None] = ContextVar("current_task_id", default=None)
+_last_cleanup_at: datetime | None = None
+
+
+def append_log(message: str) -> None:
+    task_id = current_task_id.get()
+    if not task_id:
+        return
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{now}] {message}\n"
+    path = LOG_DIR / f"task_{task_id}.log"
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+def _tail_lines(path: Path, limit: int) -> list[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        return lines[-limit:]
+    except Exception:
+        return ["读取日志失败"]
+
+
+def cleanup_logs_if_needed(force: bool = False) -> None:
+    global _last_cleanup_at
+    now = datetime.now(timezone.utc)
+    interval = max(60, int(settings.log_cleanup_interval_seconds or 600))
+    if not force and _last_cleanup_at and (now - _last_cleanup_at).total_seconds() < interval:
+        return
+    _last_cleanup_at = now
+
+    retention_days = max(0, int(settings.log_retention_days or 14))
+    max_files = max(10, int(settings.log_max_task_files or 200))
+
+    files = sorted(LOG_DIR.glob("task_*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
+
+    if retention_days > 0:
+        cutoff = now - timedelta(days=retention_days)
+        for p in files:
+            try:
+                mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+            except Exception:
+                continue
+            if mtime < cutoff:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+    files = sorted(LOG_DIR.glob("task_*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    overflow = len(files) - max_files
+    if overflow > 0:
+        for p in files[:overflow]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+@router.get("")
+def list_logs(limit: int = Query(200, ge=1, le=5000)):
+    cleanup_logs_if_needed()
+    files = sorted(LOG_DIR.glob("task_*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    out = []
+    for p in files[:limit]:
+        out.append(
+            {
+                "name": p.name,
+                "size": p.stat().st_size if p.exists() else 0,
+                "updated_at": datetime.fromtimestamp(p.stat().st_mtime).isoformat() if p.exists() else None,
+            }
+        )
+    return {"items": out}
