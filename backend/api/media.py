@@ -11,14 +11,15 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, text
 from sqlalchemy.orm import Session
 
+from .logs import append_log, current_task_id
 from ..config import settings
 from ..database import get_db
 from ..models import DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
 from ..services.group_routing import resolve_movie_target_root
 from ..services.linker import get_inode
-from ..services.metadata import scrape_movie_metadata, scrape_tv_metadata
 from ..services.parser import parse_movie_filename, parse_tv_filename
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
+from ..services.scanner import DirectoryProcessError, run_manual_organize, tag_task_type_with_issue
 
 router = APIRouter()
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
@@ -188,8 +189,11 @@ def search_tmdb(
     url = f"https://api.themoviedb.org/3/search/{endpoint}"
     params = {"api_key": settings.tmdb_api_key, "query": keyword, "language": "zh-CN"}
 
-    with httpx.Client(timeout=15) as client:
-        resp = client.get(url, params=params)
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(url, params=params)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"TMDB 搜索请求失败: {e}")
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail=f"TMDB 搜索失败: {resp.status_code}")
 
@@ -209,8 +213,11 @@ def get_season_poster(
 
     url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}"
     params = {"api_key": settings.tmdb_api_key, "language": "zh-CN"}
-    with httpx.Client(timeout=15) as client:
-        resp = client.get(url, params=params)
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(url, params=params)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"TMDB 季封面请求失败: {e}")
     if resp.status_code == 404:
         return {"poster_path": None}
     if resp.status_code != 200:
@@ -307,114 +314,50 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
     )
     db.add(task)
     db.commit()
+    db.refresh(task)
+    token = current_task_id.set(task.id)
 
-    tv_target = Path(group.target)
-    movie_target, reason = resolve_movie_target_root(db, group)
-    if data.media_type == "movie" and movie_target is None:
+    try:
+        append_log(
+            f"手动整理任务启动: media_id={media_id}, group={group.name}, "
+            f"dir={root_dir}, media_type={data.media_type}, tmdb_id={data.tmdb_id}"
+        )
+        processed, failed, has_issues = run_manual_organize(
+            db=db,
+            pending=pending,
+            group=group,
+            media_type=data.media_type,
+            tmdb_id=data.tmdb_id,
+            title_override=data.title,
+            year_override=data.year,
+            season_override=data.season,
+        )
+        task.status = "completed" if failed == 0 else "failed"
+        if has_issues:
+            task.type = tag_task_type_with_issue(task.type)
+            append_log("手动整理完成但存在问题项（Special 冲突已跳过）")
+        task.finished_at = datetime.utcnow()
+        append_log(f"手动整理完成: 成功 {processed}，失败 {failed}")
+        db.commit()
+
+        return {
+            "message": f"手动整理完成: 成功 {processed}，失败 {failed}",
+            "processed": processed,
+            "failed": failed,
+        }
+    except DirectoryProcessError as e:
         task.status = "failed"
         task.finished_at = datetime.utcnow()
+        append_log(f"手动整理失败: {e}")
         db.commit()
-        raise HTTPException(status_code=400, detail=f"电影目标路径不可决策: {reason}")
-
-    tmdb_data = _tmdb_get_by_id(data.media_type, data.tmdb_id)
-    if not tmdb_data:
-        task.status = "failed"
-        task.finished_at = datetime.utcnow()
-        db.commit()
-        raise HTTPException(status_code=400, detail="TMDB 条目不存在")
-
-    title = (data.title or "").strip() or (tmdb_data.get("name") or tmdb_data.get("title") or "Unknown")
-    year = data.year if data.year is not None else _extract_year_from_tmdb(data.media_type, tmdb_data)
-
-    files = sorted([p for p in root_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv", ".ass", ".srt", ".ssa", ".vtt", ".mka"}], key=lambda p: p.as_posix())
-    if not files:
-        task.status = "failed"
-        task.finished_at = datetime.utcnow()
-        db.commit()
-        raise HTTPException(status_code=400, detail="待办目录中没有可处理媒体")
-
-    processed = 0
-    failed = 0
-    scraped_dirs: set[str] = set()
-
-    for src in files:
-        if data.media_type == "tv":
-            pr = parse_tv_filename(str(src)) or parse_movie_filename(str(src))
-        else:
-            pr = parse_movie_filename(str(src)) or parse_tv_filename(str(src))
-
-        if not pr:
-            failed += 1
-            continue
-
-        pr = pr._replace(title=title, year=year)
-        if data.media_type == "tv" and data.season is not None:
-            pr = pr._replace(season=max(0, data.season))
-
-        target_root = tv_target if data.media_type == "tv" else movie_target
-        ext = src.suffix.lower()
-        dst = compute_tv_target_path(target_root, pr, data.tmdb_id, ext) if data.media_type == "tv" else compute_movie_target_path(target_root, pr, data.tmdb_id, ext)
-
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        task.log_file = f"task_{task.id}.log"
         try:
-            _link_or_fail(src, dst)
+            db.commit()
         except Exception:
-            failed += 1
-            continue
-
-        existing = db.query(MediaRecord).filter(MediaRecord.sync_group_id == group.id, MediaRecord.original_path == str(src)).first()
-        if existing:
-            existing.target_path = str(dst)
-            existing.type = data.media_type
-            existing.tmdb_id = data.tmdb_id
-            existing.status = "manual_fixed"
-            existing.size = _safe_size(src)
-        else:
-            db.add(
-                MediaRecord(
-                    sync_group_id=group.id,
-                    original_path=str(src),
-                    target_path=str(dst),
-                    type=data.media_type,
-                    tmdb_id=data.tmdb_id,
-                    bangumi_id=None,
-                    status="manual_fixed",
-                    size=_safe_size(src),
-                )
-            )
-
-        ino = get_inode(src)
-        if ino:
-            inode_row = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
-            if inode_row:
-                inode_row.source_path = str(src)
-                inode_row.target_path = str(dst)
-                inode_row.sync_group_id = group.id
-                inode_row.size = _safe_size(src)
-            else:
-                db.add(InodeRecord(inode=ino, source_path=str(src), target_path=str(dst), sync_group_id=group.id, size=_safe_size(src)))
-
-        if src.suffix.lower() in {".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv"}:
-            show_dir = dst.parent if data.media_type == "movie" else _resolve_tv_show_dir(dst)
-            key = str(show_dir)
-            if key not in scraped_dirs:
-                if data.media_type == "tv":
-                    scrape_tv_metadata(show_dir, tmdb_data)
-                else:
-                    scrape_movie_metadata(show_dir, tmdb_data)
-                scraped_dirs.add(key)
-
-        processed += 1
-
-    db.delete(pending)
-    task.status = "completed" if failed == 0 else "failed"
-    task.finished_at = datetime.utcnow()
-    db.commit()
-
-    return {
-        "message": f"手动整理完成: 成功 {processed}，失败 {failed}",
-        "processed": processed,
-        "failed": failed,
-    }
+            db.rollback()
+        current_task_id.reset(token)
 
 
 @router.post("/batch-delete")
@@ -480,8 +423,11 @@ def _tmdb_get_by_id(media_type: str, tmdb_id: int) -> dict | None:
     endpoint = "tv" if media_type == "tv" else "movie"
     url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}"
     params = {"api_key": settings.tmdb_api_key, "language": "zh-CN"}
-    with httpx.Client(timeout=15) as client:
-        resp = client.get(url, params=params)
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(url, params=params)
+    except Exception:
+        return None
     if resp.status_code != 200:
         return None
     data = resp.json()
@@ -506,19 +452,6 @@ def _format_tmdb_item(media_type: str, item: dict) -> dict:
     }
 
 
-def _extract_year_from_tmdb(media_type: str, item: dict) -> int | None:
-    date_value = item.get("first_air_date") if media_type == "tv" else item.get("release_date")
-    s = str(date_value or "")
-    return int(s[:4]) if s[:4].isdigit() else None
-
-
-def _safe_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
 def _link_or_fail(src: Path, dst: Path) -> None:
     if not src.exists():
         raise RuntimeError("source not found")
@@ -530,17 +463,6 @@ def _link_or_fail(src: Path, dst: Path) -> None:
     import os
 
     os.link(str(src), str(dst))
-
-
-def _resolve_tv_show_dir(path: Path) -> Path:
-    current = path.parent
-    while current.parent != current:
-        name = current.name.lower()
-        if name == "specials" or name.startswith("season "):
-            return current.parent
-        current = current.parent
-    return path.parent
-
 
 def _media_to_dict(row: MediaRecord) -> dict:
     is_dir_pending = False

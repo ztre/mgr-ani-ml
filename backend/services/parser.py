@@ -312,7 +312,7 @@ def _cache_set(key: tuple, value: object) -> None:
 
 # ----- Regex helpers -----
 def _stem(filename: str) -> str:
-    return Path(filename).stem if "/" in filename or "\\" in filename else filename
+    return Path(filename).stem
 
 
 def _preprocess(text: str) -> str:

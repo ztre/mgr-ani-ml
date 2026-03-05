@@ -15,6 +15,7 @@ env/
 .env.local
 
 # Runtime data
+data/
 logs/
 *.log
 *.db

@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   anime-media-manager:
     build:
@@ -12,9 +10,5 @@ services:
       - PGID=${PGID:-100}
     volumes:
       - /media:/media
-      - amm-data:/app/data
-      - amm-logs:/app/logs
-
-volumes:
-  amm-data:
-  amm-logs:
+      - ${AMM_ROOT_DIR:-/app/amm-state}/data:/app/data
+      - ${AMM_ROOT_DIR:-/app/amm-state}/logs:/app/logs

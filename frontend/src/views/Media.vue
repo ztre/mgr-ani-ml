@@ -68,6 +68,20 @@
             {{ formatTime(row.latest_updated_at) }}
           </template>
         </el-table-column>
+
+        <el-table-column label="操作" width="130" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-dropdown trigger="click" @command="(cmd) => onDeleteResourceCommand(row, cmd)">
+              <el-button type="danger" link size="small">删除资源</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="records">仅删除该资源记录</el-dropdown-item>
+                  <el-dropdown-item command="records_and_links">删除该资源 + 硬链接</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </template>
+        </el-table-column>
       </el-table>
 
       <div class="pagination-container">
@@ -123,28 +137,67 @@
     >
       <div class="drawer-path">{{ seasonDrawerDir }}</div>
       <div class="drawer-header-actions">
-        <el-input
-          v-model="filters.search"
-          placeholder="搜索文件名..."
-          clearable
-          style="width: 220px"
-          @clear="onFilterChanged"
-          @keyup.enter="onFilterChanged"
-        />
-        <el-select v-model="filters.type" placeholder="类型" clearable style="width: 100px" @change="onFilterChanged">
-          <el-option label="TV" value="tv" />
-          <el-option label="电影" value="movie" />
-        </el-select>
-        <el-select v-model="filters.category" placeholder="分类" style="width: 120px" @change="onFilterChanged">
-          <el-option label="全部" value="all" />
-          <el-option label="正片" value="main" />
-          <el-option label="SPs/Extras" value="sps" />
-        </el-select>
-        <el-button @click="loadMedia" :loading="loading">
-          <el-icon><Refresh /></el-icon>
-        </el-button>
+        <div class="drawer-filters">
+          <el-input
+            v-model="filters.search"
+            placeholder="搜索文件名..."
+            clearable
+            style="width: 220px"
+            @clear="onFilterChanged"
+            @keyup.enter="onFilterChanged"
+          />
+          <el-select v-model="filters.type" placeholder="类型" clearable style="width: 100px" @change="onFilterChanged">
+            <el-option label="TV" value="tv" />
+            <el-option label="电影" value="movie" />
+          </el-select>
+          <el-select v-model="filters.category" placeholder="分类" style="width: 120px" @change="onFilterChanged">
+            <el-option label="全部" value="all" />
+            <el-option label="正片" value="main" />
+            <el-option label="SPs/Extras" value="sps" />
+          </el-select>
+          <el-button @click="loadMedia" :loading="loading">
+            <el-icon><Refresh /></el-icon>
+          </el-button>
+        </div>
+        <div class="drawer-danger-actions">
+          <el-button
+            type="danger"
+            plain
+            size="small"
+            :disabled="seasonDrawerSelectedRows.length === 0"
+            @click="deleteDrawerSelected(false)"
+          >
+            删除选中记录
+          </el-button>
+          <el-button
+            type="danger"
+            size="small"
+            :disabled="seasonDrawerSelectedRows.length === 0"
+            @click="deleteDrawerSelected(true)"
+          >
+            删除选中+硬链接
+          </el-button>
+          <el-dropdown trigger="click" @command="onDeleteDrawerResourceCommand">
+            <el-button type="danger" plain size="small">
+              删除当前资源
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="records">仅删除该资源记录</el-dropdown-item>
+                <el-dropdown-item command="records_and_links">删除该资源 + 硬链接</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
       </div>
-      <el-table :data="seasonDrawerItems" v-loading="seasonDrawerLoading" stripe style="width: 100%">
+      <el-table
+        :data="seasonDrawerItems"
+        v-loading="seasonDrawerLoading"
+        stripe
+        style="width: 100%"
+        @selection-change="onDrawerSelectionChange"
+      >
+        <el-table-column type="selection" width="50" />
         <el-table-column label="文件名" min-width="300">
           <template #default="{ row }">
             <div class="path-flow">
@@ -184,7 +237,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="80" align="center" fixed="right">
+        <el-table-column label="操作" width="130" align="center" fixed="right">
           <template #default="{ row }">
             <el-button
               type="primary"
@@ -196,6 +249,15 @@
             >
               修正
             </el-button>
+            <el-dropdown trigger="click" @command="(cmd) => onDeleteDrawerRowCommand(row, cmd)">
+              <el-button type="danger" link size="small">删除</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="records">仅删记录</el-dropdown-item>
+                  <el-dropdown-item command="records_and_links">记录+硬链接</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
       </el-table>
@@ -228,6 +290,7 @@ const seasonDrawerLoading = ref(false)
 const seasonDrawerTitle = ref('')
 const seasonDrawerDir = ref('')
 const seasonDrawerItems = ref([])
+const seasonDrawerSelectedRows = ref([])
 const posterCache = reactive({})
 const tmdbMetaCache = reactive({})
 const syncGroupRootNames = reactive({})
@@ -490,6 +553,10 @@ function onFilterChanged() {
   loadMedia()
 }
 
+function onDrawerSelectionChange(rows) {
+  seasonDrawerSelectedRows.value = rows || []
+}
+
 function openFixDialog(row) {
   if (row.is_directory_pending) {
     ElMessage.warning('目录级待办不支持直接修正，请先手动整理目录后重扫')
@@ -570,11 +637,112 @@ async function openSeasonDrawer(row) {
   try {
     const { data } = await mediaApi.byTargetDir({ target_dir: seasonDir, limit: 1000 })
     seasonDrawerItems.value = data.items || []
+    seasonDrawerSelectedRows.value = []
   } catch (e) {
     seasonDrawerItems.value = []
     ElMessage.error(e?.response?.data?.detail || '加载季目录记录失败')
   } finally {
     seasonDrawerLoading.value = false
+  }
+}
+
+async function refreshSeasonDrawerItems() {
+  if (!seasonDrawerDir.value) return
+  const { data } = await mediaApi.byTargetDir({ target_dir: seasonDrawerDir.value, limit: 1000 })
+  seasonDrawerItems.value = data.items || []
+  seasonDrawerSelectedRows.value = []
+}
+
+async function deleteByIds(ids, deleteFiles, sceneName) {
+  const validIds = (ids || []).filter((x) => Number.isFinite(Number(x))).map((x) => Number(x))
+  if (!validIds.length) {
+    ElMessage.warning('没有可删除的记录')
+    return false
+  }
+  const hint = deleteFiles ? '并删除硬链接文件' : '仅删除媒体记录'
+  await ElMessageBox.confirm(
+    `确认删除 ${validIds.length} 条记录？\n操作将${hint}。`,
+    sceneName || '确认删除',
+    {
+      type: 'warning',
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+    },
+  )
+  const { data } = await mediaApi.batchDelete({
+    ids: validIds,
+    delete_files: !!deleteFiles,
+  })
+  ElMessage.success(
+    `删除完成：记录 ${data?.deleted_records || 0} 条，文件 ${data?.deleted_files || 0} 个`,
+  )
+  return true
+}
+
+async function onDeleteDrawerRowCommand(row, command) {
+  try {
+    const ok = await deleteByIds([row?.id], command === 'records_and_links', '删除当前记录')
+    if (!ok) return
+    await loadMedia()
+    await refreshSeasonDrawerItems()
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.detail || '删除失败')
+    }
+  }
+}
+
+async function deleteDrawerSelected(deleteFiles) {
+  try {
+    const ids = seasonDrawerSelectedRows.value.map((x) => x.id)
+    const ok = await deleteByIds(ids, deleteFiles, '删除选中记录')
+    if (!ok) return
+    await loadMedia()
+    await refreshSeasonDrawerItems()
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.detail || '删除失败')
+    }
+  }
+}
+
+async function deleteResourceByDir(targetDir, deleteFiles) {
+  if (!targetDir) {
+    ElMessage.warning('缺少资源目录信息')
+    return
+  }
+  const { data } = await mediaApi.byTargetDir({ target_dir: targetDir, limit: 2000 })
+  const ids = (data?.items || []).map((x) => x.id)
+  return deleteByIds(ids, deleteFiles, '删除整组资源')
+}
+
+async function onDeleteDrawerResourceCommand(command) {
+  try {
+    const ok = await deleteResourceByDir(seasonDrawerDir.value, command === 'records_and_links')
+    if (!ok) return
+    await loadMedia()
+    if (seasonDrawerVisible.value) {
+      await refreshSeasonDrawerItems()
+    }
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.detail || '删除失败')
+    }
+  }
+}
+
+async function onDeleteResourceCommand(row, command) {
+  try {
+    const ok = await deleteResourceByDir(row?.season_dir, command === 'records_and_links')
+    if (!ok) return
+    await loadMedia()
+    if (seasonDrawerVisible.value && seasonDrawerDir.value === row?.season_dir) {
+      await refreshSeasonDrawerItems()
+    }
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.detail || '删除失败')
+    }
   }
 }
 
@@ -784,9 +952,24 @@ onMounted(() => {
 
 .drawer-header-actions {
   display: flex;
-  gap: 12px;
-  align-items: center;
+  gap: 10px 14px;
+  align-items: flex-start;
+  justify-content: space-between;
   flex-wrap: wrap;
   margin-bottom: 12px;
+}
+
+.drawer-filters {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.drawer-danger-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 </style>

@@ -56,7 +56,9 @@ def require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(bear
 
 
 def _secret() -> bytes:
-    secret = (settings.auth_secret or "").strip() or settings.database_url
+    secret = (settings.auth_secret or "").strip()
+    if not secret:
+        raise RuntimeError("AUTH_SECRET 未配置")
     return secret.encode("utf-8")
 
 

@@ -8,13 +8,6 @@
 - 媒体记录：按资源聚合展示，右侧抽屉查看明细
 - Inode 管理：支持筛选、清理、批量删除
 - 配置中心：TMDB/Emby 与整理策略统一由网页填写与保存
-- 深色主题：GitHub Dark 风格中性灰阶
-
-## 重要约束（本项目当前行为）
-
-- `AMM_*` 不再作为容器环境变量配置入口。
-- 识别/刮削/Emby 等业务配置必须在网页 **配置** 页面填写并保存。
-- Docker 仅保留运行用户映射环境变量：`PUID`、`PGID`。
 
 ## 本地开发
 
@@ -38,7 +31,9 @@ npm run dev
 
 ```bash
 cp .env.example .env
-# 默认：PUID=1000, PGID=100
+# 默认：
+# PUID=1000, PGID=100
+# AMM_ROOT_DIR=/app/amm-state
 ```
 
 ### 2) 构建并启动
@@ -67,27 +62,9 @@ http://localhost:8000
 2. 若为 SQLite 且本地 DB 文件不存在：自动创建目录并创建空文件
 3. 自动建表（`Base.metadata.create_all`）
 
-默认 Docker 路径为：`/app/data/anime_media.db`（由卷 `amm-data` 持久化）
+默认 Docker 路径为：`/app/data/anime_media.db`（映射到宿主机 `${AMM_ROOT_DIR}/data`）
 
-## GitHub 上传前建议
-
-已配置忽略规则（`.gitignore` / `.dockerignore`）：
-
-- 数据库文件：`*.db`, `*.sqlite*`
-- 运行日志：`logs/`, `*.log`
-- 前端产物与依赖：`frontend/dist/`, `frontend/node_modules/`
-- 本地环境文件：`.env`, `.env.*`
-
-推荐上传流程：
-
-```bash
-git init
-git add .
-git commit -m "chore: prepare dockerized release"
-git branch -M main
-git remote add origin <your-github-repo-url>
-git push -u origin main
-```
+配置文件默认路径为：`/app/data/.env`（首次启动自动生成，位于 `${AMM_ROOT_DIR}/data`）
 
 ## Docker 镜像打包
 

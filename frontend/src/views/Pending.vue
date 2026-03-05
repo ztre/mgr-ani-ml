@@ -252,9 +252,10 @@ async function submitOrganize() {
       media_type: form.media_type,
       season: form.media_type === 'tv' ? (form.season ?? null) : null,
     }
+    dialogVisible.value = false
+    ElMessage.info('任务已提交，请关注首页日志记录')
     const { data } = await mediaApi.manualOrganize(currentRow.value.id, payload)
     ElMessage.success(data.message || '整理完成')
-    dialogVisible.value = false
     await loadPending()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '整理失败')

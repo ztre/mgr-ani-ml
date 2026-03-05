@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 
 import httpx
 from sqlalchemy.orm import Session
@@ -27,6 +28,7 @@ TRAILER_PATTERN = re.compile(
     r"\b(Preview\d*|Web\s*Preview\d*|CM\d*|SPOT\d*|PV\d*|Trailer\d*|Teaser\d*)\b",
     re.I,
 )
+SCAN_LOCK = Lock()
 
 
 @dataclass
@@ -38,6 +40,11 @@ class OperationLog:
 
 class DirectoryProcessError(Exception):
     pass
+
+
+def tag_task_type_with_issue(task_type: str) -> str:
+    base = str(task_type or "").strip() or "scan"
+    return base if base.endswith(":issue") else f"{base}:issue"
 
 
 def run_scan(
@@ -75,7 +82,15 @@ def run_scan(
             pass
 
     token = current_task_id.set(task.id)
+    acquired = SCAN_LOCK.acquire(blocking=False)
     try:
+        if not acquired:
+            append_log("已有扫描任务在运行，本次任务被拒绝以避免并发冲突")
+            task.status = "failed"
+            task.finished_at = datetime.utcnow()
+            db.commit()
+            return
+
         append_log(f"任务启动: ID={task.id}, 类型={task.type}")
 
         if not settings.tmdb_api_key:
@@ -92,15 +107,21 @@ def run_scan(
         append_log(f"开始扫描，共 {len(groups)} 个同步组")
 
         first_scanned_dir_name = None
+        has_issues = False
         try:
             for group in groups:
                 append_log(f"处理同步组: {group.name}")
-                group_first_dir = _process_sync_group(db, group)
+                group_first_dir, group_has_issues = _process_sync_group(db, group)
                 if first_scanned_dir_name is None and group_first_dir:
                     first_scanned_dir_name = group_first_dir
+                if group_has_issues:
+                    has_issues = True
 
             if first_scanned_dir_name and not target_name_override and task.type in {"group", "full"}:
                 task.target_name = first_scanned_dir_name
+            if has_issues:
+                append_log("扫描完成但存在问题项（已打标记）")
+                task.type = tag_task_type_with_issue(task.type)
 
             append_log("扫描完成，刷新 Emby...")
             refresh_emby_library()
@@ -120,10 +141,127 @@ def run_scan(
         except Exception as e:
             append_log(f"无法更新任务状态: {e}")
             db.rollback()
+        if acquired:
+            SCAN_LOCK.release()
         current_task_id.reset(token)
 
 
-def _process_sync_group(db: Session, group: SyncGroup) -> str | None:
+def run_manual_organize(
+    db: Session,
+    pending: MediaRecord,
+    group: SyncGroup,
+    media_type: str,
+    tmdb_id: int,
+    title_override: str | None = None,
+    year_override: int | None = None,
+    season_override: int | None = None,
+) -> tuple[int, int, bool]:
+    root_dir = Path(pending.original_path or "")
+    if not root_dir.exists() or not root_dir.is_dir():
+        raise DirectoryProcessError("待办目录不存在或不是目录")
+
+    if media_type not in {"tv", "movie"}:
+        raise DirectoryProcessError("media_type 必须是 tv 或 movie")
+
+    if not settings.tmdb_api_key:
+        raise DirectoryProcessError("未配置 TMDB API Key")
+
+    tmdb_data = _get_tmdb_item_by_id(media_type, tmdb_id)
+    if not tmdb_data:
+        raise DirectoryProcessError(f"TMDB 条目不存在: {tmdb_id}")
+
+    tv_target_root = Path(group.target)
+    movie_target_root, movie_route_reason = resolve_movie_target_root(db, group, source_path=root_dir)
+    if media_type == "movie" and movie_target_root is None:
+        raise DirectoryProcessError(f"电影目标路径不可决策: {movie_route_reason}")
+
+    target_root = tv_target_root if media_type == "tv" else movie_target_root
+    year_from_tmdb = _extract_year_from_tmdb_item(media_type, tmdb_data)
+    year = year_override if year_override is not None else year_from_tmdb
+    fallback_title = str(tmdb_data.get("name") or tmdb_data.get("title") or "Unknown")
+    resolved_title = (title_override or "").strip() or _resolve_chinese_title_by_tmdb(
+        media_type=media_type,
+        tmdb_id=tmdb_id,
+        fallback_title=fallback_title,
+    )
+
+    context = {
+        "media_type": media_type,
+        "tmdb_id": tmdb_id,
+        "tmdb_data": tmdb_data,
+        "title": resolved_title,
+        "year": year,
+        "target_root": str(target_root),
+        "score": 1.0,
+        "fallback_round": 0,
+        "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
+        "special_hint": False,
+        "record_status": "manual_fixed",
+        "_has_issues": False,
+    }
+
+    if media_type == "tv":
+        stable_ok, stable_reason = _stabilize_directory_context(root_dir, context)
+        if not stable_ok:
+            raise DirectoryProcessError(f"目录稳定决策失败: {stable_reason}")
+
+    include = group.include or ""
+    exclude = group.exclude or ""
+    source_root = Path(group.source)
+    media_files = _collect_media_files_under_dir(root_dir, include, exclude, source_root)
+    if not media_files:
+        raise DirectoryProcessError("待办目录中没有可处理媒体")
+
+    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
+    attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
+    seen_targets: dict[Path, Path] = {}
+    op_log = OperationLog()
+    dir_runtime: dict = {
+        "video_anchor_by_parent": {},
+        "video_anchor_by_parent_episode": {},
+    }
+
+    append_log(
+        f"手动整理进入扫描主流程: group={group.name}, dir={root_dir}, media_type={media_type}, "
+        f"tmdb_id={tmdb_id}, title={resolved_title}, files={len(media_files)}"
+    )
+
+    processed = 0
+    try:
+        for src_path in video_files:
+            _process_file(
+                db=db,
+                src_path=src_path,
+                sync_group_id=group.id,
+                context=context,
+                seen_targets=seen_targets,
+                op_log=op_log,
+                dir_runtime=dir_runtime,
+            )
+            processed += 1
+
+        for src_path in attachment_files:
+            _process_file(
+                db=db,
+                src_path=src_path,
+                sync_group_id=group.id,
+                context=context,
+                seen_targets=seen_targets,
+                op_log=op_log,
+                dir_runtime=dir_runtime,
+            )
+            processed += 1
+
+        db.delete(pending)
+        db.commit()
+        return processed, 0, bool(context.get("_has_issues"))
+    except DirectoryProcessError:
+        db.rollback()
+        _rollback_operations(op_log)
+        raise
+
+
+def _process_sync_group(db: Session, group: SyncGroup) -> tuple[str | None, bool]:
     """处理单个同步组。"""
     source = Path(group.source)
     tv_target_root = Path(group.target)
@@ -136,11 +274,12 @@ def _process_sync_group(db: Session, group: SyncGroup) -> str | None:
 
     if not source.exists():
         append_log(f"源目录不存在: {source}")
-        return None
+        return None, False
 
     media_dirs = _collect_video_leaf_dirs(source, include, exclude)
     append_log(f"找到 {len(media_dirs)} 个待处理目录")
     first_dir_name = _extract_first_dir_name(media_dirs, source)
+    has_issues = False
 
     blocked_dirs: set[Path] = _load_existing_recorded_dirs(db, group.id, source)
 
@@ -191,6 +330,7 @@ def _process_sync_group(db: Session, group: SyncGroup) -> str | None:
             "fallback_round": fallback_round,
             "season_hint": snapshot.season_hint,
             "special_hint": snapshot.special_hint,
+            "_has_issues": False,
         }
 
         stable_ok, stable_reason = _stabilize_directory_context(media_dir, context)
@@ -249,6 +389,8 @@ def _process_sync_group(db: Session, group: SyncGroup) -> str | None:
 
             _upsert_dir_state(db, group.id, media_dir, signature, "SUCCESS", None)
             db.commit()
+            if context.get("_has_issues"):
+                has_issues = True
         except DirectoryProcessError as e:
             db.rollback()
             _rollback_operations(op_log)
@@ -258,7 +400,7 @@ def _process_sync_group(db: Session, group: SyncGroup) -> str | None:
             _upsert_dir_state(db, group.id, media_dir, signature, "FAILED", reason)
             db.commit()
 
-    return first_dir_name
+    return first_dir_name, has_issues
 
 
 def _process_file(
@@ -283,6 +425,7 @@ def _process_file(
     tmdb_data = context.get("tmdb_data") or {}
     target_root = Path(context["target_root"])
     is_attachment = ext in ATTACHMENT_EXTS
+    record_status = str(context.get("record_status") or "scraped")
 
     parse_result = parse_tv_filename(str(src_path)) if media_type == "tv" else parse_movie_filename(str(src_path))
     if parse_result is None:
@@ -310,7 +453,7 @@ def _process_file(
                 should_scrape=False,
                 op_log=op_log,
             )
-            _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id)
+            _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
             _upsert_inode_record(db, sync_group_id, src_path, dst_path)
             append_log(f"附件跟随正片: {src_path.name} -> {dst_path}")
             return
@@ -350,20 +493,31 @@ def _process_file(
             should_scrape = (not is_attachment) and _should_scrape_for_target(media_type, dst_path, parse_result)
 
         # Special flow does not participate in dedup conflict decision.
-        _execute_transactional_outputs(
-            src_path=src_path,
-            dst_path=dst_path,
-            media_type=media_type,
-            parse_result=parse_result,
-            tmdb_data=tmdb_data,
-            should_scrape=should_scrape,
-            op_log=op_log,
-        )
-        _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id)
+        try:
+            _execute_transactional_outputs(
+                src_path=src_path,
+                dst_path=dst_path,
+                media_type=media_type,
+                parse_result=parse_result,
+                tmdb_data=tmdb_data,
+                should_scrape=should_scrape,
+                op_log=op_log,
+            )
+        except DirectoryProcessError as e:
+            if "目标路径已被其他文件占用" in str(e):
+                context["_has_issues"] = True
+                append_log(f"Special 目录目标冲突已跳过: {src_path.name} -> {dst_path}")
+                return
+            raise
+        _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
         _upsert_inode_record(db, sync_group_id, src_path, dst_path)
         if ext in VIDEO_EXTS:
             _register_video_anchor(src_path, dst_path, parse_result, dir_runtime)
         append_log(f"Special 目录处理成功: {src_path.name} -> {dst_path}")
+        return
+
+    if media_type == "tv" and _should_ignore_zero_episode(src_path.name):
+        append_log(f"跳过第0集/00集文件: {src_path.name}")
         return
 
     if media_type == "tv":
@@ -393,7 +547,7 @@ def _process_file(
         op_log=op_log,
     )
 
-    _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id)
+    _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
     _upsert_inode_record(db, sync_group_id, src_path, dst_path)
     if ext in VIDEO_EXTS:
         _register_video_anchor(src_path, dst_path, parse_result, dir_runtime)
@@ -481,19 +635,25 @@ def _build_special_renamed_filename(parse_result: ParseResult, special_type: str
 
 def _extract_special_token_from_filename(stem: str) -> str | None:
     patterns = [
-        r"\b(CM\d+)\b",
-        r"\b(PV\d+)\b",
-        r"\b(SPOT\d+)\b",
-        r"\b(Preview\d+)\b",
-        r"\b(Web\s*Preview\d+)\b",
-        r"\b(IV\d+)\b",
+        r"\b(PV\s*EP?\s*\d+)\b",
+        r"\b(PV[\s\-_]*\d+)\b",
+        r"\b(CM[\s\-_]*\d+)\b",
+        r"\b(SPOT[\s\-_]*\d+)\b",
+        r"\b(Preview[\s\-_]*\d+)\b",
+        r"\b(Web\s*Preview[\s\-_]*\d+)\b",
+        r"\b(IV[\s\-_]*\d+)\b",
         r"\b(Trailer\d*)\b",
-        r"\b(Teaser\d*)\b",
+        r"\b(Teaser(?:\s*PV)?\d*)\b",
     ]
     for p in patterns:
         m = re.search(p, stem, re.I)
         if m:
-            return re.sub(r"\s+", " ", m.group(1)).strip()
+            token = re.sub(r"[\-_]+", " ", m.group(1))
+            token = re.sub(r"\s+", " ", token).strip()
+            pv_ep = re.match(r"^PV\s*EP?\s*(\d+)$", token, re.I)
+            if pv_ep:
+                return f"PVEP{pv_ep.group(1)}"
+            return token
     return None
 
 
@@ -695,6 +855,7 @@ def _upsert_media_record(
     dst_path: Path,
     media_type: str,
     tmdb_id: int | None,
+    status: str = "scraped",
 ) -> None:
     src_size = _safe_file_size(src_path)
     existing = db.query(MediaRecord).filter(
@@ -706,7 +867,7 @@ def _upsert_media_record(
         existing.target_path = str(dst_path)
         existing.type = media_type
         existing.tmdb_id = tmdb_id
-        existing.status = "scraped"
+        existing.status = status
         existing.size = src_size
         return
 
@@ -718,10 +879,33 @@ def _upsert_media_record(
             type=media_type,
             tmdb_id=tmdb_id,
             bangumi_id=None,
-            status="scraped",
+            status=status,
             size=src_size,
         )
     )
+
+
+def _get_tmdb_item_by_id(media_type: str, tmdb_id: int) -> dict | None:
+    if not settings.tmdb_api_key:
+        return None
+    endpoint = "tv" if media_type == "tv" else "movie"
+    url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}"
+    params = {"api_key": settings.tmdb_api_key, "language": "zh-CN"}
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(url, params=params)
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    data = resp.json() if resp.content else {}
+    return data if isinstance(data, dict) else None
+
+
+def _extract_year_from_tmdb_item(media_type: str, item: dict) -> int | None:
+    date_value = item.get("first_air_date") if media_type == "tv" else item.get("release_date")
+    s = str(date_value or "")
+    return int(s[:4]) if s[:4].isdigit() else None
 
 
 def _upsert_inode_record(db: Session, sync_group_id: int, src_path: Path, dst_path: Path) -> None:
@@ -996,6 +1180,17 @@ def _is_season_like_dir(path: Path) -> bool:
 def _should_ignore_fractional_episode(filename: str) -> bool:
     stem = Path(filename).stem
     return re.search(r"(?:^|[\[\(\s\-_])\d{1,3}\.5(?:$|[\]\)\s\-_])", stem, re.I) is not None
+
+
+def _should_ignore_zero_episode(filename: str) -> bool:
+    stem = Path(filename).stem
+    patterns = [
+        r"[\[\(]\s*0{1,2}\s*[\]\)]",   # [00] / (0)
+        r"\bEP?\s*0+\b",               # EP0 / E00
+        r"第\s*0+\s*[集话話]",          # 第0集
+        r"(?:^|[\s._-])0{1,2}(?:$|[\s._-])",  # token 0 / 00
+    ]
+    return any(re.search(p, stem, re.I) is not None for p in patterns)
 
 
 def _list_files_safe(path: Path) -> list[Path]:

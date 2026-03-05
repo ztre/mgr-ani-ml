@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import auth, config as config_api, emby, inodes, logs, media, scan, sync_groups, tasks
 from .api.logs import cleanup_logs_if_needed
+from .config import settings
 from .database import SessionLocal, init_db
 from .models import MediaRecord, SyncGroup
 from .security import require_auth
@@ -19,6 +20,11 @@ from .services.scanner import run_scan
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.auth_enabled:
+        if not (settings.auth_secret or "").strip():
+            raise RuntimeError("AUTH_SECRET 未配置，已拒绝启动（鉴权启用时必须设置强随机密钥）")
+        if (settings.auth_username or "").strip() == "admin" and (settings.auth_password or "") == "admin123":
+            raise RuntimeError("检测到默认账号口令 admin/admin123，请修改后再启动")
     init_db()
     cleanup_logs_if_needed(force=True)
     yield
@@ -64,7 +70,12 @@ def _run_scan_group_task(group_id: int, task_type_override: str | None = None, t
 
 
 @app.post("/sendTask")
-def send_task(background_tasks: BackgroundTasks, dirname: str = Form(...), group: str = Form(...)):
+def send_task(
+    background_tasks: BackgroundTasks,
+    dirname: str = Form(...),
+    group: str = Form(...),
+    _username: str = Depends(require_auth),
+):
     dirname = (dirname or "").strip()
     group = (group or "").strip()
     if not dirname or not group:
