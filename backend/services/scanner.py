@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Lock
 
 import httpx
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..api.logs import append_log, current_task_id
@@ -1139,15 +1140,40 @@ def _upsert_dir_state(
     status: str,
     last_error: str | None,
 ) -> None:
+    dir_path = str(media_dir)
+
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "sqlite":
+        now = datetime.utcnow()
+        stmt = sqlite_insert(DirectoryState).values(
+            sync_group_id=sync_group_id,
+            dir_path=dir_path,
+            signature=signature,
+            status=status,
+            last_error=last_error,
+            updated_at=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[DirectoryState.sync_group_id, DirectoryState.dir_path],
+            set_={
+                "signature": signature,
+                "status": status,
+                "last_error": last_error,
+                "updated_at": now,
+            },
+        )
+        db.execute(stmt)
+        return
+
     state = db.query(DirectoryState).filter(
         DirectoryState.sync_group_id == sync_group_id,
-        DirectoryState.dir_path == str(media_dir),
+        DirectoryState.dir_path == dir_path,
     ).first()
     if state is None:
         db.add(
             DirectoryState(
                 sync_group_id=sync_group_id,
-                dir_path=str(media_dir),
+                dir_path=dir_path,
                 signature=signature,
                 status=status,
                 last_error=last_error,
