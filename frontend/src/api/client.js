@@ -74,6 +74,7 @@ export const configApi = {
   update: (data) => client.put('/config', data),
   restart: () => client.post('/config/restart'),
   testConnection: (data) => client.post('/config/test-connection', data),
+  changePassword: (data) => client.post('/config/change-password', data),
 }
 
 export const authApi = {

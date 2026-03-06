@@ -61,10 +61,21 @@ def health():
     return {"status": "ok"}
 
 
-def _run_scan_group_task(group_id: int, task_type_override: str | None = None, target_name_override: str | None = None):
+def _run_scan_group_task(
+    group_id: int,
+    task_type_override: str | None = None,
+    target_name_override: str | None = None,
+    target_dir_override: str | None = None,
+):
     db = SessionLocal()
     try:
-        run_scan(db, group_id=group_id, task_type_override=task_type_override, target_name_override=target_name_override)
+        run_scan(
+            db,
+            group_id=group_id,
+            task_type_override=task_type_override,
+            target_name_override=target_name_override,
+            target_dir_override=target_dir_override,
+        )
     finally:
         db.close()
 
@@ -107,10 +118,17 @@ def send_task(
         background_tasks.add_task(
             _run_scan_group_task,
             sync_group.id,
-            f"manual_scan:{sync_group.name}",
+            f"webhook_scan:{sync_group.name}",
             dirname,
+            matched[0].original_path,
         )
-        return {"ok": True, "message": "已提交重试识别任务", "dirname": dirname, "group": group, "group_id": sync_group.id}
+        return {
+            "ok": True,
+            "message": "已提交 webhook 扫描整理任务",
+            "dirname": dirname,
+            "group": group,
+            "group_id": sync_group.id,
+        }
     finally:
         db.close()
 

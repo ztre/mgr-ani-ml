@@ -1,6 +1,8 @@
 """Configuration APIs."""
 from __future__ import annotations
 
+import hmac
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import httpx
@@ -47,6 +49,11 @@ class TestConnectionRequest(BaseModel):
     tmdb_api_key: str | None = None
     emby_url: str | None = None
     emby_api_key: str | None = None
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 
 @router.get("", response_model=ConfigResponse)
@@ -149,3 +156,22 @@ def test_connection(data: TestConnectionRequest):
     if not results:
         raise HTTPException(status_code=400, detail="未提供可测试的字段")
     return results
+
+
+@router.post("/change-password")
+def change_password(data: PasswordChangeRequest):
+    if not settings.auth_enabled:
+        raise HTTPException(status_code=400, detail="当前未启用鉴权，无需修改密码")
+
+    current_password = data.current_password or ""
+    new_password = (data.new_password or "").strip()
+    if not hmac.compare_digest(current_password, settings.auth_password or ""):
+        raise HTTPException(status_code=400, detail="当前密码错误")
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="新密码长度至少 6 位")
+    if hmac.compare_digest(new_password, settings.auth_password or ""):
+        raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
+
+    settings.auth_password = new_password
+    settings.save_to_env()
+    return {"ok": True, "message": "密码修改成功"}

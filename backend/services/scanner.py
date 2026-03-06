@@ -26,7 +26,15 @@ ATTACHMENT_EXTS = {".ass", ".srt", ".ssa", ".vtt", ".mka"}
 MEDIA_EXTS = VIDEO_EXTS | ATTACHMENT_EXTS
 INTERVIEW_PATTERN = re.compile(r"\b(IV\d*|Interview|Interviews)\b", re.I)
 TRAILER_PATTERN = re.compile(
-    r"\b(Preview\d*|Web\s*Preview\d*|CM\d*|SPOT\d*|PV\d*|Trailer\d*|Teaser\d*)\b",
+    r"\b("
+    r"Preview(?:[\s\-_]*\d+)?|"
+    r"Web\s*Preview(?:[\s\-_]*\d+)?|"
+    r"CM(?:[\s\-_]*\d+)?|"
+    r"SPOT(?:[\s\-_]*\d+)?|"
+    r"PV(?:[\s\-_]*EP?\s*\d+|[\s\-_]*\d+)?|"
+    r"Trailer(?:[\s\-_]*\d+)?|"
+    r"Teaser(?:\s*PV)?(?:[\s\-_]*\d+)?"
+    r")\b",
     re.I,
 )
 SCAN_LOCK = Lock()
@@ -45,7 +53,7 @@ class DirectoryProcessError(Exception):
 
 def tag_task_type_with_issue(task_type: str) -> str:
     base = str(task_type or "").strip() or "scan"
-    return base if base.endswith(":issue") else f"{base}:issue"
+    return base if base.startswith("issue_sp:") else f"issue_sp:{base}"
 
 
 def run_scan(
@@ -53,6 +61,7 @@ def run_scan(
     group_id: int | None = None,
     task_type_override: str | None = None,
     target_name_override: str | None = None,
+    target_dir_override: str | None = None,
 ):
     """执行全量或单组扫描。"""
     task = ScanTask(
@@ -112,7 +121,11 @@ def run_scan(
         try:
             for group in groups:
                 append_log(f"处理同步组: {group.name}")
-                group_first_dir, group_has_issues = _process_sync_group(db, group)
+                group_first_dir, group_has_issues = _process_sync_group(
+                    db,
+                    group,
+                    target_dir_override=target_dir_override,
+                )
                 if first_scanned_dir_name is None and group_first_dir:
                     first_scanned_dir_name = group_first_dir
                 if group_has_issues:
@@ -262,7 +275,11 @@ def run_manual_organize(
         raise
 
 
-def _process_sync_group(db: Session, group: SyncGroup) -> tuple[str | None, bool]:
+def _process_sync_group(
+    db: Session,
+    group: SyncGroup,
+    target_dir_override: str | None = None,
+) -> tuple[str | None, bool]:
     """处理单个同步组。"""
     source = Path(group.source)
     tv_target_root = Path(group.target)
@@ -278,6 +295,16 @@ def _process_sync_group(db: Session, group: SyncGroup) -> tuple[str | None, bool
         return None, False
 
     media_dirs = _collect_video_leaf_dirs(source, include, exclude)
+    if target_dir_override:
+        target_dir_path = Path(target_dir_override)
+        filtered_dirs: list[Path] = []
+        for d in media_dirs:
+            if d == target_dir_path:
+                filtered_dirs = [d]
+                break
+            if d.name == target_dir_path.name:
+                filtered_dirs.append(d)
+        media_dirs = filtered_dirs
     append_log(f"找到 {len(media_dirs)} 个待处理目录")
     first_dir_name = _extract_first_dir_name(media_dirs, source)
     has_issues = False
@@ -323,7 +350,7 @@ def _process_sync_group(db: Session, group: SyncGroup) -> tuple[str | None, bool
         context = {
             "media_type": target_type,
             "tmdb_id": best.tmdb_id,
-            "tmdb_data": best.tmdb_data,
+            "tmdb_data": _get_tmdb_item_by_id(target_type, best.tmdb_id) or best.tmdb_data,
             "title": resolved_title,
             "year": best.year or snapshot.year_hint,
             "target_root": str(target_root),
@@ -445,15 +472,22 @@ def _process_file(
         anchor_dst = _resolve_attachment_follow_target(src_path, parse_result, dir_runtime)
         if anchor_dst is not None:
             dst_path = _build_attachment_target_from_anchor(anchor_dst, parse_result, ext)
-            _execute_transactional_outputs(
-                src_path=src_path,
-                dst_path=dst_path,
-                media_type=media_type,
-                parse_result=parse_result,
-                tmdb_data=tmdb_data,
-                should_scrape=False,
-                op_log=op_log,
-            )
+            try:
+                _execute_transactional_outputs(
+                    src_path=src_path,
+                    dst_path=dst_path,
+                    media_type=media_type,
+                    parse_result=parse_result,
+                    tmdb_data=tmdb_data,
+                    should_scrape=False,
+                    op_log=op_log,
+                )
+            except DirectoryProcessError as e:
+                if "目标路径已被其他文件占用" in str(e):
+                    context["_has_issues"] = True
+                    append_log(f"附件跟随目标冲突已跳过: {src_path.name} -> {dst_path}")
+                    return
+                raise
             _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
             _upsert_inode_record(db, sync_group_id, src_path, dst_path)
             append_log(f"附件跟随正片: {src_path.name} -> {dst_path}")
@@ -635,19 +669,28 @@ def _build_special_renamed_filename(parse_result: ParseResult, special_type: str
 
 
 def _extract_special_token_from_filename(stem: str) -> str | None:
+    bracket_tokens = re.findall(r"\[([^\]]+)\]", stem)
+    for raw in bracket_tokens:
+        token = _extract_special_token_from_text(raw)
+        if token:
+            return token
+    return _extract_special_token_from_text(stem)
+
+
+def _extract_special_token_from_text(text: str) -> str | None:
     patterns = [
         r"\b(PV\s*EP?\s*\d+)\b",
+        r"\b(Web\s*Preview[\s\-_]*\d+)\b",
         r"\b(PV[\s\-_]*\d+)\b",
         r"\b(CM[\s\-_]*\d+)\b",
         r"\b(SPOT[\s\-_]*\d+)\b",
         r"\b(Preview[\s\-_]*\d+)\b",
-        r"\b(Web\s*Preview[\s\-_]*\d+)\b",
         r"\b(IV[\s\-_]*\d+)\b",
         r"\b(Trailer\d*)\b",
         r"\b(Teaser(?:\s*PV)?\d*)\b",
     ]
     for p in patterns:
-        m = re.search(p, stem, re.I)
+        m = re.search(p, text, re.I)
         if m:
             token = re.sub(r"[\-_]+", " ", m.group(1))
             token = re.sub(r"\s+", " ", token).strip()
@@ -834,7 +877,11 @@ def _rollback_operations(op_log: OperationLog) -> None:
             pass
 
 
-def _deduplicate_target_or_raise(seen_targets: dict[Path, Path], src_path: Path, dst_path: Path) -> None:
+def _deduplicate_target_or_raise(
+    seen_targets: dict[Path, Path],
+    src_path: Path,
+    dst_path: Path,
+) -> None:
     prev = seen_targets.get(dst_path)
     if prev is None:
         seen_targets[dst_path] = src_path

@@ -1,7 +1,7 @@
 <template>
   <div class="config">
     <div class="page-head">
-      <h1 class="page-title">API 配置</h1>
+      <h1 class="page-title">系统配置</h1>
       <p class="page-subtitle">统一管理识别、刮削、Emby 刷新与系统行为开关。</p>
     </div>
 
@@ -110,6 +110,36 @@
           </el-button>
         </el-form-item>
       </el-form>
+      <el-divider content-position="left">账号安全</el-divider>
+      <el-form :model="passwordForm" label-width="180px" style="max-width: 860px">
+        <el-form-item label="当前密码">
+          <el-input
+            v-model="passwordForm.current_password"
+            type="password"
+            show-password
+            placeholder="请输入当前登录密码"
+          />
+        </el-form-item>
+        <el-form-item label="新密码">
+          <el-input
+            v-model="passwordForm.new_password"
+            type="password"
+            show-password
+            placeholder="至少 6 位"
+          />
+        </el-form-item>
+        <el-form-item label="确认新密码">
+          <el-input
+            v-model="passwordForm.confirm_password"
+            type="password"
+            show-password
+            placeholder="请再次输入新密码"
+          />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="changingPassword" @click="changePassword">修改密码</el-button>
+        </el-form-item>
+      </el-form>
       <el-divider content-position="left">系统操作</el-divider>
       <div class="danger-zone">
         <div class="danger-text">
@@ -154,6 +184,12 @@ const testing = ref({
 })
 const loadingLibraries = ref(false)
 const embyLibraryOptions = ref([])
+const changingPassword = ref(false)
+const passwordForm = ref({
+  current_password: '',
+  new_password: '',
+  confirm_password: '',
+})
 
 async function load() {
   const { data } = await configApi.get()
@@ -241,6 +277,39 @@ async function restartService() {
     ElMessage.error(e.response?.data?.detail || '重启失败')
   } finally {
     restarting.value = false
+  }
+}
+
+async function changePassword() {
+  const currentPassword = passwordForm.value.current_password || ''
+  const newPassword = passwordForm.value.new_password || ''
+  const confirmPassword = passwordForm.value.confirm_password || ''
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    ElMessage.warning('请完整填写密码字段')
+    return
+  }
+  if (newPassword.length < 6) {
+    ElMessage.warning('新密码长度至少 6 位')
+    return
+  }
+  if (newPassword !== confirmPassword) {
+    ElMessage.warning('两次输入的新密码不一致')
+    return
+  }
+
+  changingPassword.value = true
+  try {
+    await configApi.changePassword({
+      current_password: currentPassword,
+      new_password: newPassword,
+    })
+    passwordForm.value = { current_password: '', new_password: '', confirm_password: '' }
+    ElMessage.success('密码修改成功，请使用新密码重新登录')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '修改密码失败')
+  } finally {
+    changingPassword.value = false
   }
 }
 

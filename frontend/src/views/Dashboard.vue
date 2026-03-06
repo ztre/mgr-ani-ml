@@ -383,29 +383,41 @@ function statusType(status) {
 }
 
 function taskTypeText(row) {
-  const type = String(row?.type || '')
+  const rawType = String(row?.type || '')
+  const issueTagged = rawType.startsWith('issue_sp:')
+  const type = issueTagged ? rawType.slice('issue_sp:'.length) : rawType
+
   if (type.startsWith('manual:')) {
     const groupName = type.slice('manual:'.length) || '未知同步组'
-    return `${groupName} · 手动整理`
+    return issueTagged ? `${groupName} · 手动整理 · SP问题` : `${groupName} · 手动整理`
   }
   if (type.startsWith('manual_scan:')) {
     const groupName = type.slice('manual_scan:'.length) || '未知同步组'
-    return `${groupName} · 扫描整理`
+    return issueTagged ? `${groupName} · 扫描整理 · SP问题` : `${groupName} · 扫描整理`
+  }
+  if (type.startsWith('webhook_scan:')) {
+    const groupName = type.slice('webhook_scan:'.length) || '未知同步组'
+    return issueTagged ? `${groupName} · webhook整理 · SP问题` : `${groupName} · webhook整理`
   }
   if (type === 'group') {
     const group = groups.value.find((g) => g.id === row?.target_id)
-    return group?.name || '单组扫描'
+    const text = group?.name || '单组扫描'
+    return issueTagged ? `${text} · SP问题` : text
   }
   if (type === 'full') {
-    return '全量扫描'
+    return issueTagged ? '全量扫描 · SP问题' : '全量扫描'
   }
-  return type || '-'
+  return issueTagged ? `${type || '-'} · SP问题` : (type || '-')
 }
 
 function taskTypeTag(row) {
-  const type = String(row?.type || '')
+  const rawType = String(row?.type || '')
+  const issueTagged = rawType.startsWith('issue_sp:')
+  const type = issueTagged ? rawType.slice('issue_sp:'.length) : rawType
+  if (issueTagged) return 'danger'
   if (type.startsWith('manual:')) return 'warning'
   if (type.startsWith('manual_scan:')) return 'primary'
+  if (type.startsWith('webhook_scan:')) return 'primary'
   if (type === 'full') return 'success'
   return 'info'
 }
