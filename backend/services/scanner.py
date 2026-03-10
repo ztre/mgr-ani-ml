@@ -8,6 +8,7 @@ from threading import Lock
 
 import httpx
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ..api.logs import append_log, current_task_id
@@ -17,26 +18,19 @@ from .emby import refresh_emby_library
 from .group_routing import resolve_movie_target_root
 from .linker import get_inode, is_same_inode, path_excluded
 from .metadata import scrape_movie_metadata, scrape_tv_metadata
-from .parser import ParseResult, get_tmdb_tv_details_sync, parse_movie_filename, parse_tv_filename
+from .parser import (
+    ParseResult,
+    classify_extra_from_text,
+    get_tmdb_tv_details_sync,
+    parse_movie_filename,
+    parse_tv_filename,
+)
 from .recognition_flow import recognize_directory_with_fallback
 from .renamer import compute_movie_target_path, compute_tv_target_path
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv"}
 ATTACHMENT_EXTS = {".ass", ".srt", ".ssa", ".vtt", ".mka"}
 MEDIA_EXTS = VIDEO_EXTS | ATTACHMENT_EXTS
-INTERVIEW_PATTERN = re.compile(r"\b(IV\d*|Interview|Interviews)\b", re.I)
-TRAILER_PATTERN = re.compile(
-    r"\b("
-    r"Preview(?:[\s\-_]*\d+)?|"
-    r"Web\s*Preview(?:[\s\-_]*\d+)?|"
-    r"CM(?:[\s\-_]*\d+)?|"
-    r"SPOT(?:[\s\-_]*\d+)?|"
-    r"PV(?:[\s\-_]*EP?\s*\d+|[\s\-_]*\d+)?|"
-    r"Trailer(?:[\s\-_]*\d+)?|"
-    r"Teaser(?:\s*PV)?(?:[\s\-_]*\d+)?"
-    r")\b",
-    re.I,
-)
 SCAN_LOCK = Lock()
 
 
@@ -169,6 +163,7 @@ def run_manual_organize(
     title_override: str | None = None,
     year_override: int | None = None,
     season_override: int | None = None,
+    episode_offset: int | None = None,
 ) -> tuple[int, int, bool]:
     root_dir = Path(pending.original_path or "")
     if not root_dir.exists() or not root_dir.is_dir():
@@ -212,6 +207,7 @@ def run_manual_organize(
         "special_hint": False,
         "record_status": "manual_fixed",
         "_has_issues": False,
+        "episode_offset": int(episode_offset) if episode_offset is not None else None,
     }
 
     if media_type == "tv":
@@ -267,6 +263,123 @@ def run_manual_organize(
             processed += 1
 
         db.delete(pending)
+        db.commit()
+        return processed, 0, bool(context.get("_has_issues"))
+    except DirectoryProcessError:
+        db.rollback()
+        _rollback_operations(op_log)
+        raise
+
+
+def reidentify_by_target_dir(
+    db: Session,
+    group: SyncGroup,
+    media_type: str,
+    tmdb_id: int,
+    title_override: str | None,
+    year_override: int | None,
+    season_override: int | None,
+    episode_offset: int | None,
+    records: list[MediaRecord],
+) -> tuple[int, int, bool]:
+    if media_type not in {"tv", "movie"}:
+        raise DirectoryProcessError("media_type 必须是 tv 或 movie")
+
+    if not settings.tmdb_api_key:
+        raise DirectoryProcessError("未配置 TMDB API Key")
+
+    if not records:
+        raise DirectoryProcessError("未找到可修正的媒体记录")
+
+    tmdb_data = _get_tmdb_item_by_id(media_type, tmdb_id)
+    if not tmdb_data:
+        raise DirectoryProcessError(f"TMDB 条目不存在: {tmdb_id}")
+
+    tv_target_root = Path(group.target)
+    movie_target_root, movie_route_reason = resolve_movie_target_root(db, group)
+    if media_type == "movie" and movie_target_root is None:
+        raise DirectoryProcessError(f"电影目标路径不可决策: {movie_route_reason}")
+
+    target_root = tv_target_root if media_type == "tv" else movie_target_root
+    year_from_tmdb = _extract_year_from_tmdb_item(media_type, tmdb_data)
+    year = year_override if year_override is not None else year_from_tmdb
+    fallback_title = str(tmdb_data.get("name") or tmdb_data.get("title") or "Unknown")
+    resolved_title = (title_override or "").strip() or _resolve_chinese_title_by_tmdb(
+        media_type=media_type,
+        tmdb_id=tmdb_id,
+        fallback_title=fallback_title,
+    )
+
+    context = {
+        "media_type": media_type,
+        "tmdb_id": tmdb_id,
+        "tmdb_data": tmdb_data,
+        "title": resolved_title,
+        "year": year,
+        "target_root": str(target_root),
+        "score": 1.0,
+        "fallback_round": 0,
+        "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
+        "special_hint": False,
+        "record_status": "manual_fixed",
+        "_has_issues": False,
+        "episode_offset": int(episode_offset) if episode_offset is not None else None,
+    }
+
+    media_files: list[Path] = []
+    for row in records:
+        if not row.original_path:
+            continue
+        p = Path(row.original_path)
+        if not p.exists() or not p.is_file():
+            continue
+        if p.suffix.lower() not in MEDIA_EXTS:
+            continue
+        media_files.append(p)
+
+    if not media_files:
+        raise DirectoryProcessError("没有可处理的媒体文件")
+
+    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
+    attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
+    seen_targets: dict[Path, Path] = {}
+    op_log = OperationLog()
+    dir_runtime: dict = {
+        "video_anchor_by_parent": {},
+        "video_anchor_by_parent_episode": {},
+    }
+
+    append_log(
+        f"整组修正: group={group.name}, media_type={media_type}, tmdb_id={tmdb_id}, "
+        f"title={resolved_title}, files={len(media_files)}"
+    )
+
+    processed = 0
+    try:
+        for src_path in video_files:
+            _process_file(
+                db=db,
+                src_path=src_path,
+                sync_group_id=group.id,
+                context=context,
+                seen_targets=seen_targets,
+                op_log=op_log,
+                dir_runtime=dir_runtime,
+            )
+            processed += 1
+
+        for src_path in attachment_files:
+            _process_file(
+                db=db,
+                src_path=src_path,
+                sync_group_id=group.id,
+                context=context,
+                seen_targets=seen_targets,
+                op_log=op_log,
+                dir_runtime=dir_runtime,
+            )
+            processed += 1
+
         db.commit()
         return processed, 0, bool(context.get("_has_issues"))
     except DirectoryProcessError:
@@ -467,6 +580,11 @@ def _process_file(
         year=context.get("year") if context.get("year") else parse_result.year,
     )
 
+    menu_token = _extract_menu_token(src_path.name)
+    if menu_token:
+        append_log(f"Special 忽略: {menu_token}")
+        return
+
     # 附件跟随正片：优先复用同目录(同集)视频的目标路径。
     if is_attachment:
         anchor_dst = _resolve_attachment_follow_target(src_path, parse_result, dir_runtime)
@@ -493,79 +611,45 @@ def _process_file(
             append_log(f"附件跟随正片: {src_path.name} -> {dst_path}")
             return
 
-    # Special folder guard:
-    # - never enter movie normal flow
-    # - never construct movie target path
-    # - special classification first
-    if is_under_special_folder(src_path):
-        special_type = classify_special_file(src_path.name)
-        if not special_type:
-            append_log(f"Special 目录非白名单跳过: {src_path.name}")
-            return
+    special_logged = False
+    if parse_result.extra_category is None and is_under_special_folder(src_path):
+        extra_category, extra_label, _from_bracket = classify_extra_from_text(src_path.name)
+        if extra_category:
+            parse_result = parse_result._replace(
+                extra_category=extra_category,
+                extra_label=extra_label,
+                is_special=extra_category in {"special", "oped"},
+            )
+            _log_special_classification(extra_category, extra_label)
+            special_logged = True
 
-        if media_type == "movie":
-            dst_path = _compute_movie_special_target_path(
-                target_root=target_root,
-                parse_result=parse_result,
-                tmdb_id=tmdb_id,
-                special_type=special_type,
-                src_filename=src_path.name,
-            )
-            should_scrape = False
-        else:
-            season = _extract_season_from_path(src_path) or context.get("resolved_season") or context.get("season_hint") or 1
-            if season <= 0:
-                season = 1
-            parse_result = parse_result._replace(season=season)
-            dst_path = _compute_tv_special_target_path(
-                target_root=target_root,
-                parse_result=parse_result,
-                tmdb_id=tmdb_id,
-                season=season,
-                special_type=special_type,
-                src_filename=src_path.name,
-            )
-            should_scrape = (not is_attachment) and _should_scrape_for_target(media_type, dst_path, parse_result)
-
-        # Special flow does not participate in dedup conflict decision.
-        try:
-            _execute_transactional_outputs(
-                src_path=src_path,
-                dst_path=dst_path,
-                media_type=media_type,
-                parse_result=parse_result,
-                tmdb_data=tmdb_data,
-                should_scrape=should_scrape,
-                op_log=op_log,
-            )
-        except DirectoryProcessError as e:
-            if "目标路径已被其他文件占用" in str(e):
-                context["_has_issues"] = True
-                append_log(f"Special 目录目标冲突已跳过: {src_path.name} -> {dst_path}")
-                return
-            raise
-        _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
-        _upsert_inode_record(db, sync_group_id, src_path, dst_path)
-        if ext in VIDEO_EXTS:
-            _register_video_anchor(src_path, dst_path, parse_result, dir_runtime)
-        append_log(f"Special 目录处理成功: {src_path.name} -> {dst_path}")
+    if is_under_special_folder(src_path) and parse_result.extra_category is None:
+        append_log(f"Special 忽略: 未识别 ({src_path.name})")
         return
 
-    if media_type == "tv" and _should_ignore_zero_episode(src_path.name):
+    if parse_result.extra_category is not None and not special_logged:
+        _log_special_classification(parse_result.extra_category, parse_result.extra_label)
+
+    if media_type == "tv" and parse_result.extra_category is None and _should_ignore_zero_episode(src_path.name):
         append_log(f"跳过第0集/00集文件: {src_path.name}")
         return
 
     if media_type == "tv":
-        if parse_result.episode is None:
+        if parse_result.episode is None and parse_result.extra_category is None:
             ep = _extract_episode_from_filename_loose(src_path.name)
             if ep is not None:
                 parse_result = parse_result._replace(episode=ep)
 
         resolved_season = context.get("resolved_season")
-        season = _extract_season_from_path(src_path) or resolved_season or 1
+        season = _extract_season_from_path(src_path) or resolved_season or parse_result.season or 1
         parse_result = parse_result._replace(season=season)
 
-        dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext)
+        offset = context.get("episode_offset")
+        if offset is not None and parse_result.episode is not None and parse_result.extra_category is None:
+            adjusted = parse_result.episode - int(offset)
+            parse_result = parse_result._replace(episode=max(1, adjusted))
+
+        dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
     else:
         dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
 
@@ -613,94 +697,6 @@ def resolve_season(tmdb_id: int, season_hint: int | None, final_season: bool = F
     return 1
 
 
-def classify_special_file(filename: str) -> str | None:
-    name = Path(filename or "").stem
-    if INTERVIEW_PATTERN.search(name):
-        return "Interviews"
-    if TRAILER_PATTERN.search(name):
-        return "Trailers"
-    return None
-
-
-def _compute_tv_special_target_path(
-    target_root: Path,
-    parse_result: ParseResult,
-    tmdb_id: int | None,
-    season: int,
-    special_type: str,
-    src_filename: str,
-) -> Path:
-    title = _safe_name(parse_result.title)
-    year_part = f" ({parse_result.year})" if parse_result.year else ""
-    tmdb_part = f" [tmdbid={tmdb_id}]" if tmdb_id else ""
-    show_dir = target_root / f"{title}{year_part}{tmdb_part}"
-    filename = _build_special_renamed_filename(parse_result, special_type, src_filename)
-    return show_dir / f"Season {season:02d}" / special_type / filename
-
-
-def _compute_movie_special_target_path(
-    target_root: Path,
-    parse_result: ParseResult,
-    tmdb_id: int | None,
-    special_type: str,
-    src_filename: str,
-) -> Path:
-    title = _safe_name(parse_result.title)
-    year_part = f" ({parse_result.year})" if parse_result.year else ""
-    tmdb_part = f" [tmdbid={tmdb_id}]" if tmdb_id else ""
-    movie_dir = target_root / f"{title}{year_part}{tmdb_part}"
-    filename = _build_special_renamed_filename(parse_result, special_type, src_filename)
-    return movie_dir / special_type / filename
-
-
-def _build_special_renamed_filename(parse_result: ParseResult, special_type: str, src_filename: str) -> str:
-    src = Path(src_filename)
-    ext = src.suffix
-    title = _safe_name(parse_result.title)
-    year_part = f" ({parse_result.year})" if parse_result.year else ""
-    lang_part = parse_result.subtitle_lang or ""
-
-    token = _extract_special_token_from_filename(src.stem)
-    if token:
-        base = f"{title}{year_part} - {token}"
-    else:
-        base = f"{title}{year_part}"
-    return f"{base}{lang_part}{ext}"
-
-
-def _extract_special_token_from_filename(stem: str) -> str | None:
-    bracket_tokens = re.findall(r"\[([^\]]+)\]", stem)
-    for raw in bracket_tokens:
-        token = _extract_special_token_from_text(raw)
-        if token:
-            return token
-    return _extract_special_token_from_text(stem)
-
-
-def _extract_special_token_from_text(text: str) -> str | None:
-    patterns = [
-        r"\b(PV\s*EP?\s*\d+)\b",
-        r"\b(Web\s*Preview[\s\-_]*\d+)\b",
-        r"\b(PV[\s\-_]*\d+)\b",
-        r"\b(CM[\s\-_]*\d+)\b",
-        r"\b(SPOT[\s\-_]*\d+)\b",
-        r"\b(Preview[\s\-_]*\d+)\b",
-        r"\b(IV[\s\-_]*\d+)\b",
-        r"\b(Trailer\d*)\b",
-        r"\b(Teaser(?:\s*PV)?\d*)\b",
-    ]
-    for p in patterns:
-        m = re.search(p, text, re.I)
-        if m:
-            token = re.sub(r"[\-_]+", " ", m.group(1))
-            token = re.sub(r"\s+", " ", token).strip()
-            pv_ep = re.match(r"^PV\s*EP?\s*(\d+)$", token, re.I)
-            if pv_ep:
-                return f"PVEP{pv_ep.group(1)}"
-            return token
-    return None
-
-
 def _extract_season_from_path(src_path: Path) -> int | None:
     for part in src_path.parts:
         m1 = re.match(r"^season\s*(\d{1,2})$", part, re.I)
@@ -715,10 +711,6 @@ def _extract_season_from_path(src_path: Path) -> int | None:
     return None
 
 
-def _is_specials_path(src_path: Path) -> bool:
-    return any(part.lower() in {"sps", "specials"} for part in src_path.parts)
-
-
 def is_under_special_folder(file_path: Path) -> bool:
     for parent in file_path.parents:
         name = parent.name.lower()
@@ -730,9 +722,11 @@ def is_under_special_folder(file_path: Path) -> bool:
 def _extract_episode_from_filename_loose(filename: str) -> int | None:
     stem = Path(filename).stem
     patterns = [
+        r"\b\d{1,2}\s*[xX]\s*(\d{1,3})\b",
         r"\[(\d{1,3})\]",
         r"\((\d{1,3})\)",
         r"\bEP?\s*(\d{1,3})\b",
+        r"\bE(\d{1,3})\b",
         r"第\s*(\d{1,3})\s*[集话話]",
         r"(?:^|[\s\-_\.])(\d{1,3})(?:$|[\s\-_\.])",
     ]
@@ -753,11 +747,9 @@ def _register_video_anchor(src_path: Path, dst_path: Path, parse_result: ParseRe
     by_parent_ep = dir_runtime.setdefault("video_anchor_by_parent_episode", {})
     parent_key = str(src_path.parent)
     by_parent[parent_key] = dst_path
-    ep = parse_result.episode
-    if ep is None:
-        ep = _extract_episode_from_filename_loose(src_path.name)
-    if ep is not None:
-        by_parent_ep[(parent_key, int(ep))] = dst_path
+    ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
+    if ep_key is not None:
+        by_parent_ep[(parent_key, int(ep_key))] = dst_path
 
 
 def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> Path | None:
@@ -767,11 +759,9 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
     by_parent_ep = dir_runtime.get("video_anchor_by_parent_episode", {})
     parent_key = str(src_path.parent)
 
-    ep = parse_result.episode
-    if ep is None:
-        ep = _extract_episode_from_filename_loose(src_path.name)
-    if ep is not None:
-        candidate = by_parent_ep.get((parent_key, int(ep)))
+    ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
+    if ep_key is not None:
+        candidate = by_parent_ep.get((parent_key, int(ep_key)))
         if candidate:
             return candidate
     return by_parent.get(parent_key)
@@ -891,7 +881,7 @@ def _deduplicate_target_or_raise(
 
 
 def _should_scrape_for_target(media_type: str, dst_path: Path, parse_result: ParseResult) -> bool:
-    if media_type == "movie" and parse_result.extra_type and dst_path.parent.name.lower() == "extras":
+    if media_type == "movie" and parse_result.extra_category and dst_path.parent.name.lower() == "extras":
         return False
     return True
 
@@ -1209,8 +1199,12 @@ def _upsert_dir_state(
                 "updated_at": now,
             },
         )
-        db.execute(stmt)
-        return
+        try:
+            db.execute(stmt)
+            return
+        except OperationalError:
+            # Legacy DB may miss unique constraint; fallback to manual upsert.
+            pass
 
     state = db.query(DirectoryState).filter(
         DirectoryState.sync_group_id == sync_group_id,
@@ -1252,6 +1246,8 @@ def _is_season_like_dir(path: Path) -> bool:
 
 def _should_ignore_fractional_episode(filename: str) -> bool:
     stem = Path(filename).stem
+    if re.search(r"\d{1,3}\.5\b", stem, re.I):
+        return True
     return re.search(r"(?:^|[\[\(\s\-_])\d{1,3}\.5(?:$|[\]\)\s\-_])", stem, re.I) is not None
 
 
@@ -1264,6 +1260,48 @@ def _should_ignore_zero_episode(filename: str) -> bool:
         r"(?:^|[\s._-])0{1,2}(?:$|[\s._-])",  # token 0 / 00
     ]
     return any(re.search(p, stem, re.I) is not None for p in patterns)
+
+
+def _should_ignore_menu_file(filename: str) -> bool:
+    return _extract_menu_token(filename) is not None
+
+
+def _extract_menu_token(filename: str) -> str | None:
+    stem = Path(filename).stem
+    m = re.search(r"\b(BD\s*Menu|Top\s*Menu|PopUp\s*Menu|Menu)\b", stem, re.I)
+    if not m:
+        return None
+    token = re.sub(r"\s+", " ", m.group(1)).strip()
+    return token or "Menu"
+
+
+def _log_special_classification(category: str | None, label: str | None) -> None:
+    if not category:
+        return
+    display = {
+        "oped": "OPED",
+        "trailer": "Trailers",
+        "making": "Extras",
+        "special": "Specials",
+    }.get(category, category)
+    if label:
+        append_log(f"Special 识别: {label} -> {display}")
+    else:
+        append_log(f"Special 分类: {display}")
+
+
+def _normalized_episode_key(parse_result: ParseResult, src_path: Path, filename: str) -> int | None:
+    if parse_result.extra_category in {"special", "oped"}:
+        season = parse_result.season or _extract_season_from_path(src_path) or 1
+        index = parse_result.episode
+        if index is None:
+            index = _extract_episode_from_filename_loose(filename)
+        index = index or 1
+        return season * 100 + int(index)
+    ep = parse_result.episode
+    if ep is None:
+        ep = _extract_episode_from_filename_loose(filename)
+    return int(ep) if ep is not None else None
 
 
 def _list_files_safe(path: Path) -> list[Path]:
@@ -1284,12 +1322,6 @@ def _safe_file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
-
-
-def _safe_name(text: str) -> str:
-    bad = '<>:"/\\|?*'
-    s = "".join("_" if c in bad else c for c in (text or "Unknown"))
-    return s.strip() or "Unknown"
 
 
 def _resolve_chinese_title_by_tmdb(media_type: str, tmdb_id: int | None, fallback_title: str) -> str:

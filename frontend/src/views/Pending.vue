@@ -102,6 +102,9 @@
         <el-form-item v-if="form.media_type === 'tv'" label="强制季号">
           <el-input-number v-model="form.season" :min="0" />
         </el-form-item>
+        <el-form-item v-if="form.media_type === 'tv'" label="集号偏移">
+          <el-input-number v-model="form.episode_offset" :min="0" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -214,6 +217,7 @@ const form = reactive({
   title: '',
   year: undefined,
   season: undefined,
+  episode_offset: undefined,
 })
 
 function extractDirName(path) {
@@ -234,6 +238,7 @@ function openOrganizeDialog(row) {
   form.title = ''
   form.year = undefined
   form.season = undefined
+  form.episode_offset = undefined
   dialogVisible.value = true
 }
 
@@ -251,6 +256,7 @@ async function submitOrganize() {
       year: form.year ?? null,
       media_type: form.media_type,
       season: form.media_type === 'tv' ? (form.season ?? null) : null,
+      episode_offset: form.media_type === 'tv' ? (form.episode_offset ?? null) : null,
     }
     dialogVisible.value = false
     ElMessage.info('任务已提交，请关注首页日志记录')

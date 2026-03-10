@@ -113,11 +113,14 @@
         <el-form-item label="年份" required>
           <el-input v-model.number="fixForm.year" placeholder="首播年份 (如: 2012)" />
         </el-form-item>
-        <el-form-item label="季号 (Season)">
+        <el-form-item label="季号">
           <el-input-number v-model="fixForm.season" :min="0" />
         </el-form-item>
-        <el-form-item label="集号 (Episode)">
+        <el-form-item label="集号">
           <el-input-number v-model="fixForm.episode" :min="0" />
+        </el-form-item>
+        <el-form-item label="集号偏移">
+          <el-input-number v-model="fixForm.episode_offset" :min="0" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -157,6 +160,9 @@
           </el-select>
           <el-button @click="loadMedia" :loading="loading">
             <el-icon><Refresh /></el-icon>
+          </el-button>
+          <el-button type="primary" plain @click="openDirFixDialog" :disabled="!seasonDrawerDir">
+            整体修正
           </el-button>
         </div>
         <div class="drawer-danger-actions">
@@ -262,6 +268,33 @@
         </el-table-column>
       </el-table>
     </el-drawer>
+
+    <el-dialog v-model="dirFixDialogVisible" title="整组资源修正" width="520px">
+      <el-form :model="dirFixForm" label-width="110px">
+        <el-form-item label="资源目录">
+          <div class="text-ellipsis" :title="seasonDrawerDir">{{ seasonDrawerDir || '-' }}</div>
+        </el-form-item>
+        <el-form-item label="TMDB ID" required>
+          <el-input v-model.number="dirFixForm.tmdb_id" placeholder="例如: 45782" />
+        </el-form-item>
+        <el-form-item label="标题" required>
+          <el-input v-model="dirFixForm.title" placeholder="TMDB 标准标题" />
+        </el-form-item>
+        <el-form-item label="年份" required>
+          <el-input v-model.number="dirFixForm.year" placeholder="首播年份 (如: 2012)" />
+        </el-form-item>
+        <el-form-item label="季号 (Season)">
+          <el-input-number v-model="dirFixForm.season" :min="0" />
+        </el-form-item>
+        <el-form-item label="Episode Offset">
+          <el-input-number v-model="dirFixForm.episode_offset" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dirFixDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="dirFixing" @click="submitDirFix">提交修正</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -285,6 +318,8 @@ const filters = reactive({ type: '', category: 'all', search: '' })
 const fixDialogVisible = ref(false)
 const fixing = ref(false)
 const currentFixRow = ref(null)
+const dirFixDialogVisible = ref(false)
+const dirFixing = ref(false)
 const seasonDrawerVisible = ref(false)
 const seasonDrawerLoading = ref(false)
 const seasonDrawerTitle = ref('')
@@ -295,7 +330,8 @@ const posterCache = reactive({})
 const tmdbMetaCache = reactive({})
 const syncGroupRootNames = reactive({})
 const globalRootNames = ref(new Set())
-const fixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode: 1 })
+const fixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode: 1, episode_offset: undefined })
+const dirFixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode_offset: undefined })
 
 function extractFilename(path) {
   if (!path) return ''
@@ -568,7 +604,21 @@ function openFixDialog(row) {
   fixForm.year = ''
   fixForm.season = undefined
   fixForm.episode = undefined
+  fixForm.episode_offset = undefined
   fixDialogVisible.value = true
+}
+
+function openDirFixDialog() {
+  if (!seasonDrawerDir.value) {
+    ElMessage.warning('缺少资源目录信息')
+    return
+  }
+  dirFixForm.tmdb_id = ''
+  dirFixForm.title = ''
+  dirFixForm.year = ''
+  dirFixForm.season = undefined
+  dirFixForm.episode_offset = undefined
+  dirFixDialogVisible.value = true
 }
 
 async function submitFix() {
@@ -585,6 +635,7 @@ async function submitFix() {
       year: fixForm.year,
       season: fixForm.season,
       episode: fixForm.episode,
+      episode_offset: fixForm.episode_offset,
     })
     ElMessage.success('修正成功')
     fixDialogVisible.value = false
@@ -597,6 +648,37 @@ async function submitFix() {
     ElMessage.error(`修正失败: ${e.response?.data?.detail || e.message}`)
   } finally {
     fixing.value = false
+  }
+}
+
+async function submitDirFix() {
+  if (!dirFixForm.tmdb_id || !dirFixForm.title || !dirFixForm.year) {
+    ElMessage.warning('请填写完整的 TMDB 信息 (ID, 标题, 年份)')
+    return
+  }
+  if (!seasonDrawerDir.value) {
+    ElMessage.warning('缺少资源目录信息')
+    return
+  }
+  dirFixing.value = true
+  try {
+    const payload = {
+      target_dir: seasonDrawerDir.value,
+      tmdb_id: dirFixForm.tmdb_id,
+      title: dirFixForm.title,
+      year: dirFixForm.year,
+      season: dirFixForm.season,
+      episode_offset: dirFixForm.episode_offset,
+    }
+    const { data } = await mediaApi.reidentifyByTargetDir(payload)
+    ElMessage.success(data?.message || '修正成功')
+    dirFixDialogVisible.value = false
+    await loadMedia()
+    await refreshSeasonDrawerItems()
+  } catch (e) {
+    ElMessage.error(`修正失败: ${e.response?.data?.detail || e.message}`)
+  } finally {
+    dirFixing.value = false
   }
 }
 

@@ -49,6 +49,7 @@ export const mediaApi = {
   batchDelete: (data) => client.post('/media/batch-delete', data),
   deduplicate: () => client.post('/media/deduplicate'),
   reidentify: (id, data) => client.post(`/media/${id}/reidentify`, data),
+  reidentifyByTargetDir: (data) => client.post('/media/reidentify-by-target-dir', data),
   manualOrganize: (id, data) => client.post(`/media/${id}/manual-organize`, data),
 }
 

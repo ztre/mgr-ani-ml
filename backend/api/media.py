@@ -19,7 +19,7 @@ from ..services.group_routing import resolve_movie_target_root
 from ..services.linker import get_inode
 from ..services.parser import parse_movie_filename, parse_tv_filename
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
-from ..services.scanner import DirectoryProcessError, run_manual_organize, tag_task_type_with_issue
+from ..services.scanner import DirectoryProcessError, reidentify_by_target_dir, run_manual_organize, tag_task_type_with_issue
 
 router = APIRouter()
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
@@ -31,6 +31,7 @@ class PendingOrganizeRequest(BaseModel):
     year: int | None = None
     media_type: Literal["tv", "movie"] = "tv"
     season: int | None = None
+    episode_offset: int | None = None
 
 
 class BatchDeleteRequest(BaseModel):
@@ -44,6 +45,16 @@ class ReidentifyRequest(BaseModel):
     year: int | None = None
     season: int | None = None
     episode: int | None = None
+    episode_offset: int | None = None
+
+
+class ReidentifyDirRequest(BaseModel):
+    target_dir: str
+    tmdb_id: int
+    title: str | None = None
+    year: int | None = None
+    season: int | None = None
+    episode_offset: int | None = None
 
 
 @router.get("")
@@ -261,6 +272,9 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
         pr = pr._replace(season=max(0, data.season))
     if data.episode is not None:
         pr = pr._replace(episode=max(0, data.episode))
+    if data.episode_offset is not None and row.type == "tv" and pr.episode is not None and pr.extra_category is None:
+        adjusted = pr.episode - int(data.episode_offset)
+        pr = pr._replace(episode=max(1, adjusted))
 
     target_root = Path(group.target)
     media_type = row.type
@@ -271,7 +285,11 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
         target_root = movie_root
 
     ext = src.suffix.lower()
-    dst = compute_tv_target_path(target_root, pr, data.tmdb_id, ext) if media_type == "tv" else compute_movie_target_path(target_root, pr, data.tmdb_id, ext)
+    dst = (
+        compute_tv_target_path(target_root, pr, data.tmdb_id, ext, src_filename=src.name)
+        if media_type == "tv"
+        else compute_movie_target_path(target_root, pr, data.tmdb_id, ext)
+    )
     _link_or_fail(src, dst)
 
     row.tmdb_id = data.tmdb_id
@@ -331,6 +349,7 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
             title_override=data.title,
             year_override=data.year,
             season_override=data.season,
+            episode_offset=data.episode_offset,
         )
         task.status = "completed" if failed == 0 else "failed"
         if has_issues:
@@ -358,6 +377,55 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
         except Exception:
             db.rollback()
         current_task_id.reset(token)
+
+
+@router.post("/reidentify-by-target-dir")
+def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depends(get_db)):
+    target_dir = (data.target_dir or "").strip()
+    if not target_dir:
+        raise HTTPException(status_code=400, detail="target_dir 不能为空")
+
+    normalized = target_dir.replace("\\", "/").rstrip("/")
+    lower_target_path = func.lower(func.replace(func.coalesce(MediaRecord.target_path, ""), "\\", "/"))
+    rows = (
+        db.query(MediaRecord)
+        .filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
+        .filter(or_(lower_target_path == normalized.lower(), lower_target_path.like(f"{normalized.lower()}/%")))
+        .all()
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="未找到目标目录记录")
+
+    group_id = rows[0].sync_group_id
+    if not group_id:
+        raise HTTPException(status_code=400, detail="记录缺少同步组信息")
+
+    if any(r.sync_group_id != group_id for r in rows):
+        raise HTTPException(status_code=400, detail="目标目录包含多个同步组记录")
+
+    media_type = rows[0].type
+    if any(r.type != media_type for r in rows):
+        raise HTTPException(status_code=400, detail="目标目录包含多种媒体类型")
+
+    group = db.query(SyncGroup).filter(SyncGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=400, detail="同步组不存在")
+
+    processed, failed, has_issues = reidentify_by_target_dir(
+        db=db,
+        group=group,
+        media_type=media_type,
+        tmdb_id=data.tmdb_id,
+        title_override=data.title,
+        year_override=data.year,
+        season_override=data.season,
+        episode_offset=data.episode_offset,
+        records=rows,
+    )
+    msg = f"整组修正完成: 成功 {processed}，失败 {failed}"
+    if has_issues:
+        msg += "（存在问题项）"
+    return {"message": msg, "processed": processed, "failed": failed}
 
 
 @router.post("/batch-delete")

@@ -164,8 +164,17 @@ class Settings:
     existing: list[str] = []
     if env_path.exists():
       existing = env_path.read_text(encoding='utf-8').splitlines(keepends=True)
+    existing_data = _read_env_file(env_path)
 
     prefix = self.env_prefix
+    data_env_path = Path('/app/data/.env')
+    # Guard: when persisted data .env already exists, do not overwrite a non-default
+    # password with runtime default admin123 during unrelated config saves.
+    if env_path == data_env_path and data_env_path.exists():
+      persisted_password = existing_data.get(f'{prefix}AUTH_PASSWORD')
+      if persisted_password and (self.auth_password or '') == 'admin123':
+        self.auth_password = persisted_password
+
     updates = {
       f'{prefix}BANGUMI_API_KEY': self.bangumi_api_key,
       f'{prefix}TMDB_API_KEY': self.tmdb_api_key,
