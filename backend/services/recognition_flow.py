@@ -46,7 +46,7 @@ class RankedCandidate:
     year: int | None
 
 
-def parse_structure_locally(media_dir: Path) -> LocalParseSnapshot:
+def parse_structure_locally(media_dir: Path, structure_hint: str | None = None) -> LocalParseSnapshot:
     raw_name = media_dir.name
     cleaned_name = _clean_name(raw_name)
     year_hint = _extract_year(cleaned_name)
@@ -58,6 +58,9 @@ def parse_structure_locally(media_dir: Path) -> LocalParseSnapshot:
     season_hint = tv_parse.season if tv_parse else None
     episode_hint = tv_parse.episode if tv_parse else None
     special_hint = bool(tv_parse.is_special) if tv_parse else False
+
+    if (season_hint is None or season_hint <= 0) and structure_hint == "tv":
+        season_hint = _extract_trailing_season_number(cleaned_name)
 
     return LocalParseSnapshot(
         raw_name=raw_name,
@@ -86,14 +89,18 @@ def generate_candidate_titles(snapshot: LocalParseSnapshot) -> list[str]:
     return candidates
 
 
-def recognize_directory_with_fallback(media_dir: Path, scan_context_type: str) -> tuple[RankedCandidate | None, LocalParseSnapshot, int]:
+def recognize_directory_with_fallback(
+    media_dir: Path,
+    scan_context_type: str,
+    structure_hint: str | None = None,
+) -> tuple[RankedCandidate | None, LocalParseSnapshot, int]:
     """
     返回:
     - 识别结果（movie/tv 统一竞争后的最佳候选）
     - 本地解析快照
     - 使用的 fallback 轮次（0 表示首轮）
     """
-    snapshot = parse_structure_locally(media_dir)
+    snapshot = parse_structure_locally(media_dir, structure_hint=structure_hint)
     all_candidates = generate_candidate_titles(snapshot)
     if not all_candidates:
         return None, snapshot, 0
@@ -115,6 +122,7 @@ def recognize_directory_with_fallback(media_dir: Path, scan_context_type: str) -
             round_candidates,
             year_hint=snapshot.year_hint,
             special_hint=snapshot.special_hint,
+            structure_hint=structure_hint,
         )
         if best and (best_global is None or best.score > best_global.score):
             best_global = best
@@ -138,7 +146,12 @@ def resolve_target_media_type(scan_context_type: str, recognized_type: str) -> s
     return "tv" if scan_context_type == "tv" else "movie"
 
 
-def _unified_competitive_search(candidate_titles: list[str], year_hint: int | None, special_hint: bool) -> RankedCandidate | None:
+def _unified_competitive_search(
+    candidate_titles: list[str],
+    year_hint: int | None,
+    special_hint: bool,
+    structure_hint: str | None = None,
+) -> RankedCandidate | None:
     pool: list[RankedCandidate] = []
     seen: set[tuple[str, int]] = set()
 
@@ -170,11 +183,20 @@ def _unified_competitive_search(candidate_titles: list[str], year_hint: int | No
         for cand in pool:
             if cand.media_type == "tv":
                 cand.score = min(1.0, cand.score + 0.03)
+    if structure_hint in {"tv", "movie"}:
+        for cand in pool:
+            if cand.media_type == structure_hint:
+                cand.score = min(1.0, cand.score + 0.05)
 
     tv_pool = [x for x in pool if x.media_type == "tv"]
     movie_pool = [x for x in pool if x.media_type == "movie"]
     best_tv = max(tv_pool, key=lambda x: x.score) if tv_pool else None
     best_movie = max(movie_pool, key=lambda x: x.score) if movie_pool else None
+
+    if structure_hint == "tv" and best_tv and best_tv.score >= FAIL_SCORE:
+        return best_tv
+    if structure_hint == "movie" and best_movie and best_movie.score >= FAIL_SCORE:
+        return best_movie
 
     if best_movie and best_tv:
         if best_movie.score >= best_tv.score * 0.9:
@@ -226,7 +248,7 @@ def _to_ranked_candidate(query_title: str, media_type: str, item: dict, year_hin
 
 
 def _clean_name(name: str) -> str:
-    text = re.sub(r"[\[\(\{].*?[\]\)\}]", " ", name)
+    text = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", name)
     text = re.sub(r"[._\-]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
@@ -257,6 +279,21 @@ def _extract_year(text: str) -> int | None:
     if not m:
         return None
     return int(m.group(1))
+
+
+def _extract_trailing_season_number(text: str) -> int | None:
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    m = re.search(r"(?:^|[\\s._-])(\\d{1,2})\\s*$", s)
+    if not m:
+        return None
+    val = int(m.group(1))
+    if val < 1 or val > 30:
+        return None
+    if val in {2160, 1080, 720, 480}:
+        return None
+    if 1900 <= val <= 2099:
+        return None
+    return val
 
 
 def _normalize_for_similarity(title: str) -> str:

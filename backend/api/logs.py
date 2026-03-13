@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 
 from fastapi import APIRouter, Query
 
@@ -23,8 +24,12 @@ def append_log(message: str) -> None:
     if not task_id:
         return
 
+    msg = str(message or "").strip()
+    if not re.match(r"^(INFO|WARNING|ERROR):\s", msg):
+        msg = f"INFO: {msg}"
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{now}] {message}\n"
+    line = f"[{now}] {msg}\n"
     path = LOG_DIR / f"task_{task_id}.log"
     try:
         with path.open("a", encoding="utf-8") as f:

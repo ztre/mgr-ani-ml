@@ -18,9 +18,10 @@ def _sqlite_file_path(database_url: str) -> Path | None:
   return Path(raw)
 
 
+_IS_SQLITE = 'sqlite' in settings.database_url
 engine = create_engine(
   settings.database_url,
-  connect_args={'check_same_thread': False} if 'sqlite' in settings.database_url else {},
+  connect_args={'check_same_thread': False, 'timeout': 30} if _IS_SQLITE else {},
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -31,9 +32,17 @@ def init_db() -> None:
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     if not sqlite_path.exists():
       sqlite_path.touch()
+    _apply_sqlite_pragmas()
   Base.metadata.create_all(bind=engine)
   if sqlite_path is not None:
     _ensure_directory_states_unique_index()
+
+
+def _apply_sqlite_pragmas() -> None:
+  with engine.connect() as conn:
+    conn.execute(text("PRAGMA journal_mode=WAL"))
+    conn.execute(text("PRAGMA synchronous=NORMAL"))
+    conn.execute(text("PRAGMA busy_timeout=30000"))
 
 
 def _ensure_directory_states_unique_index() -> None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import secrets
 
 
@@ -116,6 +117,7 @@ class Settings:
   log_cleanup_interval_seconds: int = 600
 
   debug: bool = False
+  scan_threads: int = max(1, (os.cpu_count() or 1) * 2)
 
   env_file: Path = _default_env_file()
   env_prefix: str = 'AMM_'
@@ -157,6 +159,7 @@ class Settings:
       data.get(f'{p}LOG_CLEANUP_INTERVAL_SECONDS'),
       self.log_cleanup_interval_seconds,
     )
+    self.scan_threads = _parse_int(data.get(f'{p}SCAN_THREADS'), self.scan_threads)
 
   def save_to_env(self) -> None:
     env_path = self.env_file
@@ -194,6 +197,7 @@ class Settings:
       f'{prefix}LOG_RETENTION_DAYS': str(int(self.log_retention_days)),
       f'{prefix}LOG_MAX_TASK_FILES': str(int(self.log_max_task_files)),
       f'{prefix}LOG_CLEANUP_INTERVAL_SECONDS': str(int(self.log_cleanup_interval_seconds)),
+      f'{prefix}SCAN_THREADS': str(int(self.scan_threads)),
     }
 
     out: list[str] = []

@@ -28,7 +28,11 @@ def compute_tv_target_path(
             episode = season * 100 + special_index
         else:
             oped_index = parse_result.episode or 1
-            episode = season * 100 + oped_index
+            label = str(parse_result.extra_label or "").upper()
+            if label.startswith("ED"):
+                episode = season * 100 + (oped_index * 2)
+            else:
+                episode = season * 100 + (oped_index * 2 - 1)
         base_name = f"{title} - S00E{episode:02d}"
         if parse_result.extra_label:
             base_name += f" - {parse_result.extra_label}"
@@ -36,7 +40,7 @@ def compute_tv_target_path(
             base_name += parse_result.subtitle_lang
         return season_dir / f"{base_name}{ext}"
 
-    if parse_result.extra_category in {"trailer", "making"}:
+    if parse_result.extra_category and parse_result.extra_category not in {"special", "oped"}:
         extras_dir = show_dir / "extras"
         label = _safe_name(parse_result.extra_label or "Extra")
         name = f"{title}{year_part} S{season:02d}_{label}"
