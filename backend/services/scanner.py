@@ -1,12 +1,15 @@
 """扫描任务编排（v2）：目录驱动、统一识别、事务执行与回滚。"""
 import os
+import fcntl
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
+import atexit
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
+from contextlib import nullcontext
 
 import httpx
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -23,18 +26,35 @@ from .linker import get_inode, is_same_inode, path_excluded
 from .metadata import scrape_movie_metadata, scrape_tv_metadata
 from .parser import (
     ParseResult,
+    SPECIAL_TYPE_MAP,
     classify_extra_from_text,
     get_tmdb_tv_details_sync,
     parse_movie_filename,
     parse_tv_filename,
 )
-from .recognition_flow import recognize_directory_with_fallback
+from .recognition_flow import (
+    LocalParseSnapshot,
+    parse_structure_locally,
+    recognize_directory_with_fallback,
+    recognize_directory_with_season_hint,
+    resolve_season as resolve_season_by_tmdb,
+)
 from .renamer import compute_movie_target_path, compute_tv_target_path
+from .allocator import (
+    allocate_indices_for_batch,
+    mark_pending,
+    scan_existing_special_indices,
+    should_fallback_to_pending,
+)
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv", ".ts", ".m2ts"}
 ATTACHMENT_EXTS = {".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub"}
 MEDIA_EXTS = VIDEO_EXTS | ATTACHMENT_EXTS
 SCAN_LOCK = Lock()
+MEDIA_TASK_QUEUE: queue.Queue = queue.Queue()
+_WORKER_THREAD = None
+_WORKER_LOCK = Lock()
+_WORKER_LOCK_FD = None
 
 IGNORED_TOKENS = {"bdmv", "menu", "sample", "scan", "disc", "iso", "font"}
 EXTRAS_CATEGORIES = {
@@ -59,6 +79,16 @@ class OperationLog:
     created_files: set[Path] = field(default_factory=set)
 
 
+@dataclass
+class MediaTask:
+    path: Path
+    media_type: str | None
+    parsed: LocalParseSnapshot
+    created_at: datetime
+    sync_group_id: int
+    task_id: int | None
+
+
 class DirectoryProcessError(Exception):
     pass
 
@@ -66,6 +96,88 @@ class DirectoryProcessError(Exception):
 def tag_task_type_with_issue(task_type: str) -> str:
     base = str(task_type or "").strip() or "scan"
     return base if base.startswith("issue_sp:") else f"issue_sp:{base}"
+
+
+def _start_media_worker() -> None:
+    global _WORKER_THREAD
+    global _WORKER_LOCK_FD
+    with _WORKER_LOCK:
+        if not bool(getattr(settings, "worker_autostart", True)):
+            return
+        if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
+            return
+        if _WORKER_LOCK_FD is None:
+            # 单机锁：同一主机内尽量避免多个进程同时启动 worker
+            lock_path = Path("/tmp/amm_media_worker.lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            _WORKER_LOCK_FD = lock_path.open("a+")
+            try:
+                fcntl.flock(_WORKER_LOCK_FD.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                append_log("WARNING: Worker lock is held by another process; continuing with local queue worker.")
+        _WORKER_THREAD = Thread(target=_media_task_worker, daemon=True)
+        _WORKER_THREAD.start()
+        append_log("INFO: Media worker started")
+
+
+def _stop_media_worker() -> None:
+    global _WORKER_THREAD
+    global _WORKER_LOCK_FD
+    with _WORKER_LOCK:
+        if _WORKER_THREAD is None:
+            return
+        MEDIA_TASK_QUEUE.put(None)
+        # 优雅退出：最多等待 3 秒，避免阻塞退出流程
+        _WORKER_THREAD.join(timeout=3.0)
+        if _WORKER_THREAD.is_alive():
+            append_log("WARNING: Media worker did not exit in time; continuing shutdown")
+        _WORKER_THREAD = None
+        if _WORKER_LOCK_FD is not None:
+            try:
+                fcntl.flock(_WORKER_LOCK_FD.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            _WORKER_LOCK_FD.close()
+            _WORKER_LOCK_FD = None
+
+
+def _media_task_worker() -> None:
+    while True:
+        task = MEDIA_TASK_QUEUE.get()
+        if task is None:
+            MEDIA_TASK_QUEUE.task_done()
+            break
+        # 单消费者：所有 DB 写入与文件落地都在此线程完成
+        token = None
+        if task.task_id:
+            token = current_task_id.set(task.task_id)
+        append_log(f"INFO: MediaTask start: {task.path}")
+        retries = 0
+        while retries < 3:
+            local_db = SessionLocal()
+            try:
+                _handle_media_task(local_db, task)
+                local_db.commit()
+                append_log(f"INFO: MediaTask done: {task.path}")
+                break
+            except Exception as e:
+                local_db.rollback()
+                retries += 1
+                backoff = 2 ** retries
+                # 失败重试：指数退避，最多 3 次
+                append_log(f"WARNING: MediaTask failed ({retries}/3): {task.path} | {e} | backoff={backoff}s")
+                time.sleep(backoff)
+                if retries >= 3:
+                    append_log(f"WARNING: MediaTask permanently failed: {task.path}")
+            finally:
+                local_db.close()
+        if token is not None:
+            current_task_id.reset(token)
+        MEDIA_TASK_QUEUE.task_done()
+
+
+atexit.register(_stop_media_worker)
+_start_media_worker()
 
 
 def run_scan(
@@ -131,6 +243,7 @@ def run_scan(
         first_scanned_dir_name = None
         has_issues = False
         try:
+            _start_media_worker()
             for group in groups:
                 append_log(f"处理同步组: {group.name}")
                 group_first_dir, group_has_issues = _process_sync_group(
@@ -142,6 +255,8 @@ def run_scan(
                     first_scanned_dir_name = group_first_dir
                 if group_has_issues:
                     has_issues = True
+
+            MEDIA_TASK_QUEUE.join()
 
             if first_scanned_dir_name and not target_name_override and task.type in {"group", "full"}:
                 task.target_name = first_scanned_dir_name
@@ -415,17 +530,12 @@ def _process_sync_group(
 ) -> tuple[str | None, bool]:
     """处理单个同步组。"""
     source = Path(group.source)
-    tv_target_root = Path(group.target)
-    movie_target_root, movie_route_reason = resolve_movie_target_root(db, group)
-    if movie_route_reason:
-        append_log(f"TV转移电影目标路径路由: {movie_route_reason}: {movie_target_root}")
-
-    include = group.include or ""
-    exclude = group.exclude or ""
-
     if not source.exists():
         append_log(f"源目录不存在: {source}")
         return None, False
+
+    include = group.include or ""
+    exclude = group.exclude or ""
 
     media_dirs = _collect_video_leaf_dirs(source, include, exclude)
     if target_dir_override:
@@ -440,185 +550,180 @@ def _process_sync_group(
         media_dirs = filtered_dirs
     append_log(f"找到 {len(media_dirs)} 个待处理目录")
     first_dir_name = _extract_first_dir_name(media_dirs, source)
-    has_issues = False
-
-    blocked_dirs: set[Path] = _load_existing_recorded_dirs(db, group.id, source)
-
-    def _run_dir(local_db: Session, media_dir: Path) -> bool:
-        if _is_under_pending_dir(media_dir, blocked_dirs):
-            append_log(f"INFO: 跳过已在媒体记录/待办中的目录: {media_dir}")
-            return False
-
-        signature = _build_dir_signature(media_dir, source, include, exclude)
-        if _can_skip_dir_by_signature(local_db, group.id, media_dir, signature):
-            append_log(f"INFO: 跳过未变化成功目录: {media_dir}")
-            return False
-
-        _upsert_dir_state(local_db, group.id, media_dir, signature, "SCANNED", None)
-
-        structure_hint = _detect_media_type_from_structure(media_dir)
-        best, snapshot, fallback_round = recognize_directory_with_fallback(
-            media_dir,
-            group.source_type,
-            structure_hint=structure_hint,
-        )
-        if best is None:
-            reason = f"目录级识别失败或低置信度: {media_dir.name}"
-            pending_dir = _mark_dir_pending(local_db, media_dir, source, group.id, group.source_type, reason)
-            _upsert_dir_state(local_db, group.id, media_dir, signature, "LOW_CONFIDENCE", reason)
-            local_db.commit()
-            return False
-
-        recognized_type = best.media_type
-        target_type = recognized_type
-        if target_type == "movie" and movie_target_root is None:
-            reason = "识别为电影但未找到可用电影目标路径"
-            _mark_dir_pending(local_db, media_dir, source, group.id, group.source_type, reason)
-            _upsert_dir_state(local_db, group.id, media_dir, signature, "FAILED", reason)
-            local_db.commit()
-            return False
-
-        _upsert_dir_state(local_db, group.id, media_dir, signature, "IDENTIFIED", None)
-
-        media_files = _collect_media_files_under_dir(media_dir, include, exclude, source)
-        video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
-        attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
-
-        target_root = tv_target_root if target_type == "tv" else movie_target_root
-
-        resolved_title = _resolve_chinese_title_by_tmdb(
-            media_type=target_type,
-            tmdb_id=best.tmdb_id,
-            fallback_title=best.title or snapshot.main_title,
-            strict=True,
-        )
-        if not resolved_title:
-            reason = "TMDB zh-CN 标题缺失"
-            _mark_dir_pending(local_db, media_dir, source, group.id, group.source_type, reason)
-            _upsert_dir_state(local_db, group.id, media_dir, signature, "LOW_CONFIDENCE", reason)
-            local_db.commit()
-            append_log(f"WARNING: 转待办目录: {media_dir} | 原因: {reason}")
-            return False
-
-        context = {
-            "media_type": target_type,
-            "tmdb_id": best.tmdb_id,
-            "tmdb_data": _get_tmdb_item_by_id(target_type, best.tmdb_id) or best.tmdb_data,
-            "title": resolved_title,
-            "year": best.year or snapshot.year_hint,
-            "target_root": str(target_root),
-            "score": best.score,
-            "fallback_round": fallback_round,
-            "season_hint": snapshot.season_hint,
-            "special_hint": snapshot.special_hint,
-            "_has_issues": False,
-        }
-
-        stable_ok, stable_reason = _stabilize_directory_context(media_dir, context)
-        if not stable_ok:
-            reason = f"目录稳定决策失败: {stable_reason}"
-            _mark_dir_pending(local_db, media_dir, source, group.id, group.source_type, reason)
-            _upsert_dir_state(local_db, group.id, media_dir, signature, "LOW_CONFIDENCE", reason)
-            local_db.commit()
-            return False
-
-        append_log(
-            f"INFO: 目录识别成功: {media_dir.name} -> {target_type}:{context['title']} "
-            f"(score={best.score:.3f}, fallback_round={fallback_round})"
-        )
-
-        op_log = OperationLog()
-        seen_targets: dict[Path, Path] = {}
-        dir_runtime: dict = {
-            "video_anchor_by_parent": {},
-            "video_anchor_by_parent_episode": {},
-            "video_anchor_by_parent_stem": {},
-        }
-
-        try:
-            for src_path in video_files:
-                if _is_under_pending_dir(src_path, blocked_dirs):
-                    continue
-                _process_file(
-                    db=local_db,
-                    src_path=src_path,
-                    sync_group_id=group.id,
-                    context=context,
-                    seen_targets=seen_targets,
-                    op_log=op_log,
-                    dir_runtime=dir_runtime,
-                )
-
-            for src_path in attachment_files:
-                if _is_under_pending_dir(src_path, blocked_dirs):
-                    continue
-                _process_file(
-                    db=local_db,
-                    src_path=src_path,
-                    sync_group_id=group.id,
-                    context=context,
-                    seen_targets=seen_targets,
-                    op_log=op_log,
-                    dir_runtime=dir_runtime,
-                )
-
-            _upsert_dir_state(local_db, group.id, media_dir, signature, "SUCCESS", None)
-            local_db.commit()
-            return bool(context.get("_has_issues"))
-        except DirectoryProcessError as e:
-            local_db.rollback()
-            _rollback_operations(op_log)
-            reason = str(e)
-            _mark_dir_pending(local_db, media_dir, source, group.id, group.source_type, reason)
-            _upsert_dir_state(local_db, group.id, media_dir, signature, "FAILED", reason)
-            local_db.commit()
-            return True
-
-    bind = db.get_bind()
-    is_sqlite = bool(bind is not None and bind.dialect.name == "sqlite")
-    max_workers = 1 if is_sqlite else max(1, int(getattr(settings, "scan_threads", 0) or ((os.cpu_count() or 1) * 2)))
-    if max_workers <= 1 or len(media_dirs) <= 1:
-        for media_dir in media_dirs:
-            if _run_dir(db, media_dir):
-                has_issues = True
-        return first_dir_name, has_issues
 
     task_id = current_task_id.get()
+    for media_dir in media_dirs:
+        structure_hint = _detect_media_type_from_structure(media_dir)
+        parsed = parse_structure_locally(media_dir, structure_hint=structure_hint)
+        # 入队：扫描线程只负责构建任务，不直接写 DB / 落地文件
+        task = MediaTask(
+            path=media_dir,
+            media_type=structure_hint,
+            parsed=parsed,
+            created_at=datetime.utcnow(),
+            sync_group_id=group.id,
+            task_id=task_id,
+        )
+        MEDIA_TASK_QUEUE.put(task)
 
-    def _run_dir_with_context(
-        media_dir: Path,
-        group: SyncGroup,
-        source: Path,
-        include: str,
-        exclude: str,
-        tv_target_root: Path,
-        movie_target_root: Path | None,
-        task_id: int | None,
-    ) -> bool:
-        token = None
-        if task_id:
-            token = current_task_id.set(task_id)
-        local_db = SessionLocal()
-        try:
-            return _run_dir(local_db, media_dir)
-        finally:
-            local_db.close()
-            if token is not None:
-                current_task_id.reset(token)
+    append_log(f"INFO: 已入队任务: {len(media_dirs)}")
+    return first_dir_name, False
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for media_dir in media_dirs:
-            futures[executor.submit(_run_dir_with_context, media_dir, group, source, include, exclude, tv_target_root, movie_target_root, task_id)] = media_dir
-        for fut in as_completed(futures):
-            try:
-                if fut.result():
-                    has_issues = True
-            except Exception as e:
-                append_log(f"WARNING: 并发处理目录失败: {futures[fut]} | {e}")
-                has_issues = True
 
-    return first_dir_name, has_issues
+def _handle_media_task(db: Session, task: MediaTask) -> None:
+    group = db.query(SyncGroup).filter(SyncGroup.id == task.sync_group_id).first()
+    if not group:
+        return
+    source = Path(group.source)
+    tv_target_root = Path(group.target)
+    movie_target_root, movie_route_reason = resolve_movie_target_root(db, group)
+    if movie_route_reason:
+        append_log(f"TV转移电影目标路径路由: {movie_route_reason}: {movie_target_root}")
+
+    include = group.include or ""
+    exclude = group.exclude or ""
+    media_dir = task.path
+
+    blocked_dirs: set[Path] = _load_existing_recorded_dirs(db, group.id, source)
+    if _is_under_pending_dir(media_dir, blocked_dirs):
+        append_log(f"INFO: 跳过已在媒体记录/待办中的目录: {media_dir}")
+        return
+
+    signature = _build_dir_signature(media_dir, source, include, exclude)
+    if _can_skip_dir_by_signature(db, group.id, media_dir, signature):
+        append_log(f"INFO: 跳过未变化成功目录: {media_dir}")
+        return
+
+    _upsert_dir_state(db, group.id, media_dir, signature, "SCANNED", None)
+
+    structure_hint = task.media_type or _detect_media_type_from_structure(media_dir)
+    best, snapshot, fallback_round = recognize_directory_with_fallback(
+        media_dir,
+        group.source_type,
+        structure_hint=structure_hint,
+    )
+    if best is None:
+        reason = f"目录级识别失败或低置信度: {media_dir.name}"
+        _mark_dir_pending(db, media_dir, source, group.id, group.source_type, reason)
+        _upsert_dir_state(db, group.id, media_dir, signature, "LOW_CONFIDENCE", reason)
+        return
+
+    recognized_type = best.media_type
+    target_type = recognized_type
+    if target_type == "movie" and movie_target_root is None:
+        reason = "识别为电影但未找到可用电影目标路径"
+        _mark_dir_pending(db, media_dir, source, group.id, group.source_type, reason)
+        _upsert_dir_state(db, group.id, media_dir, signature, "FAILED", reason)
+        return
+
+    _upsert_dir_state(db, group.id, media_dir, signature, "IDENTIFIED", None)
+
+    media_files = _collect_media_files_under_dir(media_dir, include, exclude, source)
+    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
+    attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
+
+    target_root = tv_target_root if target_type == "tv" else movie_target_root
+
+    resolved_title = _resolve_chinese_title_by_tmdb(
+        media_type=target_type,
+        tmdb_id=best.tmdb_id,
+        fallback_title=best.title or snapshot.main_title,
+        strict=True,
+    )
+    if not resolved_title:
+        reason = "TMDB zh-CN 标题缺失"
+        _mark_dir_pending(db, media_dir, source, group.id, group.source_type, reason)
+        _upsert_dir_state(db, group.id, media_dir, signature, "LOW_CONFIDENCE", reason)
+        append_log(f"WARNING: 转待办目录: {media_dir} | 原因: {reason}")
+        return
+
+    context = {
+        "media_type": target_type,
+        "tmdb_id": best.tmdb_id,
+        "tmdb_data": _get_tmdb_item_by_id(target_type, best.tmdb_id) or best.tmdb_data,
+        "title": resolved_title,
+        "year": best.year or snapshot.year_hint,
+        "target_root": str(target_root),
+        "score": best.score,
+        "fallback_round": fallback_round,
+        "season_hint": snapshot.season_hint,
+        "special_hint": snapshot.special_hint,
+        "final_hint": snapshot.final_hint,
+        "_has_issues": False,
+    }
+
+    stable_ok, stable_reason = _stabilize_directory_context(media_dir, context)
+    if not stable_ok:
+        reason = f"目录稳定决策失败: {stable_reason}"
+        _mark_dir_pending(db, media_dir, source, group.id, group.source_type, reason)
+        _upsert_dir_state(db, group.id, media_dir, signature, "LOW_CONFIDENCE", reason)
+        return
+
+    append_log(
+        f"INFO: 目录识别成功: {media_dir.name} -> {target_type}:{context['title']} "
+        f"(score={best.score:.3f}, fallback_round={fallback_round})"
+    )
+
+    op_log = OperationLog()
+    seen_targets: dict[Path, Path] = {}
+    dir_runtime: dict = {
+        "video_anchor_by_parent": {},
+        "video_anchor_by_parent_episode": {},
+        "video_anchor_by_parent_stem": {},
+        "pending_count": 0,
+        "skipped_count": 0,
+    }
+
+    show_dir = _resolve_show_dir(target_root, context["title"], context.get("year"), context.get("tmdb_id"))
+    use_lock = bool(getattr(settings, "use_file_lock", True))
+    # show 级别文件锁：保证同一剧集的索引分配与落地原子性（单机有效）
+    lock_ctx = _ShowLock(show_dir / ".assign.lock") if use_lock else nullcontext()
+
+    with lock_ctx:
+        # 批量预扫描 + 批量分配：消除 N×M 重排
+        existing_cache = scan_existing_special_indices(target_root, context.get("tmdb_id"))
+        append_log(f"INFO: scan existing specials: {existing_cache}")
+        all_files = video_files + attachment_files
+        items, item_map = _build_allocation_items(all_files, context, target_type)
+        assignments = allocate_indices_for_batch(
+            items,
+            existing_cache,
+            preserve_original_index=bool(getattr(settings, "preserve_original_index", True)),
+        )
+        context["allocator_assignments"] = assignments
+        context["allocator_items"] = item_map
+
+        for src_path in video_files:
+            if _is_under_pending_dir(src_path, blocked_dirs):
+                continue
+            _process_file(
+                db=db,
+                src_path=src_path,
+                sync_group_id=group.id,
+                context=context,
+                seen_targets=seen_targets,
+                op_log=op_log,
+                dir_runtime=dir_runtime,
+            )
+
+        for src_path in attachment_files:
+            if _is_under_pending_dir(src_path, blocked_dirs):
+                continue
+            _process_file(
+                db=db,
+                src_path=src_path,
+                sync_group_id=group.id,
+                context=context,
+                seen_targets=seen_targets,
+                op_log=op_log,
+                dir_runtime=dir_runtime,
+            )
+
+    append_log(
+        "INFO: specials summary: assigned=%d, pending=%d, skipped=%d"
+        % (len(context.get("allocator_assignments") or {}), dir_runtime.get("pending_count", 0), dir_runtime.get("skipped_count", 0))
+    )
+    _upsert_dir_state(db, group.id, media_dir, signature, "SUCCESS", None)
 
 
 def _process_file(
@@ -633,6 +738,14 @@ def _process_file(
     ext = src_path.suffix.lower()
     if ext not in MEDIA_EXTS:
         return
+
+    ino = get_inode(src_path)
+    if ino:
+        # 幂等保护：已处理文件直接跳过
+        existing = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
+        if existing:
+            append_log(f"INFO: 已处理文件跳过: {src_path}")
+            return
 
     if _should_ignore_fractional_episode(src_path.name):
         append_log(f"跳过半集文件: {src_path.name}")
@@ -687,8 +800,10 @@ def _process_file(
             _upsert_inode_record(db, sync_group_id, src_path, dst_path)
             append_log(f"INFO: 附件跟随正片: {src_path.name} -> {dst_path}")
             return
-        append_log(f"WARNING: 附件未匹配到视频已跳过: {src_path.name}")
-        return
+        if parse_result.extra_category is None:
+            append_log(f"WARNING: 附件未匹配到视频已跳过: {src_path.name}")
+            dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            return
 
     # 强制：特殊目录下文件必须进入 Special/Extras 流程
     if is_under_special_folder(src_path) and parse_result.extra_category is None:
@@ -734,7 +849,22 @@ def _process_file(
     if parse_result.extra_category is not None and not special_logged:
         _log_special_classification(parse_result.extra_category, parse_result.extra_label)
 
-    parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime)
+    assignments = context.get("allocator_assignments") or {}
+    item_map = context.get("allocator_items") or {}
+    assigned_by_allocator = False
+    item = item_map.get(str(src_path))
+    assigned_index = assignments.get(str(src_path))
+    if item and assigned_index is not None:
+        prefix = item.get("prefix") or _special_label_prefix(parse_result.extra_category, parse_result.extra_label)
+        preferred = item.get("preferred")
+        if preferred and int(preferred) != int(assigned_index):
+            append_log(f"INFO: Special remap: {prefix}{int(preferred):02d} -> {prefix}{int(assigned_index):02d} for {src_path.name}")
+        parse_result = parse_result._replace(extra_label=_format_prefix_number(prefix, int(assigned_index)))
+        if parse_result.extra_category in {"special", "oped"}:
+            parse_result = parse_result._replace(episode=int(assigned_index))
+        assigned_by_allocator = True
+    else:
+        parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime)
 
     if media_type == "tv" and parse_result.extra_category is None and _should_ignore_zero_episode(src_path.name):
         append_log(f"INFO: 跳过第0集/00集文件: {src_path.name}")
@@ -747,7 +877,14 @@ def _process_file(
                 parse_result = parse_result._replace(episode=ep)
 
         resolved_season = context.get("resolved_season")
-        season = _extract_season_from_path(src_path) or resolved_season or parse_result.season or 1
+        season_from_path = _extract_season_from_path(src_path)
+        has_explicit = _has_explicit_season_token(src_path.name)
+        if season_from_path is not None:
+            season = season_from_path
+        elif not has_explicit and resolved_season:
+            season = resolved_season
+        else:
+            season = parse_result.season or resolved_season or 1
         parse_result = parse_result._replace(season=season)
 
         offset = context.get("episode_offset")
@@ -769,6 +906,8 @@ def _process_file(
                 conflict = True
             if not conflict:
                 break
+            if assigned_by_allocator:
+                break
             parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime, force_next=True)
             if media_type == "tv":
                 dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
@@ -777,6 +916,29 @@ def _process_file(
             attempts += 1
             if attempts > 50:
                 raise DirectoryProcessError(f"多个源文件映射到同一目标: {src_path.name}")
+
+    if assigned_by_allocator and item:
+        item["suggested_target"] = str(dst_path)
+        pending_path_value = str(getattr(settings, "pending_jsonl_path", "") or "").strip()
+        pending_path = Path(pending_path_value) if pending_path_value else None
+        pending_cfg = {
+            "max_auto_remap_attempts": getattr(settings, "max_auto_remap_attempts", 3),
+        }
+        if dst_path in seen_targets:
+            if pending_path:
+                mark_pending(item, "batch target conflict", pending_path)
+            append_log(f"WARNING: Pending: {src_path.name} | reason: batch target conflict")
+            dir_runtime["pending_count"] = int(dir_runtime.get("pending_count") or 0) + 1
+            context["_has_issues"] = True
+            return
+        fallback, reason = should_fallback_to_pending(item, dst_path, {}, pending_cfg)
+        if fallback:
+            if pending_path:
+                mark_pending(item, reason, pending_path)
+            append_log(f"WARNING: Pending: {src_path.name} | reason: {reason}")
+            dir_runtime["pending_count"] = int(dir_runtime.get("pending_count") or 0) + 1
+            context["_has_issues"] = True
+            return
 
     _deduplicate_target_or_raise(seen_targets, src_path, dst_path)
 
@@ -799,27 +961,8 @@ def _process_file(
     append_log(f"INFO: 处理成功: {src_path.name} -> {dst_path}")
 
 
-def resolve_season(tmdb_id: int, season_hint: int | None, final_season: bool = False) -> int:
-    details = get_tmdb_tv_details_sync(tmdb_id)
-    if not details:
-        raise ValueError("无法获取 TMDB 剧集详情")
-
-    available = {
-        int(s.get("season_number"))
-        for s in details.get("seasons", [])
-        if s.get("season_number") is not None and int(s.get("season_number")) > 0
-    }
-
-    if final_season and not season_hint and available:
-        return max(available)
-
-    if season_hint and season_hint in available:
-        return season_hint
-
-    if season_hint and season_hint not in available:
-        append_log(f"WARNING: season_hint={season_hint} not in TMDB, fallback to 1")
-
-    return 1
+def resolve_season(tmdb_id: int, season_hint: int | None, final_season: bool = False) -> int | None:
+    return resolve_season_by_tmdb(None, tmdb_id, season_hint, final_hint=final_season)
 
 
 def _extract_season_from_path(src_path: Path) -> int | None:
@@ -834,6 +977,18 @@ def _extract_season_from_path(src_path: Path) -> int | None:
         if m3:
             return int(m3.group(1))
     return None
+
+
+def _has_explicit_season_token(name: str) -> bool:
+    """判断文件名是否显式标注季号（用于避免误用 resolved_season 覆盖）。"""
+    s = str(name or "")
+    if re.search(r"\bS\d{1,2}\b", s, re.I):
+        return True
+    if re.search(r"\bSeason\s*\d{1,2}\b", s, re.I):
+        return True
+    if re.search(r"\b\d{1,2}(st|nd|rd|th)\s+Season\b", s, re.I):
+        return True
+    return False
 
 
 def is_under_special_folder(file_path: Path) -> bool:
@@ -1476,6 +1631,35 @@ def _safe_name(text: str) -> str:
     return s.strip() or "Unknown"
 
 
+def _resolve_show_dir(target_root: Path, title: str, year: int | None, tmdb_id: int | None) -> Path:
+    year_part = f" ({year})" if year else ""
+    tmdb_part = f" [tmdbid={tmdb_id}]" if tmdb_id else ""
+    return target_root / f"{_safe_name(title)}{year_part}{tmdb_part}"
+
+
+class _ShowLock:
+    def __init__(self, lock_path: Path) -> None:
+        self.lock_path = lock_path
+        self.handle = None
+
+    def __enter__(self):
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.lock_path.open("a+")
+        # 注意：文件锁只对单机多进程有效，分布式需集中锁/单写服务
+        # Single-host advisory lock only. Use centralized locks for multi-host deployments.
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.handle is None:
+            return False
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        self.handle.close()
+        return False
+
+
+
+
 def _detect_media_type_from_structure(media_dir: Path) -> str | None:
     video_files = [p for p in media_dir.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS and not _is_ignored_name(p.name)]
     if not video_files:
@@ -1553,6 +1737,66 @@ def _special_label_prefix(category: str | None, label: str | None) -> str:
     return "Extra"
 
 
+def _resolve_prefix_for_parse(parse_result: ParseResult) -> str | None:
+    if not parse_result.extra_category:
+        return None
+    label = str(parse_result.extra_label or "")
+    upper = label.upper()
+    for token, (_bucket, prefix) in SPECIAL_TYPE_MAP.items():
+        if token.upper() in upper:
+            return prefix
+    return _special_label_prefix(parse_result.extra_category, label)
+
+
+def _build_allocation_items(
+    media_files: list[Path],
+    context: dict,
+    media_type: str,
+) -> tuple[list[dict], dict[str, dict]]:
+    items: list[dict] = []
+    item_map: dict[str, dict] = {}
+    for src_path in media_files:
+        ext = src_path.suffix.lower()
+        if ext not in MEDIA_EXTS:
+            continue
+        parse_result = parse_tv_filename(str(src_path)) if media_type == "tv" else parse_movie_filename(str(src_path))
+        if parse_result is None:
+            continue
+        if media_type == "tv":
+            # 显式季号优先；若文件名未显式标注季号，则使用解析到的 resolved_season
+            season_from_path = _extract_season_from_path(src_path)
+            has_explicit = _has_explicit_season_token(src_path.name)
+            resolved_season = context.get("resolved_season")
+            if season_from_path is not None:
+                season = season_from_path
+            elif not has_explicit and resolved_season:
+                season = resolved_season
+            else:
+                season = parse_result.season or resolved_season or 1
+            parse_result = parse_result._replace(season=season)
+        prefix = _resolve_prefix_for_parse(parse_result)
+        if not prefix:
+            continue
+        if parse_result.extra_category not in {"special", "oped"} | EXTRAS_CATEGORIES:
+            continue
+        preferred = _extract_label_index(parse_result.extra_label) or parse_result.episode
+        item = {
+            "file_path": str(src_path),
+            "source_dir": str(src_path.parent),
+            "tmdbid": context.get("tmdb_id"),
+            "season_key": parse_result.season if media_type == "tv" else None,
+            "prefix": prefix,
+            "preferred": preferred,
+            "is_attachment": ext in ATTACHMENT_EXTS,
+            "lang": parse_result.subtitle_lang,
+            "final_hint": context.get("final_hint"),
+            "final_resolved_season": context.get("final_resolved_season"),
+        }
+        items.append(item)
+        item_map[str(src_path)] = item
+    return items, item_map
+
+
 def _extract_label_index(label: str | None) -> int | None:
     if not label:
         return None
@@ -1590,7 +1834,7 @@ def _apply_special_indexing(
         while next_idx in used:
             next_idx += 1
         if force_next:
-            append_log(f"WARNING: 特典编号冲突已自动重排: {src_path.name} -> {prefix}{next_idx:02d}")
+            append_log(f"INFO: Special remap: {prefix}{next_idx:02d} for {src_path.name}")
         idx = next_idx
 
     used.add(idx)
@@ -1746,19 +1990,46 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     )
 
     chosen = season_from_path or season_hint
-    is_final = _is_final_season_title(media_dir.name)
+    is_final = _is_final_season_title(media_dir.name) or bool(context.get("final_hint"))
 
-    # 无目录/识别季号，且 TMDB 多季且不是 Final Season -> 不稳定，转待办
+    # 无稳定季号时：多季作品默认优先第一季（仅在显式季号存在时才做严格校验）
     if not chosen and len(valid_seasons) > 1 and not is_final:
-        return False, "多季作品且目录缺少稳定季号信息"
+        append_log("INFO: 多季作品且无稳定季号信息，默认使用第一季")
+        chosen = 1
     if chosen and valid_seasons and chosen not in valid_seasons:
-        return False, f"季号不匹配 TMDB: season_hint={chosen}"
+        append_log(
+            f"INFO: chosen season {chosen} not found in TMDB seasons for candidate tmdbid {tmdb_id} - re-search attempted"
+        )
+        best = recognize_directory_with_season_hint(media_dir, "tv", chosen, structure_hint="tv")
+        if best and best.tmdb_id and int(best.tmdb_id) != int(tmdb_id):
+            context["tmdb_id"] = int(best.tmdb_id)
+            context["tmdb_data"] = _get_tmdb_item_by_id("tv", best.tmdb_id) or best.tmdb_data
+            new_title = _resolve_chinese_title_by_tmdb("tv", int(best.tmdb_id), context.get("title", ""), strict=True)
+            if new_title:
+                context["title"] = new_title
+            details = get_tmdb_tv_details_sync(int(best.tmdb_id))
+            if details:
+                valid_seasons = sorted(
+                    {
+                        int(x.get("season_number"))
+                        for x in details.get("seasons", [])
+                        if x.get("season_number") is not None and int(x.get("season_number")) > 0
+                    }
+                )
+                if chosen in valid_seasons:
+                    tmdb_id = int(best.tmdb_id)
+                else:
+                    return False, f"季号不匹配 TMDB: season_hint={chosen}"
+            else:
+                return False, "无法获取 TMDB 季信息"
+        else:
+            return False, f"季号不匹配 TMDB: season_hint={chosen}"
 
-    try:
-        resolved = resolve_season(int(tmdb_id), chosen, final_season=is_final)
-    except Exception as e:
-        return False, f"SeasonResolver 失败: {e}"
+    resolved = resolve_season_by_tmdb(None, int(tmdb_id), chosen, final_hint=is_final)
+    if resolved is None:
+        return False, "Final Season 解析失败或 TMDB 不可用"
 
     context["season_hint"] = chosen
     context["resolved_season"] = resolved
+    context["final_resolved_season"] = resolved if is_final else None
     return True, None

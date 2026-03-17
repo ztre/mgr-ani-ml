@@ -115,6 +115,12 @@ class Settings:
   log_retention_days: int = 14
   log_max_task_files: int = 200
   log_cleanup_interval_seconds: int = 600
+  preserve_original_index: bool = True
+  max_auto_remap_attempts: int = 3
+  special_index_max_digits: int = 3
+  pending_jsonl_path: str = '/media/pending/pending.jsonl'
+  use_file_lock: bool = False
+  worker_autostart: bool = True
 
   debug: bool = False
   scan_threads: int = max(1, (os.cpu_count() or 1) * 2)
@@ -160,6 +166,27 @@ class Settings:
       self.log_cleanup_interval_seconds,
     )
     self.scan_threads = _parse_int(data.get(f'{p}SCAN_THREADS'), self.scan_threads)
+    self.preserve_original_index = _parse_bool(
+      data.get(f'{p}PRESERVE_ORIGINAL_INDEX'),
+      self.preserve_original_index,
+    )
+    self.max_auto_remap_attempts = _parse_int(
+      data.get(f'{p}MAX_AUTO_REMAP_ATTEMPTS'),
+      self.max_auto_remap_attempts,
+    )
+    self.special_index_max_digits = _parse_int(
+      data.get(f'{p}SPECIAL_INDEX_MAX_DIGITS'),
+      self.special_index_max_digits,
+    )
+    self.pending_jsonl_path = data.get(f'{p}PENDING_JSONL_PATH', self.pending_jsonl_path)
+    self.use_file_lock = _parse_bool(
+      data.get(f'{p}USE_FILE_LOCK'),
+      self.use_file_lock,
+    )
+    self.worker_autostart = _parse_bool(
+      data.get(f'{p}WORKER_AUTOSTART'),
+      self.worker_autostart,
+    )
 
   def save_to_env(self) -> None:
     env_path = self.env_file
@@ -198,6 +225,12 @@ class Settings:
       f'{prefix}LOG_MAX_TASK_FILES': str(int(self.log_max_task_files)),
       f'{prefix}LOG_CLEANUP_INTERVAL_SECONDS': str(int(self.log_cleanup_interval_seconds)),
       f'{prefix}SCAN_THREADS': str(int(self.scan_threads)),
+      f'{prefix}PRESERVE_ORIGINAL_INDEX': str(bool(self.preserve_original_index)).lower(),
+      f'{prefix}MAX_AUTO_REMAP_ATTEMPTS': str(int(self.max_auto_remap_attempts)),
+      f'{prefix}SPECIAL_INDEX_MAX_DIGITS': str(int(self.special_index_max_digits)),
+      f'{prefix}PENDING_JSONL_PATH': self.pending_jsonl_path,
+      f'{prefix}USE_FILE_LOCK': str(bool(self.use_file_lock)).lower(),
+      f'{prefix}WORKER_AUTOSTART': str(bool(self.worker_autostart)).lower(),
     }
 
     out: list[str] = []
