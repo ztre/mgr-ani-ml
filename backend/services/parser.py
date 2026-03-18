@@ -23,6 +23,12 @@ PATTERNS = {
     "final_dir": r"\bfinal\s*season?\b",
 }
 
+SEARCH_NOISE_PATTERN = re.compile(
+    r"\b(?:1080p|720p|2160p|x264|x265|h264|ma10p|ma444|hi10p|flac|aac|ac3|"
+    r"web|webrip|bluray|bdrip|bdmv|dvdrip|remux)\b",
+    re.I,
+)
+
 SPECIAL_TYPE_MAP = {
     # Season 00 pool
     "OP": ("season00", "OP"),
@@ -56,6 +62,21 @@ class ParseResult(NamedTuple):
     subtitle_lang: str | None = None
     is_ambiguous: bool = False
     final_season_hint: bool = False
+
+
+def make_search_name(raw_name: str) -> str:
+    """Build a cleaner TMDB query name from raw directory/file name."""
+    text = _preprocess(raw_name or "")
+    if not text:
+        return ""
+    text = SEARCH_NOISE_PATTERN.sub(" ", text)
+    text = re.sub(r"\bWEB\s+Preview", "Preview", text, flags=re.I)
+    text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    m = re.search(r"(?:^| )([2-9]|[12]\d|30)$", text)
+    if m:
+        text = text[: m.start(1)].strip()
+    return text
 
 
 # ----- TMDB API protection/caching -----

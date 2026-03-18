@@ -121,6 +121,7 @@ class Settings:
   pending_jsonl_path: str = '/media/pending/pending.jsonl'
   use_file_lock: bool = False
   worker_autostart: bool = True
+  season_aware_research_enabled: bool = True
 
   debug: bool = False
   scan_threads: int = max(1, (os.cpu_count() or 1) * 2)
@@ -187,6 +188,10 @@ class Settings:
       data.get(f'{p}WORKER_AUTOSTART'),
       self.worker_autostart,
     )
+    self.season_aware_research_enabled = _parse_bool(
+      data.get(f'{p}SEASON_AWARE_RESEARCH_ENABLED'),
+      self.season_aware_research_enabled,
+    )
 
   def save_to_env(self) -> None:
     env_path = self.env_file
@@ -231,6 +236,7 @@ class Settings:
       f'{prefix}PENDING_JSONL_PATH': self.pending_jsonl_path,
       f'{prefix}USE_FILE_LOCK': str(bool(self.use_file_lock)).lower(),
       f'{prefix}WORKER_AUTOSTART': str(bool(self.worker_autostart)).lower(),
+      f'{prefix}SEASON_AWARE_RESEARCH_ENABLED': str(bool(self.season_aware_research_enabled)).lower(),
     }
 
     out: list[str] = []

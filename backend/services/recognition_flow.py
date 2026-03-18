@@ -9,12 +9,14 @@ from pathlib import Path
 from .parser import (
     get_tmdb_tv_details_sync,
     is_title_number_safe,
+    make_search_name,
     parse_movie_filename,
     parse_tv_filename,
     search_tmdb_movie_candidates_sync,
     search_tmdb_tv_candidates_sync,
 )
 from ..api.logs import append_log
+from ..config import settings
 
 MAX_RESULTS_PER_QUERY = 10
 FALLBACK_MAX_ROUNDS = 2
@@ -145,11 +147,13 @@ def resolve_season(tmdb_client, tmdbid: int, season_hint: int | None, final_hint
 
 def generate_candidate_titles(snapshot: LocalParseSnapshot) -> list[str]:
     candidates: list[str] = []
+    search_name = make_search_name(snapshot.main_title or snapshot.cleaned_name)
     # season_hint 存在时，为 TMDB 搜索构造季号变体
     if snapshot.season_hint:
-        _push_candidate(candidates, f"{snapshot.main_title} season {snapshot.season_hint}")
-        _push_candidate(candidates, f"{snapshot.main_title} S{snapshot.season_hint}")
-        _push_candidate(candidates, f"{snapshot.cleaned_name} {snapshot.season_hint}")
+        _push_candidate(candidates, f"{search_name} season {snapshot.season_hint}")
+        _push_candidate(candidates, f"{search_name} S{snapshot.season_hint}")
+        _push_candidate(candidates, f"{search_name} {snapshot.season_hint}")
+    _push_candidate(candidates, search_name)
     _push_candidate(candidates, snapshot.cleaned_name)
     if snapshot.subtitle:
         _push_candidate(candidates, f"{snapshot.main_title} {snapshot.subtitle}")
@@ -175,6 +179,25 @@ def recognize_directory_with_fallback(
     - 使用的 fallback 轮次（0 表示首轮）
     """
     snapshot = parse_structure_locally(media_dir, structure_hint=structure_hint)
+    if (
+        bool(getattr(settings, "season_aware_research_enabled", True))
+        and snapshot.season_hint
+        and (structure_hint == "tv" or scan_context_type == "tv")
+    ):
+        fast_best, fast_tried = recognize_directory_with_season_hint_trace(
+            media_dir,
+            scan_context_type,
+            snapshot.season_hint,
+            structure_hint=structure_hint,
+        )
+        if fast_tried:
+            append_log(
+                f'INFO: search_name="{make_search_name(snapshot.main_title or snapshot.cleaned_name)}", '
+                f"tried season-aware queries: {fast_tried}"
+            )
+        if fast_best and fast_best.score >= PASS_SCORE:
+            return fast_best, snapshot, 0
+
     all_candidates = generate_candidate_titles(snapshot)
     if not all_candidates:
         return None, snapshot, 0
@@ -292,24 +315,48 @@ def recognize_directory_with_season_hint(
     structure_hint: str | None = None,
 ) -> RankedCandidate | None:
     """Run a season-aware re-search to improve season match."""
+    best, _tried = recognize_directory_with_season_hint_trace(
+        media_dir,
+        scan_context_type,
+        season_hint,
+        structure_hint=structure_hint,
+    )
+    return best
+
+
+def recognize_directory_with_season_hint_trace(
+    media_dir: Path,
+    scan_context_type: str,
+    season_hint: int,
+    structure_hint: str | None = None,
+) -> tuple[RankedCandidate | None, list[str]]:
+    """Run season-aware re-search and return (best, tried_queries)."""
+    if not bool(getattr(settings, "season_aware_research_enabled", True)):
+        return None, []
     snapshot = parse_structure_locally(media_dir, structure_hint=structure_hint)
     if not season_hint:
         season_hint = snapshot.season_hint or 0
     if not season_hint:
-        return None
-    candidates = []
-    _push_candidate(candidates, f"{snapshot.main_title} season {season_hint}")
-    _push_candidate(candidates, f"{snapshot.main_title} S{season_hint}")
-    _push_candidate(candidates, f"{snapshot.cleaned_name} {season_hint}")
-    if not candidates:
-        return None
-    return _unified_competitive_search(
-        candidates,
-        year_hint=snapshot.year_hint,
-        special_hint=snapshot.special_hint,
-        structure_hint=structure_hint or scan_context_type,
-        season_hint=season_hint,
-    )
+        return None, []
+
+    search_name = make_search_name(snapshot.main_title or snapshot.cleaned_name)
+    queries = _build_season_aware_queries(search_name, season_hint)
+    append_log(f'INFO: search_name="{search_name}", tried season-aware queries: {queries}')
+
+    first_pool = _collect_tv_candidates_from_queries(queries, snapshot.year_hint)
+    best = _select_season_matched_candidate(first_pool, season_hint)
+    if best is not None:
+        return best, queries
+
+    alias_queries = _build_alias_queries_from_pool(first_pool, season_hint)
+    if alias_queries:
+        append_log(f"INFO: re-search tried alternatives: {alias_queries}")
+        second_pool = _collect_tv_candidates_from_queries(alias_queries, snapshot.year_hint)
+        best = _select_season_matched_candidate(second_pool, season_hint)
+        if best is not None:
+            return best, queries + alias_queries
+
+    return None, queries + alias_queries
 
 
 def _apply_season_hint_boost(pool: list[RankedCandidate], season_hint: int) -> None:
@@ -340,8 +387,93 @@ def _apply_season_hint_boost(pool: list[RankedCandidate], season_hint: int) -> N
         if season_hint in seasons:
             cand.score = min(1.0, cand.score + SEASON_DETAIL_BOOST)
             append_log(
-                f"INFO: 使用 season_hint 匹配 TMDB 条目: title={cand.title}, tmdbid={cand.tmdb_id}, season={season_hint}"
+                f'INFO: season_hint match -> use tmdbid={cand.tmdb_id} season={season_hint} for title="{cand.title}"'
             )
+
+
+def _build_season_aware_queries(search_name: str, season_hint: int) -> list[str]:
+    out: list[str] = []
+    _push_candidate(out, f"{search_name} season {season_hint}")
+    _push_candidate(out, f"{search_name} S{season_hint}")
+    _push_candidate(out, f"{search_name} {season_hint}")
+    return out
+
+
+def _collect_tv_candidates_from_queries(queries: list[str], year_hint: int | None) -> list[RankedCandidate]:
+    pool: list[RankedCandidate] = []
+    seen: set[int] = set()
+    for q in queries:
+        tv_items = search_tmdb_tv_candidates_sync(q, year_hint)[:MAX_RESULTS_PER_QUERY]
+        append_log(f"搜索候选: {q}, TV 结果: {len(tv_items)}, Movie 结果: 0")
+        for item in tv_items:
+            cand = _to_ranked_candidate(q, "tv", item, year_hint)
+            if not cand or cand.tmdb_id is None:
+                continue
+            if int(cand.tmdb_id) in seen:
+                continue
+            seen.add(int(cand.tmdb_id))
+            pool.append(cand)
+    return pool
+
+
+def _select_season_matched_candidate(pool: list[RankedCandidate], season_hint: int) -> RankedCandidate | None:
+    if not pool:
+        return None
+    _apply_season_hint_boost(pool, season_hint)
+    ranked = sorted(pool, key=lambda x: x.score, reverse=True)
+    for cand in ranked[:SEASON_DETAIL_MAX_CANDIDATES]:
+        details = get_tmdb_tv_details_sync(int(cand.tmdb_id))
+        seasons = {
+            int(s.get("season_number"))
+            for s in (details.get("seasons", []) if isinstance(details, dict) else [])
+            if s.get("season_number") is not None
+        }
+        if season_hint in seasons:
+            append_log(
+                f'INFO: season_hint match -> use tmdbid={cand.tmdb_id} season={season_hint} for title="{cand.title}"'
+            )
+            return cand
+    return None
+
+
+def _build_alias_queries_from_pool(pool: list[RankedCandidate], season_hint: int) -> list[str]:
+    out: list[str] = []
+    top = sorted(pool, key=lambda x: x.score, reverse=True)[:SEASON_DETAIL_MAX_CANDIDATES]
+    for cand in top:
+        details = get_tmdb_tv_details_sync(int(cand.tmdb_id))
+        if not isinstance(details, dict):
+            continue
+        for alias in _extract_alias_titles(details):
+            base = make_search_name(alias)
+            for q in _build_season_aware_queries(base, season_hint):
+                _push_candidate(out, q)
+    return out
+
+
+def _extract_alias_titles(details: dict) -> list[str]:
+    aliases: list[str] = []
+    aka = details.get("also_known_as")
+    if isinstance(aka, list):
+        for item in aka:
+            if isinstance(item, str) and item.strip():
+                aliases.append(item.strip())
+    alt = details.get("alternative_titles")
+    if isinstance(alt, dict):
+        for item in alt.get("results", []) or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or item.get("name") or "").strip()
+            if title:
+                aliases.append(title)
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for x in aliases:
+        key = x.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(x)
+    return dedup
 
 
 def _to_ranked_candidate(query_title: str, media_type: str, item: dict, year_hint: int | None) -> RankedCandidate | None:

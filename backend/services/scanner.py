@@ -36,7 +36,7 @@ from .recognition_flow import (
     LocalParseSnapshot,
     parse_structure_locally,
     recognize_directory_with_fallback,
-    recognize_directory_with_season_hint,
+    recognize_directory_with_season_hint_trace,
     resolve_season as resolve_season_by_tmdb,
 )
 from .renamer import compute_movie_target_path, compute_tv_target_path
@@ -924,6 +924,15 @@ def _process_file(
         pending_cfg = {
             "max_auto_remap_attempts": getattr(settings, "max_auto_remap_attempts", 3),
         }
+        if dst_path.exists():
+            existing_rec = (
+                db.query(MediaRecord)
+                .filter(MediaRecord.target_path == str(dst_path))
+                .order_by(MediaRecord.id.desc())
+                .first()
+            )
+            if existing_rec and existing_rec.original_path:
+                item["owner_dir"] = str(Path(existing_rec.original_path).parent)
         if dst_path in seen_targets:
             if pending_path:
                 mark_pending(item, "batch target conflict", pending_path)
@@ -2000,7 +2009,12 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         append_log(
             f"INFO: chosen season {chosen} not found in TMDB seasons for candidate tmdbid {tmdb_id} - re-search attempted"
         )
-        best = recognize_directory_with_season_hint(media_dir, "tv", chosen, structure_hint="tv")
+        if not bool(getattr(settings, "season_aware_research_enabled", True)):
+            return False, f"季号不匹配 TMDB: season_hint={chosen}"
+
+        best, tried_queries = recognize_directory_with_season_hint_trace(media_dir, "tv", chosen, structure_hint="tv")
+        if tried_queries:
+            append_log(f"INFO: re-search tried: {tried_queries}")
         if best and best.tmdb_id and int(best.tmdb_id) != int(tmdb_id):
             context["tmdb_id"] = int(best.tmdb_id)
             context["tmdb_data"] = _get_tmdb_item_by_id("tv", best.tmdb_id) or best.tmdb_data
@@ -2018,12 +2032,30 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
                 )
                 if chosen in valid_seasons:
                     tmdb_id = int(best.tmdb_id)
+                    append_log(
+                        f"INFO: resolved by season-aware re-search -> tmdbid={tmdb_id}, season={chosen}"
+                    )
                 else:
-                    return False, f"季号不匹配 TMDB: season_hint={chosen}"
+                    return False, f"季号不匹配 TMDB: season_hint={chosen}, tried={tried_queries}"
             else:
                 return False, "无法获取 TMDB 季信息"
+        elif best and best.tmdb_id and int(best.tmdb_id) == int(tmdb_id):
+            details = get_tmdb_tv_details_sync(int(best.tmdb_id))
+            valid_seasons = sorted(
+                {
+                    int(x.get("season_number"))
+                    for x in (details.get("seasons", []) if isinstance(details, dict) else [])
+                    if x.get("season_number") is not None and int(x.get("season_number")) > 0
+                }
+            )
+            if chosen in valid_seasons:
+                append_log(
+                    f"INFO: resolved by season-aware re-search -> tmdbid={best.tmdb_id}, season={chosen}"
+                )
+            else:
+                return False, f"季号不匹配 TMDB: season_hint={chosen}, tried={tried_queries}"
         else:
-            return False, f"季号不匹配 TMDB: season_hint={chosen}"
+            return False, f"季号不匹配 TMDB: season_hint={chosen}, tried={tried_queries}"
 
     resolved = resolve_season_by_tmdb(None, int(tmdb_id), chosen, final_hint=is_final)
     if resolved is None:
