@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 
 from .config import settings
@@ -24,6 +24,18 @@ engine = create_engine(
   connect_args={'check_same_thread': False, 'timeout': 30} if _IS_SQLITE else {},
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+if _IS_SQLITE:
+  @event.listens_for(engine, "connect")
+  def _set_sqlite_pragmas(dbapi_connection, connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+      cursor.execute("PRAGMA journal_mode=WAL")
+      cursor.execute("PRAGMA synchronous=NORMAL")
+      cursor.execute("PRAGMA busy_timeout=30000")
+    finally:
+      cursor.close()
 
 
 def init_db() -> None:

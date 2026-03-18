@@ -348,15 +348,22 @@ def recognize_directory_with_season_hint_trace(
     if best is not None:
         return best, queries
 
-    alias_queries = _build_alias_queries_from_pool(first_pool, season_hint)
+    broad_queries: list[str] = []
+    _push_candidate(broad_queries, search_name)
+    broad_pool = _collect_tv_candidates_from_queries(broad_queries, snapshot.year_hint)
+    best = _select_season_matched_candidate(broad_pool, season_hint)
+    if best is not None:
+        return best, queries + broad_queries
+
+    alias_queries = _build_alias_queries_from_pool(first_pool + broad_pool, season_hint)
     if alias_queries:
         append_log(f"INFO: re-search tried alternatives: {alias_queries}")
         second_pool = _collect_tv_candidates_from_queries(alias_queries, snapshot.year_hint)
         best = _select_season_matched_candidate(second_pool, season_hint)
         if best is not None:
-            return best, queries + alias_queries
+            return best, queries + broad_queries + alias_queries
 
-    return None, queries + alias_queries
+    return None, queries + broad_queries + alias_queries
 
 
 def _apply_season_hint_boost(pool: list[RankedCandidate], season_hint: int) -> None:

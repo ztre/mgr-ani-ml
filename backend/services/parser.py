@@ -25,7 +25,7 @@ PATTERNS = {
 
 SEARCH_NOISE_PATTERN = re.compile(
     r"\b(?:1080p|720p|2160p|x264|x265|h264|ma10p|ma444|hi10p|flac|aac|ac3|"
-    r"web|webrip|bluray|bdrip|bdmv|dvdrip|remux)\b",
+    r"web|webrip|bluray|bdrip|bdmv|dvdrip|remux|mawen1250|mysilu)\b",
     re.I,
 )
 
