@@ -3,6 +3,7 @@ import os
 import fcntl
 import re
 import time
+import hashlib
 import queue
 import atexit
 from dataclasses import dataclass, field
@@ -10,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread
 from contextlib import nullcontext
+from typing import Literal
 
 import httpx
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -93,6 +95,27 @@ class DirectoryProcessError(Exception):
     pass
 
 
+def _classify_media_task_error(exc: Exception) -> Literal["deterministic_conflict", "transient", "other"]:
+    text = str(exc or "")
+    lowered = text.lower()
+    if "多个源文件映射到同一目标" in text or "目标路径已被其他文件占用" in text:
+        return "deterministic_conflict"
+    if isinstance(exc, (OperationalError, TimeoutError, httpx.TimeoutException, httpx.ConnectTimeout, httpx.ReadTimeout)):
+        return "transient"
+    transient_keywords = (
+        "database is locked",
+        "database table is locked",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "deadlock",
+        "try again",
+    )
+    if any(token in lowered for token in transient_keywords):
+        return "transient"
+    return "other"
+
+
 def tag_task_type_with_issue(task_type: str) -> str:
     base = str(task_type or "").strip() or "scan"
     return base if base.startswith("issue_sp:") else f"issue_sp:{base}"
@@ -153,22 +176,35 @@ def _media_task_worker() -> None:
             token = current_task_id.set(task.task_id)
         append_log(f"INFO: MediaTask start: {task.path}")
         retries = 0
-        while retries < 3:
+        recompute_retry_used = False
+        while True:
             local_db = SessionLocal()
             try:
-                _handle_media_task(local_db, task)
+                _handle_media_task(local_db, task, force_recompute_names=recompute_retry_used)
                 local_db.commit()
                 append_log(f"INFO: MediaTask done: {task.path}")
                 break
             except Exception as e:
                 local_db.rollback()
-                retries += 1
-                backoff = 2 ** retries
-                # 失败重试：指数退避，最多 3 次
-                append_log(f"WARNING: MediaTask failed ({retries}/3): {task.path} | {e} | backoff={backoff}s")
-                time.sleep(backoff)
-                if retries >= 3:
-                    append_log(f"WARNING: MediaTask permanently failed: {task.path}")
+                error_kind = _classify_media_task_error(e)
+                if error_kind == "deterministic_conflict" and not recompute_retry_used:
+                    recompute_retry_used = True
+                    append_log(
+                        f"WARNING: MediaTask deterministic conflict: {task.path} | {e} | trigger target-name recompute retry"
+                    )
+                    continue
+                if error_kind == "transient" and retries < 3:
+                    retries += 1
+                    backoff = 2 ** retries
+                    append_log(
+                        f"WARNING: MediaTask transient failure ({retries}/3): {task.path} | {e} | backoff={backoff}s"
+                    )
+                    time.sleep(backoff)
+                    continue
+                append_log(
+                    f"WARNING: MediaTask permanent failure ({error_kind}): {task.path} | {e}"
+                )
+                break
             finally:
                 local_db.close()
         if token is not None:
@@ -570,7 +606,7 @@ def _process_sync_group(
     return first_dir_name, False
 
 
-def _handle_media_task(db: Session, task: MediaTask) -> None:
+def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool = False) -> None:
     group = db.query(SyncGroup).filter(SyncGroup.id == task.sync_group_id).first()
     if not group:
         return
@@ -647,8 +683,13 @@ def _handle_media_task(db: Session, task: MediaTask) -> None:
         "score": best.score,
         "fallback_round": fallback_round,
         "season_hint": snapshot.season_hint,
+        "season_hint_confidence": snapshot.season_hint_confidence,
         "special_hint": snapshot.special_hint,
         "final_hint": snapshot.final_hint,
+        "season_aware_done": snapshot.season_aware_done,
+        "season_aware_had_candidates": snapshot.season_aware_had_candidates,
+        "season_aware_tried_queries": list(snapshot.season_aware_tried_queries or []),
+        "recompute_target_names": bool(force_recompute_names),
         "_has_issues": False,
     }
 
@@ -670,6 +711,7 @@ def _handle_media_task(db: Session, task: MediaTask) -> None:
         "video_anchor_by_parent": {},
         "video_anchor_by_parent_episode": {},
         "video_anchor_by_parent_stem": {},
+        "video_anchor_recent_by_parent": {},
         "pending_count": 0,
         "skipped_count": 0,
     }
@@ -684,12 +726,16 @@ def _handle_media_task(db: Session, task: MediaTask) -> None:
         existing_cache = scan_existing_special_indices(target_root, context.get("tmdb_id"))
         append_log(f"INFO: scan existing specials: {existing_cache}")
         all_files = video_files + attachment_files
-        items, item_map = _build_allocation_items(all_files, context, target_type)
-        assignments = allocate_indices_for_batch(
-            items,
-            existing_cache,
-            preserve_original_index=bool(getattr(settings, "preserve_original_index", True)),
-        )
+        if force_recompute_names:
+            append_log("INFO: recompute mode enabled: skip allocator assignments and recalculate target names")
+            items, item_map, assignments = [], {}, {}
+        else:
+            items, item_map = _build_allocation_items(all_files, context, target_type)
+            assignments = allocate_indices_for_batch(
+                items,
+                existing_cache,
+                preserve_original_index=bool(getattr(settings, "preserve_original_index", True)),
+            )
         context["allocator_assignments"] = assignments
         context["allocator_items"] = item_map
 
@@ -849,6 +895,8 @@ def _process_file(
     if parse_result.extra_category is not None and not special_logged:
         _log_special_classification(parse_result.extra_category, parse_result.extra_label)
 
+    original_special_label = parse_result.extra_label
+    remapped = False
     assignments = context.get("allocator_assignments") or {}
     item_map = context.get("allocator_items") or {}
     assigned_by_allocator = False
@@ -859,12 +907,15 @@ def _process_file(
         preferred = item.get("preferred")
         if preferred and int(preferred) != int(assigned_index):
             append_log(f"INFO: Special remap: {prefix}{int(preferred):02d} -> {prefix}{int(assigned_index):02d} for {src_path.name}")
+            remapped = True
         parse_result = parse_result._replace(extra_label=_format_prefix_number(prefix, int(assigned_index)))
         if parse_result.extra_category in {"special", "oped"}:
             parse_result = parse_result._replace(episode=int(assigned_index))
         assigned_by_allocator = True
     else:
+        before_label = parse_result.extra_label
         parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime)
+        remapped = bool(before_label and parse_result.extra_label and before_label != parse_result.extra_label)
 
     if media_type == "tv" and parse_result.extra_category is None and _should_ignore_zero_episode(src_path.name):
         append_log(f"INFO: 跳过第0集/00集文件: {src_path.name}")
@@ -875,6 +926,9 @@ def _process_file(
             ep = _extract_episode_from_filename_loose(src_path.name)
             if ep is not None:
                 parse_result = parse_result._replace(episode=ep)
+        if parse_result.extra_category is None and parse_result.episode is None:
+            parse_result = parse_result._replace(extra_category="making", extra_label=None, is_special=False)
+            append_log(f"INFO: 无显式集号，按 extras 处理: {src_path.name}")
 
         resolved_season = context.get("resolved_season")
         season_from_path = _extract_season_from_path(src_path)
@@ -891,7 +945,8 @@ def _process_file(
         if offset is not None and parse_result.episode is not None and parse_result.extra_category is None:
             adjusted = parse_result.episode - int(offset)
             parse_result = parse_result._replace(episode=max(1, adjusted))
-
+    parse_result = _apply_readable_suffix_for_unnumbered_extra(parse_result, src_path, dir_runtime)
+    if media_type == "tv":
         dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
     else:
         dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
@@ -908,6 +963,7 @@ def _process_file(
                 break
             if assigned_by_allocator:
                 break
+            remapped = True
             parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime, force_next=True)
             if media_type == "tv":
                 dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
@@ -916,6 +972,7 @@ def _process_file(
             attempts += 1
             if attempts > 50:
                 raise DirectoryProcessError(f"多个源文件映射到同一目标: {src_path.name}")
+        _log_special_resolution(src_path, parse_result, original_special_label, remapped)
 
     if assigned_by_allocator and item:
         item["suggested_target"] = str(dst_path)
@@ -1020,8 +1077,6 @@ def _extract_episode_from_filename_loose(filename: str) -> int | None:
         r"\bEp\s*(\d{1,3})\b",
         r"\bE(\d{1,3})\b",
         r"第\s*(\d{1,3})\s*[集话話]",
-        r"(?<!\d)(\d{2})(?!\d)",
-        r"(?:^|[\s\-_\.])(\d{1,3})(?:$|[\s\-_\.])",
     ]
     for p in patterns:
         m = re.search(p, stem, re.I)
@@ -1039,8 +1094,10 @@ def _register_video_anchor(src_path: Path, dst_path: Path, parse_result: ParseRe
     by_parent = dir_runtime.setdefault("video_anchor_by_parent", {})
     by_parent_ep = dir_runtime.setdefault("video_anchor_by_parent_episode", {})
     by_parent_stem = dir_runtime.setdefault("video_anchor_by_parent_stem", {})
+    by_parent_recent = dir_runtime.setdefault("video_anchor_recent_by_parent", {})
     parent_key = str(src_path.parent)
     by_parent[parent_key] = dst_path
+    by_parent_recent[parent_key] = dst_path
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
         by_parent_ep[(parent_key, int(ep_key))] = dst_path
@@ -1055,6 +1112,7 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
     by_parent = dir_runtime.get("video_anchor_by_parent", {})
     by_parent_ep = dir_runtime.get("video_anchor_by_parent_episode", {})
     by_parent_stem = dir_runtime.get("video_anchor_by_parent_stem", {})
+    by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
     parent_key = str(src_path.parent)
 
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
@@ -1067,6 +1125,9 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
         candidate = by_parent_stem.get((parent_key, stem_key))
         if candidate:
             return candidate
+    recent = by_parent_recent.get(parent_key)
+    if recent:
+        return recent
     return by_parent.get(parent_key)
 
 
@@ -1816,6 +1877,138 @@ def _extract_label_index(label: str | None) -> int | None:
     return val if 1 <= val <= 999 else None
 
 
+def _extract_stable_label_index(label: str | None) -> int | None:
+    s = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not s:
+        return None
+    patterns = [
+        r"\b(?:SP|OVA|OAD|OAV|SPECIAL)\s*0*(\d{1,3})\b",
+        r"\b(?:OP|ED|NCOP|NCED)\s*0*(\d{1,3})\b",
+        r"\b(?:PV|CM|Preview|Trailer|Teaser|CharacterPV|WebPreview|IV|MV|Interview|Making|BDExtra)\s*0*(\d{1,3})\b",
+    ]
+    for p in patterns:
+        m = re.search(p, s, re.I)
+        if not m:
+            continue
+        val = int(m.group(1))
+        if 1 <= val <= 999:
+            return val
+    return None
+
+
+def _needs_readable_suffix(parse_result: ParseResult) -> bool:
+    if parse_result.extra_category not in {"special", "oped"} | EXTRAS_CATEGORIES:
+        return False
+    stable_idx = _extract_stable_label_index(parse_result.extra_label)
+    if stable_idx is not None:
+        return False
+    if parse_result.episode is None:
+        return True
+    return int(parse_result.episode) == 1
+
+
+def _normalize_suffix_text(text: str) -> str:
+    s = str(text or "")
+    s = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", s)
+    s = s.replace(".", " ").replace("_", " ")
+    s = re.sub(
+        r"\b(?:2160p|1080p|720p|480p|4k|x264|x265|h264|h265|hevc|av1|10bit|8bit|ma10p|hi10p|"
+        r"flac|aac|ac3|dts|ddp\d?\.?\d?|dvd|pgs|chap|ch(?:s|t)|webrip|web[-\s]?dl|bdrip|bluray|remux|bdmv|"
+        r"jpsc|jptc|chs|cht|sc|tc|gb|big5|raw|vcb(?:-?studio)?|mawen\d*|mysilu|yuv\d+p?\d*)\b",
+        " ",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(r"\b(?:s\d{1,2}e\d{1,3}|\d{1,2}x\d{1,3}|ep?\s*\d{1,3}|e\d{1,3}|sp\d{0,3}|ova\d*)\b", " ", s, flags=re.I)
+    s = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", s, flags=re.U)
+    s = re.sub(r"\s+", " ", s).strip(" -_")
+    return s
+
+
+def _build_readable_suffix(src_path: Path, parse_result: ParseResult) -> str:
+    raw = re.sub(r"\s*-\s*(?:mawen\d*|vcb(?:-?studio)?|mysilu)\s*$", "", src_path.stem, flags=re.I)
+    raw = re.sub(r"\[[^\]]*\]", " ", raw)
+    candidates = re.split(r"\s*-\s*", raw)
+    title_norm = _normalize_suffix_text(parse_result.title).lower()
+
+    for segment in candidates:
+        cleaned = _normalize_suffix_text(segment)
+        if not cleaned:
+            continue
+        if title_norm and cleaned.lower() == title_norm:
+            continue
+        if re.fullmatch(r"\d+", cleaned):
+            continue
+        has_alpha_or_cjk = re.search(r"[A-Za-z\u4e00-\u9fff]", cleaned) is not None
+        if not has_alpha_or_cjk:
+            continue
+        if len(cleaned) < 3 and not re.search(r"[\u4e00-\u9fff]", cleaned):
+            continue
+        return cleaned[:28]
+
+    cleaned_all = _normalize_suffix_text(raw)
+    if cleaned_all and not re.fullmatch(r"\d+", cleaned_all):
+        return cleaned_all[:28]
+    return f"h{hashlib.md5(str(src_path).encode('utf-8')).hexdigest()[:6]}"
+
+
+def _ensure_unique_suffix_label(
+    base_label: str,
+    src_path: Path,
+    parse_result: ParseResult,
+    dir_runtime: dict | None,
+) -> str:
+    if dir_runtime is None:
+        return base_label
+    registry = dir_runtime.setdefault("suffix_label_registry", {})
+    parent_key = str(src_path.parent)
+    category_key = str(parse_result.extra_category or "extra")
+    key = (parent_key, category_key, base_label.lower())
+    idx = int(registry.get(key, 0)) + 1
+    registry[key] = idx
+    if idx == 1:
+        return base_label
+    candidate = f"{base_label} #{idx:02d}"
+    if len(candidate) > 80:
+        candidate = candidate[:80].rstrip()
+    return candidate
+
+
+def _apply_readable_suffix_for_unnumbered_extra(
+    parse_result: ParseResult,
+    src_path: Path,
+    dir_runtime: dict | None,
+) -> ParseResult:
+    if not _needs_readable_suffix(parse_result):
+        return parse_result
+    if parse_result.extra_category in {"special", "oped"}:
+        parse_result = _assign_sequential_episode_for_unnumbered(parse_result, src_path, dir_runtime)
+    suffix = _build_readable_suffix(src_path, parse_result)
+    if not suffix:
+        suffix = f"h{hashlib.md5(src_path.name.encode('utf-8')).hexdigest()[:6]}"
+    candidate = suffix
+    candidate = _ensure_unique_suffix_label(candidate, src_path, parse_result, dir_runtime)
+    return parse_result._replace(extra_label=candidate)
+
+
+def _assign_sequential_episode_for_unnumbered(
+    parse_result: ParseResult,
+    src_path: Path,
+    dir_runtime: dict | None,
+) -> ParseResult:
+    if dir_runtime is None:
+        return parse_result
+    stable_idx = _extract_stable_label_index(parse_result.extra_label)
+    if stable_idx is not None:
+        return parse_result._replace(episode=stable_idx)
+    parent_key = str(src_path.parent)
+    key = (parent_key, str(parse_result.extra_category or "special"))
+    seq_map = dir_runtime.setdefault("unnumbered_special_seq", {})
+    current = int(seq_map.get(key, 0)) + 1
+    seq_map[key] = current
+    return parse_result._replace(episode=current)
+
+
 def _apply_special_indexing(
     parse_result: ParseResult,
     src_path: Path,
@@ -1831,7 +2024,7 @@ def _apply_special_indexing(
     label = parse_result.extra_label or ""
     prefix = _special_label_prefix(category, label)
     used = dir_runtime.setdefault("special_used", {}).setdefault((category, prefix), set())
-    idx = None if force_next else _extract_label_index(label)
+    idx = None if force_next else _extract_stable_label_index(label)
 
     version_suffix = ""
     m_ver = re.search(r"\b(?:ver\.?\s*\d+|v\d+)\b", label, re.I)
@@ -1886,6 +2079,24 @@ def _log_special_classification(category: str | None, label: str | None) -> None
         append_log(f"Special 分类: {display}")
 
 
+def _log_special_resolution(
+    src_path: Path,
+    parse_result: ParseResult,
+    raw_label: str | None,
+    remapped: bool,
+) -> None:
+    category = parse_result.extra_category
+    if category is None:
+        return
+    final_label = parse_result.extra_label or "-"
+    raw = raw_label or "-"
+    index_text = str(parse_result.episode) if parse_result.episode is not None else "-"
+    append_log(
+        "INFO: special resolved: file=%s, raw_label=%s, category=%s, final_label=%s, index=%s, remap=%s"
+        % (src_path.name, raw, category, final_label, index_text, str(bool(remapped)).lower())
+    )
+
+
 def _normalized_episode_key(parse_result: ParseResult, src_path: Path, filename: str) -> int | None:
     if parse_result.extra_category in {"special", "oped"}:
         season = parse_result.season or _extract_season_from_path(src_path) or 1
@@ -1936,25 +2147,68 @@ def _resolve_chinese_title_by_tmdb(
 
     endpoint = "tv" if media_type == "tv" else "movie"
     url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}"
-    params = {"api_key": settings.tmdb_api_key, "language": "zh-CN"}
 
     try:
         with httpx.Client(timeout=10) as client:
-            resp = client.get(url, params=params)
-        if resp.status_code != 200:
-            return None if strict else fallback_title
-        data = resp.json() if resp.content else {}
-        if not isinstance(data, dict):
-            return None if strict else fallback_title
-        if media_type == "tv":
-            title = str(data.get("name") or "").strip()
-        else:
-            title = str(data.get("title") or "").strip()
-        if title:
-            return title
+            cn = _fetch_tmdb_localized_title(client, url, media_type, "zh-CN")
+            tw = _fetch_tmdb_localized_title(client, url, media_type, "zh-TW")
+        chosen, lang = _pick_display_title(cn, tw, fallback_title)
+        if strict and lang == "fallback":
+            append_log("INFO: tmdb title resolved: lang=fallback, title=")
+            return None
+        append_log(f"INFO: tmdb title resolved: lang={lang}, title={chosen or ''}")
+        if chosen:
+            return chosen
         return None if strict else fallback_title
     except Exception:
         return None if strict else fallback_title
+
+
+def _fetch_tmdb_localized_title(client: httpx.Client, url: str, media_type: str, language: str) -> str | None:
+    params = {"api_key": settings.tmdb_api_key, "language": language}
+    resp = client.get(url, params=params)
+    if resp.status_code != 200:
+        return None
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict):
+        return None
+    if media_type == "tv":
+        value = data.get("name")
+    else:
+        value = data.get("title")
+    title = str(value or "").strip()
+    return title or None
+
+
+def _has_cjk(text: str) -> bool:
+    return re.search(r"[\u4e00-\u9fff]", str(text or "")) is not None
+
+
+def _looks_like_bad_localized_title(text: str) -> bool:
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not s:
+        return True
+    if not _has_cjk(s):
+        return True
+    normalized = re.sub(r"[\W_]+", "", s, flags=re.U)
+    if normalized and re.fullmatch(r"[A-Za-z0-9]+", normalized):
+        return True
+    return False
+
+
+def _pick_display_title(cn: str | None, tw: str | None, fallback: str) -> tuple[str | None, str]:
+    cn_val = str(cn or "").strip()
+    tw_val = str(tw or "").strip()
+    fallback_val = str(fallback or "").strip()
+    if cn_val and not _looks_like_bad_localized_title(cn_val):
+        return cn_val, "zh-CN"
+    if tw_val and not _looks_like_bad_localized_title(tw_val):
+        return tw_val, "zh-TW"
+    if cn_val:
+        return cn_val, "zh-CN(raw)"
+    if tw_val:
+        return tw_val, "zh-TW(raw)"
+    return (fallback_val or None), "fallback"
 
 
 def _is_final_season_title(name: str) -> bool:
@@ -1980,6 +2234,9 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     # TV: 目录识别后再做一次季号稳定决策。
     season_from_path = _extract_season_from_path(media_dir)
     season_hint = context.get("season_hint")
+    season_hint_confidence = str(context.get("season_hint_confidence") or "").strip().lower() or None
+    season_aware_done = bool(context.get("season_aware_done"))
+    season_aware_had_candidates = bool(context.get("season_aware_had_candidates"))
     if isinstance(season_hint, int) and season_hint <= 0:
         season_hint = None
 
@@ -2009,10 +2266,34 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         append_log(
             f"INFO: chosen season {chosen} not found in TMDB seasons for candidate tmdbid {tmdb_id} - re-search attempted"
         )
+        reliable_hint = season_from_path is not None or season_hint_confidence == "high"
+        if not reliable_hint:
+            append_log("INFO: season hint appears weak/title-number-like, skip re-search and fallback to default season")
+            chosen = None
+        elif season_aware_done and season_aware_had_candidates:
+            return False, f"季号不匹配 TMDB: season_hint={chosen}, already checked in recognition"
+        elif season_aware_done and not season_aware_had_candidates:
+            append_log("INFO: recognition season-aware had no candidates, allow one re-search in stabilize")
+        if chosen is None:
+            resolved = resolve_season_by_tmdb(None, int(tmdb_id), chosen, final_hint=is_final)
+            if resolved is None:
+                return False, "Final Season 解析失败或 TMDB 不可用"
+            context["season_hint"] = chosen
+            context["resolved_season"] = resolved
+            context["final_resolved_season"] = resolved if is_final else None
+            return True, None
         if not bool(getattr(settings, "season_aware_research_enabled", True)):
             return False, f"季号不匹配 TMDB: season_hint={chosen}"
 
-        best, tried_queries = recognize_directory_with_season_hint_trace(media_dir, "tv", chosen, structure_hint="tv")
+        best, tried_queries, had_candidates = recognize_directory_with_season_hint_trace(
+            media_dir,
+            "tv",
+            chosen,
+            structure_hint="tv",
+        )
+        context["season_aware_done"] = True
+        context["season_aware_had_candidates"] = had_candidates
+        context["season_aware_tried_queries"] = tried_queries
         if tried_queries:
             append_log(f"INFO: re-search tried: {tried_queries}")
         if best and best.tmdb_id and int(best.tmdb_id) != int(tmdb_id):

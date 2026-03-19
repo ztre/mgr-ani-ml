@@ -28,6 +28,29 @@ SEARCH_NOISE_PATTERN = re.compile(
     r"web|webrip|bluray|bdrip|bdmv|dvdrip|remux|mawen1250|mysilu)\b",
     re.I,
 )
+FPS_TOKEN_PATTERN = re.compile(r"\b\d{1,3}(?:\.\d{1,3})?fps\b", re.I)
+
+_LEADING_DATE_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:19\d{2}|20\d{2})(?:[.\-_/]\d{1,2}){1,2}[.\-_\s]+",
+    re.I,
+)
+_TRAILING_GROUP_PATTERN = re.compile(r"\s*-\s*([A-Za-z0-9][A-Za-z0-9._\-\s]{1,48})$")
+_NOISE_SUBTITLE_TOKEN_PATTERN = re.compile(
+    r"\b(?:"
+    r"vcb(?:-?studio)?|mawen\d*|mysilu|x26[45]|h26[45]|hevc|av1|"
+    r"1080p|720p|2160p|480p|4k|ma10p|hi10p|flac|aac|ac3|dts|ddp\d?\.?\d?|"
+    r"bluray|bdrip|bdmv|webrip|web[-\s]?dl|remux|sub(?:title)?s?|chs|cht|jpsc|jptc|raw"
+    r")\b",
+    re.I,
+)
+_TITLE_NUMBER_PROTECTED_PATTERNS = [
+    r"\beighty\s*six\b",
+    r"\b86\b",
+    r"\bsteins;?\s*gate\s*0\b",
+    r"\b91\s*days\b",
+    r"\bi\s*\+\s*ii\b",
+    r"\b3\s*-?\s*gatsu\b",
+]
 
 SPECIAL_TYPE_MAP = {
     # Season 00 pool
@@ -69,13 +92,24 @@ def make_search_name(raw_name: str) -> str:
     text = _preprocess(raw_name or "")
     if not text:
         return ""
+    text = _strip_leading_date_prefix(text)
+    text = _strip_trailing_release_group(text)
+    main, subtitle = split_main_subtitle(text)
+    if subtitle:
+        text = f"{main} {subtitle}".strip()
+    else:
+        text = main
     text = SEARCH_NOISE_PATTERN.sub(" ", text)
+    text = re.sub(r"\bbd\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(19\d{2}|20\d{2})\b", " ", text)
     text = re.sub(r"\bWEB\s+Preview", "Preview", text, flags=re.I)
     text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     m = re.search(r"(?:^| )([2-9]|[12]\d|30)$", text)
     if m:
-        text = text[: m.start(1)].strip()
+        prefix = text[: m.start(1)].strip()
+        if not re.search(r"\b(?:season|s)\s*$", prefix, re.I):
+            text = prefix
     return text
 
 
@@ -588,12 +622,16 @@ def _stem(filename: str) -> str:
 
 def _preprocess(text: str) -> str:
     s = text
+    s = _strip_leading_date_prefix(s)
     s = re.sub(r"\[[^\]]*\]", " ", s)
     s = re.sub(r"\([^\)]*\)", " ", s)
     s = re.sub(r"\{[^\}]*\}", " ", s)
 
     tech_patterns = [
         r"\b(?:2160p|1080p|720p|480p|4k)\b",
+        r"\b\d{1,3}(?:\.\d{1,3})?fps\b",
+        r"\b\d{1,3}\.\d{1,3}fps\b",
+        r"\b\d{1,3}fps\b",
         r"\b(?:x264|x265|h264|h265|hevc|av1)\b",
         r"\b(?:10bit|8bit|ma10p|hi10p)\b",
         r"\b(?:flac|aac|ac3|dts|ddp\d?\.\d?)\b",
@@ -613,12 +651,16 @@ def _preprocess_for_episode(text: str) -> str:
         return f"[{content}]" if re.search(r"\d", content) else " "
 
     s = text
+    s = _strip_leading_date_prefix(s)
     s = re.sub(r"\[([^\]]*)\]", _bracket_repl, s)
     s = re.sub(r"\([^\)]*\)", " ", s)
     s = re.sub(r"\{[^\}]*\}", " ", s)
 
     tech_patterns = [
         r"\b(?:2160p|1080p|720p|480p|4k)\b",
+        r"\b\d{1,3}(?:\.\d{1,3})?fps\b",
+        r"\b\d{1,3}\.\d{1,3}fps\b",
+        r"\b\d{1,3}fps\b",
         r"\b(?:x264|x265|h264|h265|hevc|av1)\b",
         r"\b(?:10bit|8bit|ma10p|hi10p)\b",
         r"\b(?:flac|aac|ac3|dts|ddp\d?\.\d?)\b",
@@ -678,15 +720,10 @@ def is_title_number_safe(cleaned_title: str) -> bool:
         return True
     if re.fullmatch(r"\d+", title):
         return False
-    if title in {"86"}:
-        return False
-    if title.endswith(" 0") or title.endswith("0"):
-        return False
-    if re.search(r"\bsteins;gate\s*0\b", title):
-        return False
-    if re.search(r"\b91\s*days\b", title):
-        return False
-    if re.search(r"\b3\s*-?gatsu\b", title):
+    for pattern in _TITLE_NUMBER_PROTECTED_PATTERNS:
+        if re.search(pattern, title, re.I):
+            return False
+    if title.endswith(" 0") and "gate 0" in title:
         return False
     return True
 
@@ -782,6 +819,12 @@ def _extract_trailing_season_number(text: str, structure_hint: str | None = None
     if not m:
         return None
     val = int(m.group(1))
+    title_part = s[: m.start(1)].strip(" ._-")
+    if not title_part or not re.search(r"[A-Za-z\u4e00-\u9fff]", title_part):
+        return None
+    cleaned_title = _cleanup_title(title_part)
+    if cleaned_title and not is_title_number_safe(cleaned_title):
+        return None
     if val < 2 or val > 30:
         return None
     if val in {2160, 1080, 720, 480}:
@@ -791,7 +834,64 @@ def _extract_trailing_season_number(text: str, structure_hint: str | None = None
     return val
 
 
+def split_main_subtitle(title: str) -> tuple[str, str | None]:
+    text = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not text:
+        return "", None
+    for sep in (":", "-"):
+        if sep not in text:
+            continue
+        left, right = text.split(sep, 1)
+        left = left.strip()
+        right = right.strip()
+        if not right:
+            return left, None
+        if _looks_like_noise_subtitle(right):
+            return left, None
+        return left, right
+    return text, None
+
+
+def _has_cjk(text: str) -> bool:
+    return re.search(r"[\u4e00-\u9fff]", str(text or "")) is not None
+
+
+def _looks_like_noise_subtitle(text: str) -> bool:
+    s = re.sub(r"[\[\]\(\)\{\}_\.]+", " ", str(text or ""))
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return True
+    if _NOISE_SUBTITLE_TOKEN_PATTERN.search(s):
+        return True
+    if len(s) <= 2 and not _has_cjk(s):
+        return True
+    tokens = [tok for tok in re.split(r"[\s\-]+", s) if tok]
+    if tokens and all(_NOISE_SUBTITLE_TOKEN_PATTERN.search(tok) for tok in tokens):
+        return True
+    if not _has_cjk(s) and len(tokens) <= 2 and any(any(ch.isdigit() for ch in tok) for tok in tokens):
+        return True
+    return False
+
+
+def _strip_trailing_release_group(text: str) -> str:
+    s = str(text or "").strip()
+    while True:
+        m = _TRAILING_GROUP_PATTERN.search(s)
+        if not m:
+            break
+        right = m.group(1).strip()
+        if not _looks_like_noise_subtitle(right):
+            break
+        s = s[: m.start()].strip()
+    return s
+
+
+def _strip_leading_date_prefix(text: str) -> str:
+    return _LEADING_DATE_PREFIX_PATTERN.sub("", str(text or "")).strip()
+
+
 def _extract_episode_only(text: str, cleaned_title: str | None = None) -> int | None:
+    text = _strip_fps_tokens(text)
     patterns = [
         r"第\s*(\d{1,3})\s*[集话話]",
         r"\bEpisode\s*(\d{1,3})\b",
@@ -1006,6 +1106,10 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         r"\b(PV)\s*0?(\d{0,3})\b",
         r"\b(PROMOTION\s*VIDEO)\b",
         r"\b(PROMO)\b",
+        r"\b(PROMOTION\s*CLIP)\s*0?(\d{0,3})\b",
+        r"\b(PROMO\s*CLIP)\s*0?(\d{0,3})\b",
+        r"\b(PROMOTION\s*REEL)\s*0?(\d{0,3})\b",
+        r"\b((?:PROMOTION|PROMO|REEL)\s*CLIP)\s*0?(\d{0,3})\b",
         r"\b(TRAILER)\s*0?(\d{0,3})\b",
         r"\b(TEASER)\s*0?(\d{0,3})\b",
         r"\b(LOG)\s*0?(\d{0,3})\b",
@@ -1022,7 +1126,10 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         if m:
             token = m.group(1)
             idx = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
-            label = token if not idx else _format_token_number(token, idx)
+            if idx:
+                label = _format_token_number(token, idx)
+            else:
+                label = _extract_extra_label_fragment(s, m) or token
             normalized = _normalize_extra_label(label)
             upper = normalized.upper()
             if upper.startswith("CM"):
@@ -1031,6 +1138,8 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
                 return "preview", normalized
             if upper.startswith("TEASER"):
                 return "teaser", normalized
+            if "PROMOTION CLIP" in upper or "PROMO CLIP" in upper or "PROMOTION REEL" in upper:
+                return "trailer", normalized
             if upper.startswith("TRAILER"):
                 return "trailer", normalized
             if upper.startswith("PV"):
@@ -1095,6 +1204,26 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
     return None
 
 
+def _extract_extra_label_fragment(source: str, match: re.Match) -> str | None:
+    text = str(source or "")
+    if not text:
+        return None
+    seg_start = text.rfind("-", 0, match.start())
+    seg_end = text.find("-", match.end())
+    if seg_start < 0:
+        seg_start = 0
+    else:
+        seg_start += 1
+    if seg_end < 0:
+        seg_end = len(text)
+    fragment = text[seg_start:seg_end]
+    fragment = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", fragment)
+    fragment = re.sub(r"\s+", " ", fragment).strip(" -_")
+    if not fragment:
+        return None
+    return fragment[:60]
+
+
 def _normalize_extra_label(text: str) -> str:
     s = re.sub(r"[_\-]+", " ", str(text or ""))
     s = re.sub(r"\s+", " ", s).strip()
@@ -1141,7 +1270,17 @@ def _extract_extra_index(label: str | None) -> int | None:
     return val if 1 <= val <= 999 else None
 
 
+def _has_alpha_neighbor(text: str, span: tuple[int, int]) -> bool:
+    left, right = span
+    if left > 0 and text[left - 1].isalpha():
+        return True
+    if right < len(text) and text[right].isalpha():
+        return True
+    return False
+
+
 def _extract_season_episode_priority(text: str) -> tuple[int, int, tuple[int, int], str] | None:
+    text = _strip_fps_tokens(text)
     m = re.search(r"\bS(\d{1,2})\s*E(\d{1,3})\b", text, re.I)
     if m:
         return int(m.group(1)), int(m.group(2)), m.span(), "sxxeyy"
@@ -1163,13 +1302,18 @@ def _extract_season_episode_priority(text: str) -> tuple[int, int, tuple[int, in
         return 1, int(m.group(1)), m.span(), "e"
 
     m = re.search(r"(?<!\d)(\d{2})(?!\d)", text)
-    if m:
+    if m and not _has_alpha_neighbor(text, m.span()):
         return 1, int(m.group(1)), m.span(), "two_digit"
 
     last_token = None
     for m in re.finditer(r"\b(\d{1,3})\b", text):
         val = int(m.group(1))
-        if 1 <= val <= 999 and val not in {2160, 1080, 720, 480} and not (1900 <= val <= 2099):
+        if (
+            1 <= val <= 999
+            and val not in {2160, 1080, 720, 480}
+            and not (1900 <= val <= 2099)
+            and not _has_alpha_neighbor(text, m.span())
+        ):
             last_token = (1, val, m.span(), "number")
     return last_token
 
@@ -1193,3 +1337,8 @@ def _extract_season_hint(text: str) -> int | None:
 def _normalize_query(title: str) -> str:
     s = re.sub(r"\s+", " ", str(title or "")).strip()
     return s[:200]
+
+
+def _strip_fps_tokens(text: str) -> str:
+    s = FPS_TOKEN_PATTERN.sub(" ", str(text or ""))
+    return re.sub(r"\s+", " ", s).strip()

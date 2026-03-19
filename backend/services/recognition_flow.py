@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -14,16 +14,25 @@ from .parser import (
     parse_tv_filename,
     search_tmdb_movie_candidates_sync,
     search_tmdb_tv_candidates_sync,
+    split_main_subtitle,
 )
 from ..api.logs import append_log
 from ..config import settings
 
 MAX_RESULTS_PER_QUERY = 10
 FALLBACK_MAX_ROUNDS = 2
-PASS_SCORE = 0.7
-FAIL_SCORE = 0.6
+DEFAULT_PASS_SCORE = 0.7
+DEFAULT_FAIL_SCORE = 0.6
 ROMAN_PATTERN = re.compile(r"\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b", re.I)
 SEASON_PATTERN = re.compile(r"\b(S\d+|Season\s*\d+|\d+(st|nd|rd|th)\s+Season)\b", re.I)
+EXPLICIT_SEASON_PATTERN = re.compile(
+    r"\b(?:S(?:eason)?\s*\d{1,2}|Season\s*\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s+Season|第\s*\d{1,2}\s*季)\b",
+    re.I,
+)
+EXPLICIT_ROMAN_SEASON_PATTERN = re.compile(
+    r"(?:\bSeason\s*(I|II|III|IV|V|VI|VII|VIII|IX|X)\b|\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\s*$)",
+    re.I,
+)
 SEASON_DETAIL_MAX_CANDIDATES = 5
 SEASON_DETAIL_SCORE_DELTA = 0.1
 SEASON_DETAIL_COUNT_THRESHOLD = 5
@@ -41,6 +50,10 @@ class LocalParseSnapshot:
     year_hint: int | None
     special_hint: bool
     final_hint: bool
+    season_hint_confidence: str | None = None
+    season_aware_done: bool = False
+    season_aware_had_candidates: bool = False
+    season_aware_tried_queries: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -53,6 +66,10 @@ class RankedCandidate:
     vote_count: int
     tmdb_data: dict
     year: int | None
+    title_similarity: float = 0.0
+    coverage_score: float = 0.0
+    length_match_score: float = 0.0
+    candidate_pool_size: int = 0
 
 
 def parse_structure_locally(media_dir: Path, structure_hint: str | None = None) -> LocalParseSnapshot:
@@ -61,35 +78,32 @@ def parse_structure_locally(media_dir: Path, structure_hint: str | None = None) 
     year_hint = _extract_year(cleaned_name)
     title_without_year = re.sub(r"\b(19\d{2}|20\d{2})\b", " ", cleaned_name)
     title_without_year = re.sub(r"\s+", " ", title_without_year).strip()
-    main_title, subtitle = _split_main_subtitle(title_without_year)
+    main_title, subtitle = split_main_subtitle(title_without_year)
 
-    tv_parse = parse_tv_filename(raw_name)
-    season_hint = tv_parse.season if tv_parse else None
+    tv_parse = parse_tv_filename(raw_name, structure_hint=structure_hint or "tv")
+    season_hint: int | None = None
+    season_hint_confidence: str | None = None
     episode_hint = tv_parse.episode if tv_parse else None
     special_hint = bool(tv_parse.is_special) if tv_parse else False
     final_hint = bool(tv_parse.final_season_hint) if tv_parse else False
 
-    # 目录级解析：避免把 episode-only 误当季号
-    if season_hint is not None and season_hint <= 0:
-        season_hint = None
+    explicit_hint = _extract_explicit_season_hint(raw_name) or _extract_explicit_season_hint(cleaned_name)
+    if explicit_hint:
+        season_hint = explicit_hint
+        season_hint_confidence = "high"
+    elif structure_hint == "tv":
+        trailing_hint = _extract_trailing_season_number(cleaned_name)
+        if trailing_hint:
+            season_hint = trailing_hint
+            season_hint_confidence = "low"
 
-    # Directory-level season hint should not be inferred from episode-only parsing.
-    if tv_parse and tv_parse.episode and (season_hint == 1) and not tv_parse.is_special:
-        season_hint = None
-
-    # If the parse yielded an episode-only trailing number, prefer treating it as a season hint for directories.
-    if season_hint is None and episode_hint and not special_hint:
-        trailing_season = _extract_trailing_season_number(cleaned_name)
-        if trailing_season and trailing_season == episode_hint and is_title_number_safe(cleaned_name):
-            season_hint = trailing_season
-            episode_hint = None
+    # Explicitly avoid treating episode-only parse as season hint at directory level.
+    if tv_parse and tv_parse.episode and (tv_parse.season == 1) and not tv_parse.is_special and season_hint_confidence != "high":
+        season_hint = season_hint if season_hint_confidence == "low" else None
 
     if season_hint:
         # 季号从标题中剥离，提升 TMDB 搜索准确度
         main_title = _strip_trailing_season_suffix(main_title, season_hint)
-
-    if (season_hint is None or season_hint <= 0) and structure_hint == "tv":
-        season_hint = _extract_trailing_season_number(cleaned_name)
 
     return LocalParseSnapshot(
         raw_name=raw_name,
@@ -101,6 +115,7 @@ def parse_structure_locally(media_dir: Path, structure_hint: str | None = None) 
         year_hint=year_hint,
         special_hint=special_hint,
         final_hint=final_hint,
+        season_hint_confidence=season_hint_confidence,
     )
 
 
@@ -145,11 +160,11 @@ def resolve_season(tmdb_client, tmdbid: int, season_hint: int | None, final_hint
     return 1
 
 
-def generate_candidate_titles(snapshot: LocalParseSnapshot) -> list[str]:
+def generate_candidate_titles(snapshot: LocalParseSnapshot, include_season_variants: bool = True) -> list[str]:
     candidates: list[str] = []
     search_name = make_search_name(snapshot.main_title or snapshot.cleaned_name)
     # season_hint 存在时，为 TMDB 搜索构造季号变体
-    if snapshot.season_hint:
+    if include_season_variants and snapshot.season_hint:
         _push_candidate(candidates, f"{search_name} season {snapshot.season_hint}")
         _push_candidate(candidates, f"{search_name} S{snapshot.season_hint}")
         _push_candidate(candidates, f"{search_name} {snapshot.season_hint}")
@@ -179,27 +194,37 @@ def recognize_directory_with_fallback(
     - 使用的 fallback 轮次（0 表示首轮）
     """
     snapshot = parse_structure_locally(media_dir, structure_hint=structure_hint)
+    search_name = make_search_name(snapshot.main_title or snapshot.cleaned_name)
+    append_log(f'INFO: search_name="{search_name}"')
+    fast_best: RankedCandidate | None = None
+    fast_tried: list[str] = []
+    fast_had_candidates = False
     if (
         bool(getattr(settings, "season_aware_research_enabled", True))
         and snapshot.season_hint
+        and snapshot.season_hint_confidence == "high"
         and (structure_hint == "tv" or scan_context_type == "tv")
     ):
-        fast_best, fast_tried = recognize_directory_with_season_hint_trace(
+        fast_best, fast_tried, fast_had_candidates = recognize_directory_with_season_hint_trace(
             media_dir,
             scan_context_type,
             snapshot.season_hint,
             structure_hint=structure_hint,
         )
-        if fast_tried:
+        snapshot.season_aware_done = True
+        snapshot.season_aware_had_candidates = fast_had_candidates
+        snapshot.season_aware_tried_queries = list(fast_tried)
+        if fast_best and fast_best.score >= _pass_score():
+            append_log(f"INFO: tried season-aware queries: {fast_tried}")
             append_log(
-                f'INFO: search_name="{make_search_name(snapshot.main_title or snapshot.cleaned_name)}", '
-                f"tried season-aware queries: {fast_tried}"
+                f"INFO: final candidate: tmdbid={fast_best.tmdb_id}, media={fast_best.media_type}, score={fast_best.score:.3f}"
             )
-        if fast_best and fast_best.score >= PASS_SCORE:
             return fast_best, snapshot, 0
 
-    all_candidates = generate_candidate_titles(snapshot)
+    append_log(f"INFO: tried season-aware queries: {fast_tried}")
+    all_candidates = generate_candidate_titles(snapshot, include_season_variants=not snapshot.season_aware_done)
     if not all_candidates:
+        append_log("INFO: final pending reason: no candidate titles")
         return None, snapshot, 0
 
     rounds = [
@@ -211,6 +236,8 @@ def recognize_directory_with_fallback(
 
     best_global: RankedCandidate | None = None
     best_round = 0
+    if fast_best is not None:
+        best_global = fast_best
 
     for round_idx, round_candidates in enumerate(rounds):
         if round_idx > FALLBACK_MAX_ROUNDS:
@@ -221,15 +248,29 @@ def recognize_directory_with_fallback(
             special_hint=snapshot.special_hint,
             structure_hint=structure_hint,
             season_hint=snapshot.season_hint,
+            season_hint_confidence=snapshot.season_hint_confidence,
         )
         if best and (best_global is None or best.score > best_global.score):
             best_global = best
             best_round = round_idx
-        if best and best.score >= PASS_SCORE:
+        if best and best.score >= _pass_score():
+            append_log(
+                f"INFO: final candidate: tmdbid={best.tmdb_id}, media={best.media_type}, score={best.score:.3f}"
+            )
             return best, snapshot, round_idx
 
-    if best_global and best_global.score >= FAIL_SCORE:
+    if best_global and _allow_soft_pass(best_global, snapshot):
+        append_log(
+            f"INFO: final candidate: tmdbid={best_global.tmdb_id}, media={best_global.media_type}, "
+            f"score={best_global.score:.3f} (soft-pass)"
+        )
         return best_global, snapshot, best_round
+    if best_global and best_global.score >= _fail_score():
+        append_log(
+            f"INFO: final candidate: tmdbid={best_global.tmdb_id}, media={best_global.media_type}, score={best_global.score:.3f}"
+        )
+        return best_global, snapshot, best_round
+    append_log("INFO: final pending reason: low confidence after fallback rounds")
     return None, snapshot, min(best_round, FALLBACK_MAX_ROUNDS)
 
 
@@ -250,6 +291,7 @@ def _unified_competitive_search(
     special_hint: bool,
     structure_hint: str | None = None,
     season_hint: int | None = None,
+    season_hint_confidence: str | None = None,
 ) -> RankedCandidate | None:
     pool: list[RankedCandidate] = []
     seen: set[tuple[str, int]] = set()
@@ -276,8 +318,10 @@ def _unified_competitive_search(
 
     if not pool:
         return None
+    for cand in pool:
+        cand.candidate_pool_size = len(pool)
 
-    if season_hint and structure_hint == "tv":
+    if season_hint and structure_hint == "tv" and season_hint_confidence == "high":
         _apply_season_hint_boost(pool, season_hint)
 
     # 特典内容优先留在 TV 语境，减少 TV 组误判电影。
@@ -295,9 +339,9 @@ def _unified_competitive_search(
     best_tv = max(tv_pool, key=lambda x: x.score) if tv_pool else None
     best_movie = max(movie_pool, key=lambda x: x.score) if movie_pool else None
 
-    if structure_hint == "tv" and best_tv and best_tv.score >= FAIL_SCORE:
+    if structure_hint == "tv" and best_tv and best_tv.score >= _fail_score():
         return best_tv
-    if structure_hint == "movie" and best_movie and best_movie.score >= FAIL_SCORE:
+    if structure_hint == "movie" and best_movie and best_movie.score >= _fail_score():
         return best_movie
 
     if best_movie and best_tv:
@@ -315,7 +359,7 @@ def recognize_directory_with_season_hint(
     structure_hint: str | None = None,
 ) -> RankedCandidate | None:
     """Run a season-aware re-search to improve season match."""
-    best, _tried = recognize_directory_with_season_hint_trace(
+    best, _tried, _had_candidates = recognize_directory_with_season_hint_trace(
         media_dir,
         scan_context_type,
         season_hint,
@@ -329,41 +373,45 @@ def recognize_directory_with_season_hint_trace(
     scan_context_type: str,
     season_hint: int,
     structure_hint: str | None = None,
-) -> tuple[RankedCandidate | None, list[str]]:
+) -> tuple[RankedCandidate | None, list[str], bool]:
     """Run season-aware re-search and return (best, tried_queries)."""
     if not bool(getattr(settings, "season_aware_research_enabled", True)):
-        return None, []
+        return None, [], False
     snapshot = parse_structure_locally(media_dir, structure_hint=structure_hint)
     if not season_hint:
         season_hint = snapshot.season_hint or 0
     if not season_hint:
-        return None, []
+        return None, [], False
 
     search_name = make_search_name(snapshot.main_title or snapshot.cleaned_name)
     queries = _build_season_aware_queries(search_name, season_hint)
-    append_log(f'INFO: search_name="{search_name}", tried season-aware queries: {queries}')
+    if not queries:
+        return None, [], False
 
     first_pool = _collect_tv_candidates_from_queries(queries, snapshot.year_hint)
+    had_candidates = bool(first_pool)
     best = _select_season_matched_candidate(first_pool, season_hint)
     if best is not None:
-        return best, queries
+        return best, queries, had_candidates
 
     broad_queries: list[str] = []
     _push_candidate(broad_queries, search_name)
     broad_pool = _collect_tv_candidates_from_queries(broad_queries, snapshot.year_hint)
+    had_candidates = had_candidates or bool(broad_pool)
     best = _select_season_matched_candidate(broad_pool, season_hint)
     if best is not None:
-        return best, queries + broad_queries
+        return best, queries + broad_queries, had_candidates
 
     alias_queries = _build_alias_queries_from_pool(first_pool + broad_pool, season_hint)
     if alias_queries:
         append_log(f"INFO: re-search tried alternatives: {alias_queries}")
         second_pool = _collect_tv_candidates_from_queries(alias_queries, snapshot.year_hint)
+        had_candidates = had_candidates or bool(second_pool)
         best = _select_season_matched_candidate(second_pool, season_hint)
         if best is not None:
-            return best, queries + broad_queries + alias_queries
+            return best, queries + broad_queries + alias_queries, had_candidates
 
-    return None, queries + broad_queries + alias_queries
+    return None, queries + broad_queries + alias_queries, had_candidates
 
 
 def _apply_season_hint_boost(pool: list[RankedCandidate], season_hint: int) -> None:
@@ -400,6 +448,8 @@ def _apply_season_hint_boost(pool: list[RankedCandidate], season_hint: int) -> N
 
 def _build_season_aware_queries(search_name: str, season_hint: int) -> list[str]:
     out: list[str] = []
+    if not search_name or not season_hint:
+        return out
     _push_candidate(out, f"{search_name} season {season_hint}")
     _push_candidate(out, f"{search_name} S{season_hint}")
     _push_candidate(out, f"{search_name} {season_hint}")
@@ -521,24 +571,23 @@ def _to_ranked_candidate(query_title: str, media_type: str, item: dict, year_hin
         vote_count=vote_count,
         tmdb_data=item,
         year=year,
+        title_similarity=title_similarity,
+        coverage_score=coverage_score,
+        length_match_score=length_match_score,
     )
 
 
 def _clean_name(name: str) -> str:
     text = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", name)
+    text = re.sub(r"^\s*(?:19\d{2}|20\d{2})(?:[.\-_/]\d{1,2}){1,2}[.\-_\s]+", " ", text, flags=re.I)
+    text = re.sub(r"\s*-\s*(?:mawen\d*|vcb(?:-?studio)?|mysilu)\s*$", " ", text, flags=re.I)
     text = re.sub(r"[._\-]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
 def _split_main_subtitle(title: str) -> tuple[str, str | None]:
-    if ":" in title:
-        left, right = title.split(":", 1)
-        return left.strip(), right.strip() or None
-    if "-" in title:
-        left, right = title.split("-", 1)
-        return left.strip(), right.strip() or None
-    return title.strip(), None
+    return split_main_subtitle(title)
 
 
 def _strip_trailing_season_suffix(title: str, season_hint: int) -> str:
@@ -580,6 +629,67 @@ def _extract_trailing_season_number(text: str) -> int | None:
     if 1900 <= val <= 2099:
         return None
     return val
+
+
+def _extract_explicit_season_hint(text: str) -> int | None:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return None
+    m = re.search(r"\bS(?:eason)?\s*(\d{1,2})\b", raw, re.I)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\bSeason\s*(\d{1,2})\b", raw, re.I)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)\s+Season\b", raw, re.I)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"第\s*(\d{1,2})\s*季", raw, re.I)
+    if m:
+        return int(m.group(1))
+    if re.search(r"\bi\s*\+\s*ii\b", raw, re.I):
+        return None
+    m = EXPLICIT_ROMAN_SEASON_PATTERN.search(raw)
+    if not m:
+        return None
+    token = (m.group(1) or m.group(2) or "").upper()
+    roman_map = {
+        "I": 1,
+        "II": 2,
+        "III": 3,
+        "IV": 4,
+        "V": 5,
+        "VI": 6,
+        "VII": 7,
+        "VIII": 8,
+        "IX": 9,
+        "X": 10,
+    }
+    return roman_map.get(token)
+
+
+def _allow_soft_pass(best: RankedCandidate, snapshot: LocalParseSnapshot) -> bool:
+    if best.score >= _pass_score():
+        return True
+    if best.score < _fail_score():
+        return False
+    if best.candidate_pool_size > 3:
+        return False
+    if best.title_similarity < 0.93:
+        return False
+    if best.coverage_score < 0.85:
+        return False
+    if snapshot.year_hint and best.year and int(snapshot.year_hint) != int(best.year):
+        return False
+    return True
+
+
+def _pass_score() -> float:
+    return float(getattr(settings, "recognition_pass_score", DEFAULT_PASS_SCORE))
+
+
+def _fail_score() -> float:
+    return float(getattr(settings, "recognition_fail_score", DEFAULT_FAIL_SCORE))
 
 
 def _normalize_for_similarity(title: str) -> str:

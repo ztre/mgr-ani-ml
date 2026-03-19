@@ -62,6 +62,15 @@ def _parse_bool(v: str | None, default: bool) -> bool:
 def _parse_int(v: str | None, default: int) -> int:
   if v is None or not str(v).strip():
     return default
+
+
+def _parse_float(v: str | None, default: float) -> float:
+  if v is None or not str(v).strip():
+    return default
+  try:
+    return float(str(v).strip())
+  except ValueError:
+    return default
   try:
     return int(str(v).strip())
   except ValueError:
@@ -122,6 +131,8 @@ class Settings:
   use_file_lock: bool = False
   worker_autostart: bool = True
   season_aware_research_enabled: bool = True
+  recognition_pass_score: float = 0.7
+  recognition_fail_score: float = 0.6
 
   debug: bool = False
   scan_threads: int = max(1, (os.cpu_count() or 1) * 2)
@@ -192,6 +203,14 @@ class Settings:
       data.get(f'{p}SEASON_AWARE_RESEARCH_ENABLED'),
       self.season_aware_research_enabled,
     )
+    self.recognition_pass_score = _parse_float(
+      data.get(f'{p}RECOGNITION_PASS_SCORE'),
+      self.recognition_pass_score,
+    )
+    self.recognition_fail_score = _parse_float(
+      data.get(f'{p}RECOGNITION_FAIL_SCORE'),
+      self.recognition_fail_score,
+    )
 
   def save_to_env(self) -> None:
     env_path = self.env_file
@@ -237,6 +256,8 @@ class Settings:
       f'{prefix}USE_FILE_LOCK': str(bool(self.use_file_lock)).lower(),
       f'{prefix}WORKER_AUTOSTART': str(bool(self.worker_autostart)).lower(),
       f'{prefix}SEASON_AWARE_RESEARCH_ENABLED': str(bool(self.season_aware_research_enabled)).lower(),
+      f'{prefix}RECOGNITION_PASS_SCORE': str(float(self.recognition_pass_score)),
+      f'{prefix}RECOGNITION_FAIL_SCORE': str(float(self.recognition_fail_score)),
     }
 
     out: list[str] = []
