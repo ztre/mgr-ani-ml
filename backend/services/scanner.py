@@ -98,7 +98,14 @@ class DirectoryProcessError(Exception):
 def _classify_media_task_error(exc: Exception) -> Literal["deterministic_conflict", "transient", "other"]:
     text = str(exc or "")
     lowered = text.lower()
-    if "多个源文件映射到同一目标" in text or "目标路径已被其他文件占用" in text:
+    deterministic_keywords = (
+        "多个源文件映射到同一目标",
+        "目标路径已被其他文件占用",
+        "batch target conflict",
+        "target conflict",
+        "mapped to same target",
+    )
+    if any(token in text for token in deterministic_keywords) or "deterministic conflict" in lowered:
         return "deterministic_conflict"
     if isinstance(exc, (OperationalError, TimeoutError, httpx.TimeoutException, httpx.ConnectTimeout, httpx.ReadTimeout)):
         return "transient"
@@ -193,6 +200,26 @@ def _media_task_worker() -> None:
                         f"WARNING: MediaTask deterministic conflict: {task.path} | {e} | trigger target-name recompute retry"
                     )
                     continue
+                if error_kind == "deterministic_conflict" and recompute_retry_used:
+                    group = local_db.query(SyncGroup).filter(SyncGroup.id == task.sync_group_id).first()
+                    if group:
+                        reason = f"deterministic conflict after recompute: {e}"
+                        _mark_dir_pending(
+                            local_db,
+                            task.path,
+                            Path(group.source),
+                            group.id,
+                            group.source_type,
+                            reason,
+                        )
+                        append_log(
+                            f"WARNING: MediaTask deterministic conflict unresolved, moved to pending_manual: {task.path}"
+                        )
+                    else:
+                        append_log(
+                            f"WARNING: MediaTask deterministic conflict unresolved (group missing): {task.path} | {e}"
+                        )
+                    break
                 if error_kind == "transient" and retries < 3:
                     retries += 1
                     backoff = 2 ** retries
@@ -834,6 +861,7 @@ def _process_file(
                     parse_result=parse_result,
                     tmdb_data=tmdb_data,
                     should_scrape=False,
+                    display_title=context.get("title"),
                     op_log=op_log,
                 )
             except DirectoryProcessError as e:
@@ -1016,6 +1044,7 @@ def _process_file(
         parse_result=parse_result,
         tmdb_data=tmdb_data,
         should_scrape=should_scrape,
+        display_title=context.get("title"),
         op_log=op_log,
     )
 
@@ -1145,6 +1174,7 @@ def _execute_transactional_outputs(
     tmdb_data: dict,
     should_scrape: bool,
     op_log: OperationLog,
+    display_title: str | None = None,
 ) -> None:
     _create_hardlink_with_tracking(src_path, dst_path, op_log)
 
@@ -1154,14 +1184,14 @@ def _execute_transactional_outputs(
     if media_type == "tv":
         show_dir = _resolve_tv_show_dir_for_scrape(dst_path)
         before_files = set(_list_files_safe(show_dir))
-        scrape_tv_metadata(show_dir, tmdb_data)
+        scrape_tv_metadata(show_dir, tmdb_data, display_title=display_title)
         _track_new_files(show_dir, before_files, op_log)
         if not (show_dir / "tvshow.nfo").exists():
             raise DirectoryProcessError(f"TV 元数据校验失败: {show_dir}")
     else:
         show_dir = dst_path.parent
         before_files = set(_list_files_safe(show_dir))
-        scrape_movie_metadata(show_dir, tmdb_data)
+        scrape_movie_metadata(show_dir, tmdb_data, display_title=display_title)
         _track_new_files(show_dir, before_files, op_log)
         if not (show_dir / "movie.nfo").exists():
             raise DirectoryProcessError(f"Movie 元数据校验失败: {show_dir}")
@@ -1413,22 +1443,6 @@ def _extract_first_dir_name(dirs: list[Path], source_root: Path) -> str | None:
     return first.name
 
 
-def _load_existing_pending_dirs(db: Session, sync_group_id: int) -> set[Path]:
-    rows = (
-        db.query(MediaRecord.original_path)
-        .filter(
-            MediaRecord.sync_group_id == sync_group_id,
-            MediaRecord.status == "pending_manual",
-        )
-        .all()
-    )
-    out: set[Path] = set()
-    for (path_str,) in rows:
-        if path_str:
-            out.add(Path(path_str))
-    return out
-
-
 def _load_existing_recorded_dirs(db: Session, sync_group_id: int, source_root: Path) -> set[Path]:
     """
     收集该同步组已存在于媒体记录中的目录（含待办目录），用于目录级快速跳过。
@@ -1659,10 +1673,6 @@ def _should_ignore_zero_episode(filename: str) -> bool:
         r"(?:^|[\s._-])0{1,2}(?:$|[\s._-])",  # token 0 / 00
     ]
     return any(re.search(p, stem, re.I) is not None for p in patterns)
-
-
-def _should_ignore_menu_file(filename: str) -> bool:
-    return _extract_menu_token(filename) is not None
 
 
 def _extract_menu_token(filename: str) -> str | None:

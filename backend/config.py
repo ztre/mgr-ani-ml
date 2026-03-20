@@ -62,6 +62,10 @@ def _parse_bool(v: str | None, default: bool) -> bool:
 def _parse_int(v: str | None, default: int) -> int:
   if v is None or not str(v).strip():
     return default
+  try:
+    return int(str(v).strip())
+  except ValueError:
+    return default
 
 
 def _parse_float(v: str | None, default: float) -> float:
@@ -69,10 +73,6 @@ def _parse_float(v: str | None, default: float) -> float:
     return default
   try:
     return float(str(v).strip())
-  except ValueError:
-    return default
-  try:
-    return int(str(v).strip())
   except ValueError:
     return default
 

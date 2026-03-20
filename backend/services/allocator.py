@@ -9,7 +9,6 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Tuple
 
 INDEX_PATTERN = re.compile(r"S(?P<season>\d{2})[_-](?P<prefix>[A-Za-z]+)(?P<index>\d{1,3})", re.I)
 SEASON00_PATTERN = re.compile(r"S00E(?P<episode>\d{2,3})", re.I)

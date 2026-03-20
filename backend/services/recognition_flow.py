@@ -8,9 +8,7 @@ from pathlib import Path
 
 from .parser import (
     get_tmdb_tv_details_sync,
-    is_title_number_safe,
     make_search_name,
-    parse_movie_filename,
     parse_tv_filename,
     search_tmdb_movie_candidates_sync,
     search_tmdb_tv_candidates_sync,
@@ -274,17 +272,6 @@ def recognize_directory_with_fallback(
     return None, snapshot, min(best_round, FALLBACK_MAX_ROUNDS)
 
 
-def resolve_target_media_type(scan_context_type: str, recognized_type: str) -> str:
-    """
-    说明书决策矩阵：
-    - scan_context 不变
-    - recognized_type 决定目标根路径
-    """
-    if recognized_type in {"tv", "movie"}:
-        return recognized_type
-    return "tv" if scan_context_type == "tv" else "movie"
-
-
 def _unified_competitive_search(
     candidate_titles: list[str],
     year_hint: int | None,
@@ -350,22 +337,6 @@ def _unified_competitive_search(
         return best_tv
 
     return best_movie or best_tv
-
-
-def recognize_directory_with_season_hint(
-    media_dir: Path,
-    scan_context_type: str,
-    season_hint: int,
-    structure_hint: str | None = None,
-) -> RankedCandidate | None:
-    """Run a season-aware re-search to improve season match."""
-    best, _tried, _had_candidates = recognize_directory_with_season_hint_trace(
-        media_dir,
-        scan_context_type,
-        season_hint,
-        structure_hint=structure_hint,
-    )
-    return best
 
 
 def recognize_directory_with_season_hint_trace(
@@ -584,10 +555,6 @@ def _clean_name(name: str) -> str:
     text = re.sub(r"[._\-]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
-
-
-def _split_main_subtitle(title: str) -> tuple[str, str | None]:
-    return split_main_subtitle(title)
 
 
 def _strip_trailing_season_suffix(title: str, season_hint: int) -> str:

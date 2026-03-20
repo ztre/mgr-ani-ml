@@ -81,11 +81,6 @@ export const configApi = {
 export const authApi = {
   status: () => client.get('/auth/status'),
   login: (data) => client.post('/auth/login', data),
-  me: () => client.get('/auth/me'),
-}
-
-export const logsApi = {
-  list: (params) => client.get('/logs', { params }),
 }
 
 export const tasksApi = {

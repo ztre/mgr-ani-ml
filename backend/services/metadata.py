@@ -8,10 +8,10 @@ import httpx
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/original"
 
 
-def scrape_tv_metadata(target_dir: Path, tmdb_data: dict) -> None:
+def scrape_tv_metadata(target_dir: Path, tmdb_data: dict, display_title: str | None = None) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    title = tmdb_data.get("name", "Unknown")
+    title = display_title or tmdb_data.get("name") or "Unknown"
     year = None
     first_air = str(tmdb_data.get("first_air_date") or "")
     if first_air[:4].isdigit():
@@ -29,10 +29,10 @@ def scrape_tv_metadata(target_dir: Path, tmdb_data: dict) -> None:
     _download_image(tmdb_data.get("backdrop_path"), target_dir / "fanart.jpg")
 
 
-def scrape_movie_metadata(target_dir: Path, tmdb_data: dict) -> None:
+def scrape_movie_metadata(target_dir: Path, tmdb_data: dict, display_title: str | None = None) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    title = tmdb_data.get("title", "Unknown")
+    title = display_title or tmdb_data.get("title") or "Unknown"
     year = None
     release = str(tmdb_data.get("release_date") or "")
     if release[:4].isdigit():

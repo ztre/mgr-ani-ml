@@ -39,7 +39,7 @@ _NOISE_SUBTITLE_TOKEN_PATTERN = re.compile(
     r"\b(?:"
     r"vcb(?:-?studio)?|mawen\d*|mysilu|x26[45]|h26[45]|hevc|av1|"
     r"1080p|720p|2160p|480p|4k|ma10p|hi10p|flac|aac|ac3|dts|ddp\d?\.?\d?|"
-    r"bluray|bdrip|bdmv|webrip|web[-\s]?dl|remux|sub(?:title)?s?|chs|cht|jpsc|jptc|raw"
+    r"bluray|bdrip|bdmv|webrip|web[-\s]?dl|remux|sub(?:title)?s?|chs|cht|jpsc|jptc|raw|avc"
     r")\b",
     re.I,
 )
@@ -100,6 +100,9 @@ def make_search_name(raw_name: str) -> str:
     else:
         text = main
     text = SEARCH_NOISE_PATTERN.sub(" ", text)
+    text = re.sub(r"\b\d{3,4}\s*x\s*\d{3,4}\s*p\s*\d{1,3}\b", " ", text, flags=re.I)
+    text = re.sub(r"\b\d{3,4}\s*x\s*\d{3,4}\b", " ", text, flags=re.I)
+    text = re.sub(r"\bx\s*\d{3,4}\b", " ", text, flags=re.I)
     text = re.sub(r"\bbd\b", " ", text, flags=re.I)
     text = re.sub(r"\b(19\d{2}|20\d{2})\b", " ", text)
     text = re.sub(r"\bWEB\s+Preview", "Preview", text, flags=re.I)
@@ -152,10 +155,10 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             extra_label = None
             is_special = False
 
-    # When marked as special/OPED, prefer extra token and avoid episode parsing.
-    if extra_category in {"special", "oped"}:
-        season = _extract_season_hint(episode_text)
-        episode = _extract_extra_index(extra_label)
+    # Any extra hit should short-circuit episode parsing to avoid numeric pollution.
+    if extra_category is not None:
+        season = _extract_explicit_season_hint_for_extra(episode_text) or 1
+        episode = _extract_extra_index(extra_label) if extra_category in {"special", "oped"} else None
         title = _cleanup_title(clean)
         if not title:
             return None
@@ -437,18 +440,6 @@ def parse_movie_filename(filename: str) -> ParseResult | None:
     )
 
 
-async def search_tmdb_tv(title: str, year: int | None = None) -> dict | None:
-    """TMDB TV search (best item)."""
-    results = await search_tmdb_tv_candidates(title, year)
-    return results[0] if results else None
-
-
-async def search_tmdb_movie(title: str, year: int | None = None) -> dict | None:
-    """TMDB movie search (best item)."""
-    results = await search_tmdb_movie_candidates(title, year)
-    return results[0] if results else None
-
-
 async def search_tmdb_tv_candidates(title: str, year: int | None = None) -> list[dict]:
     """TMDB TV candidates; year matches are promoted but not exclusive."""
     results = await _tmdb_search("tv", title)
@@ -507,16 +498,6 @@ async def get_tmdb_tv_details(tv_id: int) -> dict | None:
         _cache_set(cache_key, data)
         return data
     return None
-
-
-def search_tmdb_tv_sync(title: str, year: int | None = None) -> dict | None:
-    """Sync wrapper for TMDB TV search."""
-    return asyncio.run(search_tmdb_tv(title, year))
-
-
-def search_tmdb_movie_sync(title: str, year: int | None = None) -> dict | None:
-    """Sync wrapper for TMDB movie search."""
-    return asyncio.run(search_tmdb_movie(title, year))
 
 
 def search_tmdb_tv_candidates_sync(title: str, year: int | None = None) -> list[dict]:
@@ -923,10 +904,6 @@ def _remove_episode_tokens(text: str) -> str:
     return s
 
 
-def detect_final_hint(dir_name: str) -> bool:
-    return re.search(PATTERNS["final_dir"], str(dir_name or ""), re.I) is not None
-
-
 def _has_strong_tv_token(text: str) -> bool:
     if re.search(r"\bS\d{1,2}E\d{1,3}\b", text, re.I):
         return True
@@ -1060,6 +1037,23 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
             idx = m.group(2) or ""
             label = prefix if not idx else _format_token_number(prefix, idx)
             return category, label
+
+    # 0.5) JP/CN special-program tokens -> extras(making) bucket
+    jp_making_patterns = [
+        r"(TV\s*番組)",
+        r"(テレビ番組)",
+        r"(特集)",
+        r"(総集編)",
+        r"(總集編)",
+        r"(特番)",
+        r"(番外編)",
+        r"(番外篇)",
+        r"(アニクリ)",
+    ]
+    for p in jp_making_patterns:
+        m = re.search(p, s, re.I)
+        if m:
+            return "making", _normalize_extra_label(m.group(1))
 
     # 1) Special
     special_patterns = [
@@ -1331,6 +1325,21 @@ def _extract_season_hint(text: str) -> int | None:
         or _extract_bang_season(text)
         or _extract_word_season(text)
         or _extract_trailing_season_number(text, structure_hint="tv")
+    )
+
+
+def _extract_explicit_season_hint_for_extra(text: str) -> int | None:
+    # Extras should not infer season from loose trailing numbers like "... Promo Clip 2".
+    se = _extract_season_episode_priority(text)
+    if se is not None:
+        season, _episode, _span, kind = se
+        if kind in {"sxxeyy", "xxyy"}:
+            return season
+    return (
+        _extract_season_keyword(text)
+        or _extract_roman_season(text)
+        or _extract_bang_season(text)
+        or _extract_word_season(text)
     )
 
 
