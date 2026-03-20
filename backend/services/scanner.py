@@ -72,6 +72,7 @@ EXTRAS_CATEGORIES = {
     "interview",
     "bdextra",
 }
+SPECIAL_ANCHOR_CATEGORIES = {"special", "oped", "making", "trailer", "preview", "pv", "cm", "teaser", "character_pv"}
 
 
 @dataclass
@@ -738,6 +739,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         "video_anchor_by_parent": {},
         "video_anchor_by_parent_episode": {},
         "video_anchor_by_parent_stem": {},
+        "video_anchor_by_parent_special": {},
         "video_anchor_recent_by_parent": {},
         "pending_count": 0,
         "skipped_count": 0,
@@ -874,6 +876,10 @@ def _process_file(
             _upsert_inode_record(db, sync_group_id, src_path, dst_path)
             append_log(f"INFO: 附件跟随正片: {src_path.name} -> {dst_path}")
             return
+        if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+            append_log(f"WARNING: special attachment unmatched, skipped: {src_path.name}")
+            dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            return
         if parse_result.extra_category is None:
             append_log(f"WARNING: 附件未匹配到视频已跳过: {src_path.name}")
             dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
@@ -936,7 +942,8 @@ def _process_file(
         if preferred and int(preferred) != int(assigned_index):
             append_log(f"INFO: Special remap: {prefix}{int(preferred):02d} -> {prefix}{int(assigned_index):02d} for {src_path.name}")
             remapped = True
-        parse_result = parse_result._replace(extra_label=_format_prefix_number(prefix, int(assigned_index)))
+        seed = item.get("final_label_seed") or parse_result.extra_label
+        parse_result = parse_result._replace(extra_label=_compose_indexed_extra_label(prefix, int(assigned_index), seed))
         if parse_result.extra_category in {"special", "oped"}:
             parse_result = parse_result._replace(episode=int(assigned_index))
         assigned_by_allocator = True
@@ -1123,10 +1130,14 @@ def _register_video_anchor(src_path: Path, dst_path: Path, parse_result: ParseRe
     by_parent = dir_runtime.setdefault("video_anchor_by_parent", {})
     by_parent_ep = dir_runtime.setdefault("video_anchor_by_parent_episode", {})
     by_parent_stem = dir_runtime.setdefault("video_anchor_by_parent_stem", {})
+    by_parent_special = dir_runtime.setdefault("video_anchor_by_parent_special", {})
     by_parent_recent = dir_runtime.setdefault("video_anchor_recent_by_parent", {})
     parent_key = str(src_path.parent)
     by_parent[parent_key] = dst_path
     by_parent_recent[parent_key] = dst_path
+    special_key = _build_special_anchor_key(parse_result, src_path)
+    if special_key is not None:
+        by_parent_special[special_key] = dst_path
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
         by_parent_ep[(parent_key, int(ep_key))] = dst_path
@@ -1141,8 +1152,17 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
     by_parent = dir_runtime.get("video_anchor_by_parent", {})
     by_parent_ep = dir_runtime.get("video_anchor_by_parent_episode", {})
     by_parent_stem = dir_runtime.get("video_anchor_by_parent_stem", {})
+    by_parent_special = dir_runtime.get("video_anchor_by_parent_special", {})
     by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
     parent_key = str(src_path.parent)
+
+    special_key = _build_special_anchor_key(parse_result, src_path)
+    if special_key is not None:
+        candidate = by_parent_special.get(special_key)
+        if candidate:
+            return candidate
+    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+        return None
 
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
@@ -1164,6 +1184,51 @@ def _build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseRe
     base = anchor_dst.stem
     lang = parse_result.subtitle_lang or ""
     return anchor_dst.with_name(f"{base}{lang}{ext}")
+
+
+def _build_special_anchor_key(parse_result: ParseResult, src_path: Path) -> tuple[str, str, str] | None:
+    category = str(parse_result.extra_category or "")
+    if category not in SPECIAL_ANCHOR_CATEGORIES:
+        return None
+    parent_key = str(src_path.parent)
+    stem_key = _normalize_media_stem(src_path.stem)
+    if not stem_key:
+        return None
+    token = _special_anchor_token(parse_result, src_path)
+    if not token:
+        return None
+    return (parent_key, stem_key, token)
+
+
+def _special_anchor_token(parse_result: ParseResult, src_path: Path) -> str:
+    label = str(parse_result.extra_label or "").strip()
+    if not label:
+        label = _extract_scene_fragment(src_path.stem) or _normalize_suffix_text(src_path.stem)
+    return _normalize_special_anchor_token(label)
+
+
+def _normalize_special_anchor_token(text: str) -> str:
+    s = _normalize_suffix_text(text).lower()
+    if not s:
+        return ""
+    s = re.sub(
+        r"^(?:sp|special|ova|oad|oav|op|ed|pv|cm|preview|webpreview|characterpv|trailer|teaser|iv|mv|interview|making|bdextra)\s*\d{0,3}\b",
+        "",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(r"\s+", " ", s).strip(" -_")
+    return s or _normalize_suffix_text(text).lower()
+
+
+def _extract_scene_fragment(text: str) -> str | None:
+    s = str(text or "")
+    if not s:
+        return None
+    m = re.search(r"\b(Scene)\s*[-_ ]*([0-9]{1,3}(?:[A-Za-z]{1,8})?)\b", s, re.I)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+    return None
 
 
 def _execute_transactional_outputs(
@@ -1700,7 +1765,7 @@ def _normalize_media_stem(stem: str) -> str:
     s = re.sub(r"\b(?:x264|x265|h264|h265|hevc|av1|hi10p|ma10p)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:flac|aac|ac3|dts|ddp\d?\.\d?)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:webrip|web-dl|bdrip|bluray|remux)\b", " ", s, flags=re.I)
-    s = re.sub(r"\b(?:chs|cht|sc|tc|gb|big5|jpn|jp|ja|eng|en)\b", " ", s, flags=re.I)
+    s = re.sub(r"\b(?:chs|cht|sc|tc|gb|big5|jpn|jp|ja|eng|en|zh[-_ ]?(?:cn|tw))\b", " ", s, flags=re.I)
     s = re.sub(r"\s+", " ", s.replace("_", " ").replace(".", " ")).strip()
     return s.lower()
 
@@ -1859,7 +1924,7 @@ def _build_allocation_items(
             continue
         if parse_result.extra_category not in {"special", "oped"} | EXTRAS_CATEGORIES:
             continue
-        preferred = _extract_label_index(parse_result.extra_label) or parse_result.episode
+        preferred = _preferred_index_for_extra(parse_result)
         item = {
             "file_path": str(src_path),
             "source_dir": str(src_path.parent),
@@ -1867,6 +1932,7 @@ def _build_allocation_items(
             "season_key": parse_result.season if media_type == "tv" else None,
             "prefix": prefix,
             "preferred": preferred,
+            "final_label_seed": parse_result.extra_label,
             "is_attachment": ext in ATTACHMENT_EXTS,
             "lang": parse_result.subtitle_lang,
             "final_hint": context.get("final_hint"),
@@ -1881,6 +1947,25 @@ def _extract_label_index(label: str | None) -> int | None:
     if not label:
         return None
     m = re.search(r"(\d{1,3})", label)
+    if not m:
+        return None
+    val = int(m.group(1))
+    return val if 1 <= val <= 999 else None
+
+
+def _preferred_index_for_extra(parse_result: ParseResult) -> int | None:
+    if parse_result.extra_category == "making":
+        scene_idx = _extract_scene_index(parse_result.extra_label)
+        if scene_idx is not None:
+            return scene_idx
+    return _extract_label_index(parse_result.extra_label) or parse_result.episode
+
+
+def _extract_scene_index(label: str | None) -> int | None:
+    s = str(label or "")
+    if not s:
+        return None
+    m = re.search(r"\bScene\s*[-_ ]*0*(\d{1,3})(?:[A-Za-z]{1,8})?\b", s, re.I)
     if not m:
         return None
     val = int(m.group(1))
@@ -2050,13 +2135,31 @@ def _apply_special_indexing(
         idx = next_idx
 
     used.add(idx)
-    new_label = _format_prefix_number(prefix, idx)
-    if version_suffix and version_suffix not in new_label:
+    new_label = _compose_indexed_extra_label(prefix, idx, label)
+    if version_suffix and version_suffix.lower() not in new_label.lower():
         new_label = f"{new_label} {version_suffix}"
     updated = parse_result._replace(extra_label=new_label)
     if category in {"special", "oped"}:
         updated = updated._replace(episode=idx)
     return updated
+
+
+def _compose_indexed_extra_label(prefix: str, idx: int, seed_label: str | None) -> str:
+    base = _format_prefix_number(prefix, idx)
+    suffix = _extract_preserved_extra_suffix(seed_label, prefix)
+    if not suffix:
+        return base
+    return f"{base} {suffix}"
+
+
+def _extract_preserved_extra_suffix(label: str | None, prefix: str) -> str:
+    s = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not s:
+        return ""
+    s = re.sub(rf"^\s*{re.escape(prefix)}\s*0*\d{{1,3}}\b", "", s, flags=re.I)
+    s = re.sub(rf"^\s*{re.escape(prefix)}\b", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" -_")
+    return s
 
 
 def _log_special_classification(category: str | None, label: str | None) -> None:

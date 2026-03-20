@@ -1175,6 +1175,10 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
             return "bdextra", _normalize_extra_label(m.group(1))
 
     # 5) Making / Interview
+    scene_label = _extract_scene_label(s)
+    if scene_label:
+        return "making", _normalize_extra_label(scene_label)
+
     making_patterns = [
         r"\b(INTERVIEW\S*)\b",
         r"\b(MAKING)\b",
@@ -1184,7 +1188,6 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         r"\b(DOCUMENTARY)\b",
         r"\b(EVENT)\b",
         r"\b(MAKING\s*OF)\b",
-        r"\b(SCENE)\b",
         r"\b(ROUGH\s*SKETCH)\b",
     ]
     for p in making_patterns:
@@ -1195,6 +1198,20 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
                 return "interview", label
             return "making", label
 
+    return None
+
+
+def _extract_scene_label(text: str) -> str | None:
+    s = str(text or "")
+    if not s:
+        return None
+    m = re.search(r"\b(Scene)\s*[-_ ]*([0-9]{1,3}(?:[A-Za-z]{1,8})?)\b", s, re.I)
+    if m:
+        token = f"{m.group(1)} {m.group(2)}"
+        return re.sub(r"\s+", " ", token).strip()
+    m = re.search(r"\b(Scene)\b", s, re.I)
+    if m:
+        return m.group(1)
     return None
 
 
