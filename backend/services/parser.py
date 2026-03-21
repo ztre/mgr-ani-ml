@@ -1056,6 +1056,10 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
             return "making", _normalize_extra_label(m.group(1))
 
     # 1) Special
+    raw_special = _extract_raw_special_label(s)
+    if raw_special:
+        return "special", _normalize_extra_label(raw_special)
+
     special_patterns = [
         r"\b(SP\d*)\b",
         r"\b(SPECIALS?)\b",
@@ -1198,6 +1202,27 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
                 return "interview", label
             return "making", label
 
+    return None
+
+
+def _extract_raw_special_label(text: str) -> str | None:
+    s = str(text or "")
+    if not s:
+        return None
+    for pattern in (
+        r"\b(OAD)\s*[-_ ]*([0-9]{1,3}(?:[A-Za-z]{1,8})?)\b",
+        r"\b(OVA)\s*[-_ ]*([0-9]{1,3}(?:[A-Za-z]{1,8})?)\b",
+        r"\b(OAV)\s*[-_ ]*([0-9]{1,3}(?:[A-Za-z]{1,8})?)\b",
+        r"\b(SP)\s*[-_ ]*([0-9]{1,3}(?:[A-Za-z]{1,8})?)\b",
+    ):
+        m = re.search(pattern, s, re.I)
+        if m:
+            return f"{m.group(1)}{m.group(2)}"
+    for pattern in (r"\b(OAD)\b", r"\b(OVA)\b", r"\b(OAV)\b", r"\b(SPECIALS?)\b"):
+        m = re.search(pattern, s, re.I)
+        if m:
+            token = m.group(1)
+            return "SP" if token.upper().startswith("SPECIAL") else token
     return None
 
 

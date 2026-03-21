@@ -160,7 +160,7 @@ def _clean_special_suffix(label: str | None) -> str:
     s = re.sub(r"\s+", " ", str(label or "")).strip()
     if not s:
         return ""
-    s = re.sub(r"^\s*(?:SP|OVA|OAD|OAV|SPECIAL|OP|ED|NCOP|NCED)\s*[-_ ]*", "", s, flags=re.I)
+    # Keep original special fragments reversible (e.g. OVA01/OAD03/Scene 01ex).
     s = re.sub(r"\s*#\d{2,3}\s*$", "", s, flags=re.I)
     s = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", s, flags=re.U)
     s = re.sub(r"\s+", " ", s).strip(" -_")

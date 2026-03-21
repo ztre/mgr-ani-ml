@@ -1135,9 +1135,11 @@ def _register_video_anchor(src_path: Path, dst_path: Path, parse_result: ParseRe
     parent_key = str(src_path.parent)
     by_parent[parent_key] = dst_path
     by_parent_recent[parent_key] = dst_path
-    special_key = _build_special_anchor_key(parse_result, src_path)
+    special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
     if special_key is not None:
-        by_parent_special[special_key] = dst_path
+        bucket = by_parent_special.setdefault(special_key, [])
+        if dst_path not in bucket:
+            bucket.append(dst_path)
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
         by_parent_ep[(parent_key, int(ep_key))] = dst_path
@@ -1156,13 +1158,17 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
     by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
     parent_key = str(src_path.parent)
 
-    special_key = _build_special_anchor_key(parse_result, src_path)
+    special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
     if special_key is not None:
-        candidate = by_parent_special.get(special_key)
-        if candidate:
-            return candidate
+        candidates = list(by_parent_special.get(special_key) or [])
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            append_log(f"WARNING: special attachment anchor conflict: {src_path.name} -> {len(candidates)} candidates")
+            return None
     if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
-        return None
+        # Keep trying episode/stem for special attachments, but never fallback to parent/recent.
+        pass
 
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
@@ -1174,6 +1180,8 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
         candidate = by_parent_stem.get((parent_key, stem_key))
         if candidate:
             return candidate
+    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+        return None
     recent = by_parent_recent.get(parent_key)
     if recent:
         return recent
@@ -1186,7 +1194,11 @@ def _build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseRe
     return anchor_dst.with_name(f"{base}{lang}{ext}")
 
 
-def _build_special_anchor_key(parse_result: ParseResult, src_path: Path) -> tuple[str, str, str] | None:
+def _build_special_anchor_key(
+    parse_result: ParseResult,
+    src_path: Path,
+    original_label: str | None = None,
+) -> tuple[str, str, str, str] | None:
     category = str(parse_result.extra_category or "")
     if category not in SPECIAL_ANCHOR_CATEGORIES:
         return None
@@ -1194,31 +1206,36 @@ def _build_special_anchor_key(parse_result: ParseResult, src_path: Path) -> tupl
     stem_key = _normalize_media_stem(src_path.stem)
     if not stem_key:
         return None
-    token = _special_anchor_token(parse_result, src_path)
+    token = _special_anchor_token(parse_result, src_path, original_label=original_label)
     if not token:
         return None
-    return (parent_key, stem_key, token)
+    return (parent_key, stem_key, category, token)
 
 
-def _special_anchor_token(parse_result: ParseResult, src_path: Path) -> str:
-    label = str(parse_result.extra_label or "").strip()
+def _special_anchor_token(parse_result: ParseResult, src_path: Path, original_label: str | None = None) -> str:
+    label = str(original_label or parse_result.extra_label or "").strip()
     if not label:
         label = _extract_scene_fragment(src_path.stem) or _normalize_suffix_text(src_path.stem)
-    return _normalize_special_anchor_token(label)
+    return _normalize_special_anchor_token(label, parse_result.extra_category)
 
 
-def _normalize_special_anchor_token(text: str) -> str:
-    s = _normalize_suffix_text(text).lower()
+def _normalize_special_anchor_token(text: str, category: str | None) -> str:
+    s = str(text or "")
+    s = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", s)
+    s = s.replace(".", " ").replace("_", " ")
+    s = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", s, flags=re.U)
+    s = re.sub(r"\s+", " ", s).strip().lower()
     if not s:
         return ""
-    s = re.sub(
-        r"^(?:sp|special|ova|oad|oav|op|ed|pv|cm|preview|webpreview|characterpv|trailer|teaser|iv|mv|interview|making|bdextra)\s*\d{0,3}\b",
-        "",
-        s,
-        flags=re.I,
-    )
+    cat = str(category or "")
+    if cat == "making":
+        s = re.sub(r"^making\s*\d{0,3}\b", "", s, flags=re.I)
+    elif cat == "special":
+        s = re.sub(r"^sp\s*\d{0,3}\b", "", s, flags=re.I)
+    elif cat == "oped":
+        s = re.sub(r"^(?:op|ed)\s*\d{0,3}\b", "", s, flags=re.I)
     s = re.sub(r"\s+", " ", s).strip(" -_")
-    return s or _normalize_suffix_text(text).lower()
+    return s
 
 
 def _extract_scene_fragment(text: str) -> str | None:
