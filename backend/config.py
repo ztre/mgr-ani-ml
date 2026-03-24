@@ -128,6 +128,7 @@ class Settings:
   max_auto_remap_attempts: int = 3
   special_index_max_digits: int = 3
   pending_jsonl_path: str = '/media/pending/pending.jsonl'
+  unhandled_jsonl_path: str = '/media/pending/unhandled.jsonl'
   use_file_lock: bool = False
   worker_autostart: bool = True
   season_aware_research_enabled: bool = True
@@ -191,6 +192,7 @@ class Settings:
       self.special_index_max_digits,
     )
     self.pending_jsonl_path = data.get(f'{p}PENDING_JSONL_PATH', self.pending_jsonl_path)
+    self.unhandled_jsonl_path = data.get(f'{p}UNHANDLED_JSONL_PATH', self.unhandled_jsonl_path)
     self.use_file_lock = _parse_bool(
       data.get(f'{p}USE_FILE_LOCK'),
       self.use_file_lock,
@@ -253,6 +255,7 @@ class Settings:
       f'{prefix}MAX_AUTO_REMAP_ATTEMPTS': str(int(self.max_auto_remap_attempts)),
       f'{prefix}SPECIAL_INDEX_MAX_DIGITS': str(int(self.special_index_max_digits)),
       f'{prefix}PENDING_JSONL_PATH': self.pending_jsonl_path,
+      f'{prefix}UNHANDLED_JSONL_PATH': self.unhandled_jsonl_path,
       f'{prefix}USE_FILE_LOCK': str(bool(self.use_file_lock)).lower(),
       f'{prefix}WORKER_AUTOSTART': str(bool(self.worker_autostart)).lower(),
       f'{prefix}SEASON_AWARE_RESEARCH_ENABLED': str(bool(self.season_aware_research_enabled)).lower(),

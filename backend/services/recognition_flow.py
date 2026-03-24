@@ -326,15 +326,13 @@ def _unified_competitive_search(
     best_tv = max(tv_pool, key=lambda x: x.score) if tv_pool else None
     best_movie = max(movie_pool, key=lambda x: x.score) if movie_pool else None
 
-    if structure_hint == "tv" and best_tv and best_tv.score >= _fail_score():
+    if structure_hint == "tv" and best_tv:
         return best_tv
     if structure_hint == "movie" and best_movie and best_movie.score >= _fail_score():
         return best_movie
 
     if best_movie and best_tv:
-        if best_movie.score >= best_tv.score * 0.9:
-            return best_movie
-        return best_tv
+        return best_tv if best_tv.score >= best_movie.score else best_movie
 
     return best_movie or best_tv
 

@@ -150,13 +150,13 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
         # 标题数字（如 Steins;Gate 0 / 86）不要误当集号
         if kind in {"two_digit", "number"} and not is_title_number_safe(_cleanup_title(clean)):
             se_preview = None
-        if se_preview is not None and (not extra_from_bracket) and kind in {"sxxeyy", "xxyy", "episode", "e"}:
+        if se_preview is not None and (not extra_from_bracket) and kind in {"sxxeyy", "xxyy", "episode", "ep", "e"}:
             extra_category = None
             extra_label = None
             is_special = False
 
-    # Any extra hit should short-circuit episode parsing to avoid numeric pollution.
-    if extra_category is not None:
+    # Extras only short-circuit when no strong TV episode structure exists.
+    if extra_category is not None and not _has_strong_episode_structure(episode_text):
         season = _extract_explicit_season_hint_for_extra(episode_text) or 1
         episode = _extract_extra_index(extra_label) if extra_category in {"special", "oped"} else None
         title = _cleanup_title(clean)
@@ -922,6 +922,17 @@ def _has_strong_tv_token(text: str) -> bool:
     if re.search(r"\b(?:the\s+)?final\s+season\b", text, re.I):
         return True
     return False
+
+
+def _has_strong_episode_structure(text: str) -> bool:
+    bracket_ep, _suffix = extract_bracket_episode(text)
+    if bracket_ep is not None and bracket_ep > 0:
+        return True
+    se = _extract_season_episode_priority(text)
+    if se is None:
+        return False
+    _season, _episode, _span, kind = se
+    return kind in {"sxxeyy", "xxyy", "episode", "ep", "e"}
 
 
 def _remove_span(text: str, span: tuple[int, int]) -> str:

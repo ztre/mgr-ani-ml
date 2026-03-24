@@ -4,10 +4,11 @@ import fcntl
 import re
 import time
 import hashlib
+import json
 import queue
 import atexit
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Thread
 from contextlib import nullcontext
@@ -122,6 +123,53 @@ def _classify_media_task_error(exc: Exception) -> Literal["deterministic_conflic
     if any(token in lowered for token in transient_keywords):
         return "transient"
     return "other"
+
+
+def _resolve_unhandled_jsonl_path() -> Path | None:
+    path_value = str(getattr(settings, "unhandled_jsonl_path", "") or "").strip()
+    if not path_value:
+        return None
+    return Path(path_value)
+
+
+def _record_unhandled_item(
+    *,
+    original_path: Path,
+    reason: str,
+    file_type: str,
+    sync_group_id: int | None = None,
+    tmdb_id: int | None = None,
+    season: int | None = None,
+    episode: int | None = None,
+    extra_category: str | None = None,
+    suggested_target: Path | None = None,
+) -> None:
+    out_path = _resolve_unhandled_jsonl_path()
+    if out_path is None:
+        return
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "original_path": str(original_path),
+        "source_dir": str(original_path.parent),
+        "sync_group_id": sync_group_id,
+        "file_type": file_type,
+        "reason": str(reason or "").strip(),
+        "tmdb_id": tmdb_id,
+        "season": season,
+        "episode": episode,
+        "extra_category": extra_category,
+        "suggested_target": str(suggested_target) if suggested_target else None,
+    }
+    try:
+        with out_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        return
 
 
 def tag_task_type_with_issue(task_type: str) -> str:
@@ -749,56 +797,70 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
     use_lock = bool(getattr(settings, "use_file_lock", True))
     # show 级别文件锁：保证同一剧集的索引分配与落地原子性（单机有效）
     lock_ctx = _ShowLock(show_dir / ".assign.lock") if use_lock else nullcontext()
+    try:
+        with lock_ctx:
+            # 批量预扫描 + 批量分配：消除 N×M 重排
+            existing_cache = scan_existing_special_indices(target_root, context.get("tmdb_id"))
+            append_log(f"INFO: scan existing specials: {existing_cache}")
+            all_files = video_files + attachment_files
+            if force_recompute_names:
+                append_log("INFO: recompute mode enabled: skip allocator assignments and recalculate target names")
+                items, item_map, assignments = [], {}, {}
+            else:
+                items, item_map = _build_allocation_items(all_files, context, target_type)
+                assignments = allocate_indices_for_batch(
+                    items,
+                    existing_cache,
+                    preserve_original_index=bool(getattr(settings, "preserve_original_index", True)),
+                )
+            context["allocator_assignments"] = assignments
+            context["allocator_items"] = item_map
 
-    with lock_ctx:
-        # 批量预扫描 + 批量分配：消除 N×M 重排
-        existing_cache = scan_existing_special_indices(target_root, context.get("tmdb_id"))
-        append_log(f"INFO: scan existing specials: {existing_cache}")
-        all_files = video_files + attachment_files
-        if force_recompute_names:
-            append_log("INFO: recompute mode enabled: skip allocator assignments and recalculate target names")
-            items, item_map, assignments = [], {}, {}
-        else:
-            items, item_map = _build_allocation_items(all_files, context, target_type)
-            assignments = allocate_indices_for_batch(
-                items,
-                existing_cache,
-                preserve_original_index=bool(getattr(settings, "preserve_original_index", True)),
-            )
-        context["allocator_assignments"] = assignments
-        context["allocator_items"] = item_map
+            for src_path in video_files:
+                if _is_under_pending_dir(src_path, blocked_dirs):
+                    continue
+                _process_file(
+                    db=db,
+                    src_path=src_path,
+                    sync_group_id=group.id,
+                    context=context,
+                    seen_targets=seen_targets,
+                    op_log=op_log,
+                    dir_runtime=dir_runtime,
+                )
 
-        for src_path in video_files:
-            if _is_under_pending_dir(src_path, blocked_dirs):
-                continue
-            _process_file(
-                db=db,
-                src_path=src_path,
-                sync_group_id=group.id,
-                context=context,
-                seen_targets=seen_targets,
-                op_log=op_log,
-                dir_runtime=dir_runtime,
-            )
+            for src_path in attachment_files:
+                if _is_under_pending_dir(src_path, blocked_dirs):
+                    continue
+                _process_file(
+                    db=db,
+                    src_path=src_path,
+                    sync_group_id=group.id,
+                    context=context,
+                    seen_targets=seen_targets,
+                    op_log=op_log,
+                    dir_runtime=dir_runtime,
+                )
 
-        for src_path in attachment_files:
-            if _is_under_pending_dir(src_path, blocked_dirs):
-                continue
-            _process_file(
-                db=db,
-                src_path=src_path,
-                sync_group_id=group.id,
-                context=context,
-                seen_targets=seen_targets,
-                op_log=op_log,
-                dir_runtime=dir_runtime,
-            )
-
-    append_log(
-        "INFO: specials summary: assigned=%d, pending=%d, skipped=%d"
-        % (len(context.get("allocator_assignments") or {}), dir_runtime.get("pending_count", 0), dir_runtime.get("skipped_count", 0))
-    )
-    _upsert_dir_state(db, group.id, media_dir, signature, "SUCCESS", None)
+        append_log(
+            "INFO: specials summary: assigned=%d, pending=%d, skipped=%d"
+            % (len(context.get("allocator_assignments") or {}), dir_runtime.get("pending_count", 0), dir_runtime.get("skipped_count", 0))
+        )
+        _upsert_dir_state(db, group.id, media_dir, signature, "SUCCESS", None)
+    except DirectoryProcessError as e:
+        _rollback_operations(op_log)
+        reason = str(e)
+        _upsert_dir_state(db, group.id, media_dir, signature, "FAILED", reason)
+        error_kind = _classify_media_task_error(e)
+        if error_kind == "transient":
+            raise
+        if error_kind == "deterministic_conflict" and not force_recompute_names:
+            raise
+        _mark_dir_pending(db, media_dir, source, group.id, group.source_type, reason)
+        append_log(f"WARNING: 目录处理失败并转待办: {media_dir} | 原因: {reason}")
+        if error_kind == "deterministic_conflict" and force_recompute_names:
+            return
+        return
 
 
 def _process_file(
@@ -822,12 +884,19 @@ def _process_file(
             append_log(f"INFO: 已处理文件跳过: {src_path}")
             return
 
+    tmdb_id = context.get("tmdb_id")
     if _should_ignore_fractional_episode(src_path.name):
         append_log(f"跳过半集文件: {src_path.name}")
+        _record_unhandled_item(
+            original_path=src_path,
+            reason="fractional episode skipped",
+            file_type="video" if ext in VIDEO_EXTS else "attachment",
+            sync_group_id=sync_group_id,
+            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+        )
         return
 
     media_type = context["media_type"]
-    tmdb_id = context.get("tmdb_id")
     tmdb_data = context.get("tmdb_data") or {}
     target_root = Path(context["target_root"])
     is_attachment = ext in ATTACHMENT_EXTS
@@ -837,6 +906,13 @@ def _process_file(
     if parse_result is None:
         fallback_parse = parse_movie_filename(str(src_path)) if media_type == "tv" else parse_tv_filename(str(src_path))
         if fallback_parse is None:
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="parse failed",
+                file_type="attachment" if is_attachment else "video",
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+            )
             raise DirectoryProcessError(f"文件解析失败: {src_path.name}")
         parse_result = fallback_parse
 
@@ -848,6 +924,16 @@ def _process_file(
     menu_token = _extract_menu_token(src_path.name)
     if menu_token:
         append_log(f"INFO: Special 忽略: {menu_token}")
+        _record_unhandled_item(
+            original_path=src_path,
+            reason=f"menu token ignored: {menu_token}",
+            file_type="special",
+            sync_group_id=sync_group_id,
+            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+            season=parse_result.season,
+            episode=parse_result.episode,
+            extra_category=parse_result.extra_category,
+        )
         return
 
     # 附件跟随正片：优先复用同目录(同集)视频的目标路径。
@@ -870,6 +956,17 @@ def _process_file(
                 if "目标路径已被其他文件占用" in str(e):
                     context["_has_issues"] = True
                     append_log(f"WARNING: 附件跟随目标冲突已跳过: {src_path.name} -> {dst_path}")
+                    _record_unhandled_item(
+                        original_path=src_path,
+                        reason="attachment follow target occupied",
+                        file_type="attachment",
+                        sync_group_id=sync_group_id,
+                        tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                        season=parse_result.season,
+                        episode=parse_result.episode,
+                        extra_category=parse_result.extra_category,
+                        suggested_target=dst_path,
+                    )
                     return
                 raise
             _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
@@ -879,10 +976,30 @@ def _process_file(
         if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
             append_log(f"WARNING: special attachment unmatched, skipped: {src_path.name}")
             dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="special attachment anchor unmatched",
+                file_type="attachment",
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+            )
             return
         if parse_result.extra_category is None:
             append_log(f"WARNING: 附件未匹配到视频已跳过: {src_path.name}")
             dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="attachment unmatched",
+                file_type="attachment",
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+            )
             return
 
     # 强制：特殊目录下文件必须进入 Special/Extras 流程
@@ -954,6 +1071,16 @@ def _process_file(
 
     if media_type == "tv" and parse_result.extra_category is None and _should_ignore_zero_episode(src_path.name):
         append_log(f"INFO: 跳过第0集/00集文件: {src_path.name}")
+        _record_unhandled_item(
+            original_path=src_path,
+            reason="zero episode skipped",
+            file_type="video",
+            sync_group_id=sync_group_id,
+            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+            season=parse_result.season,
+            episode=parse_result.episode,
+            extra_category=parse_result.extra_category,
+        )
         return
 
     if media_type == "tv":
@@ -962,8 +1089,17 @@ def _process_file(
             if ep is not None:
                 parse_result = parse_result._replace(episode=ep)
         if parse_result.extra_category is None and parse_result.episode is None:
-            parse_result = parse_result._replace(extra_category="making", extra_label=None, is_special=False)
-            append_log(f"INFO: 无显式集号，按 extras 处理: {src_path.name}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="main video missing episode signal",
+                file_type="video",
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+            )
+            raise DirectoryProcessError(f"主视频缺少稳定集号: {src_path.name}")
 
         resolved_season = context.get("resolved_season")
         season_from_path = _extract_season_from_path(src_path)
@@ -1029,6 +1165,17 @@ def _process_file(
             if pending_path:
                 mark_pending(item, "batch target conflict", pending_path)
             append_log(f"WARNING: Pending: {src_path.name} | reason: batch target conflict")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="batch target conflict",
+                file_type="attachment" if is_attachment else ("special" if parse_result.extra_category in {"special", "oped"} else "extra"),
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+                suggested_target=dst_path,
+            )
             dir_runtime["pending_count"] = int(dir_runtime.get("pending_count") or 0) + 1
             context["_has_issues"] = True
             return
@@ -1037,6 +1184,17 @@ def _process_file(
             if pending_path:
                 mark_pending(item, reason, pending_path)
             append_log(f"WARNING: Pending: {src_path.name} | reason: {reason}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason=reason,
+                file_type="attachment" if is_attachment else ("special" if parse_result.extra_category in {"special", "oped"} else "extra"),
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+                suggested_target=dst_path,
+            )
             dir_runtime["pending_count"] = int(dir_runtime.get("pending_count") or 0) + 1
             context["_has_issues"] = True
             return
@@ -1565,6 +1723,12 @@ def _mark_dir_pending(
     reason: str,
 ) -> Path:
     pending_dir = _resolve_manual_scope(src_path, source_root)
+    _record_unhandled_item(
+        original_path=pending_dir,
+        reason=reason,
+        file_type="video",
+        sync_group_id=sync_group_id,
+    )
     append_log(f"WARNING: 转待办目录: {pending_dir} | 原因: {reason}")
 
     existing = db.query(MediaRecord).filter(
