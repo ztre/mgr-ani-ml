@@ -189,14 +189,8 @@ def _record_unhandled_item(
     extra_category: str | None = None,
     suggested_target: Path | None = None,
 ) -> None:
-    out_paths = []
     unprocessed_path = _resolve_unprocessed_jsonl_path()
-    review_path = _resolve_review_jsonl_path()
-    if unprocessed_path is not None:
-        out_paths.append(unprocessed_path)
-    if review_path is not None:
-        out_paths.append(review_path)
-    if not out_paths:
+    if unprocessed_path is None:
         return
 
     payload = {
@@ -212,8 +206,7 @@ def _record_unhandled_item(
         "extra_category": extra_category,
         "suggested_target": str(suggested_target) if suggested_target else None,
     }
-    for out_path in {p for p in out_paths}:
-        _append_jsonl_record(out_path, payload)
+    _append_jsonl_record(unprocessed_path, payload)
 
 
 def tag_task_type_with_issue(task_type: str) -> str:
@@ -1166,9 +1159,16 @@ def _process_file(
         if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
             append_log(f"WARNING: special attachment unmatched, skipped: {src_path.name}")
             dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            reason = "special attachment raw-label unmatched"
+            raw_key = _build_special_raw_label_key(str(src_path.parent), parse_result.extra_label)
+            raw_value = "__missing__"
+            if raw_key is not None:
+                raw_value = dir_runtime.get("special_target_by_raw_label", {}).get(raw_key, "__missing__")
+            if raw_value is None:
+                reason = "special attachment raw-label conflict"
             _record_unhandled_item(
                 original_path=src_path,
-                reason="special attachment anchor unmatched",
+                reason=reason,
                 file_type="attachment",
                 sync_group_id=sync_group_id,
                 tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
@@ -1434,7 +1434,7 @@ def _process_file(
     _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
     _upsert_inode_record(db, sync_group_id, src_path, dst_path)
     if ext in VIDEO_EXTS:
-        _register_video_anchor(src_path, dst_path, parse_result, dir_runtime)
+        _register_video_anchor(src_path, dst_path, parse_result, dir_runtime, raw_label=original_special_label)
 
     append_log(f"INFO: 处理成功: {src_path.name} -> {dst_path}")
 
@@ -1520,7 +1520,13 @@ def _extract_episode_from_filename_loose(filename: str) -> int | None:
     return None
 
 
-def _register_video_anchor(src_path: Path, dst_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> None:
+def _register_video_anchor(
+    src_path: Path,
+    dst_path: Path,
+    parse_result: ParseResult,
+    dir_runtime: dict | None,
+    raw_label: str | None = None,
+) -> None:
     if dir_runtime is None:
         return
     by_parent = dir_runtime.setdefault("video_anchor_by_parent", {})
@@ -1528,6 +1534,7 @@ def _register_video_anchor(src_path: Path, dst_path: Path, parse_result: ParseRe
     by_parent_stem = dir_runtime.setdefault("video_anchor_by_parent_stem", {})
     by_parent_special = dir_runtime.setdefault("video_anchor_by_parent_special", {})
     by_parent_recent = dir_runtime.setdefault("video_anchor_recent_by_parent", {})
+    special_by_raw = dir_runtime.setdefault("special_target_by_raw_label", {})
     parent_key = str(src_path.parent)
     by_parent[parent_key] = dst_path
     by_parent_recent[parent_key] = dst_path
@@ -1542,6 +1549,13 @@ def _register_video_anchor(src_path: Path, dst_path: Path, parse_result: ParseRe
     stem_key = _normalize_media_stem(src_path.stem)
     if stem_key:
         by_parent_stem[(parent_key, stem_key)] = dst_path
+    raw_key = _build_special_raw_label_key(parent_key, raw_label)
+    if raw_key is not None:
+        existing = special_by_raw.get(raw_key)
+        if existing is None:
+            special_by_raw[raw_key] = dst_path
+        elif existing != dst_path:
+            special_by_raw[raw_key] = None
 
 
 def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> Path | None:
@@ -1552,7 +1566,17 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
     by_parent_stem = dir_runtime.get("video_anchor_by_parent_stem", {})
     by_parent_special = dir_runtime.get("video_anchor_by_parent_special", {})
     by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
+    special_by_raw = dir_runtime.get("special_target_by_raw_label", {})
     parent_key = str(src_path.parent)
+
+    raw_key = _build_special_raw_label_key(parent_key, parse_result.extra_label)
+    if raw_key is not None:
+        raw_target = special_by_raw.get(raw_key, "__missing__")
+        if raw_target is None:
+            append_log(f"WARNING: special attachment raw-label conflict: {src_path.name} -> {parse_result.extra_label}")
+            return None
+        if raw_target != "__missing__":
+            return raw_target
 
     special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
     if special_key is not None:
@@ -1588,6 +1612,13 @@ def _build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseRe
     base = anchor_dst.stem
     lang = parse_result.subtitle_lang or ""
     return anchor_dst.with_name(f"{base}{lang}{ext}")
+
+
+def _build_special_raw_label_key(parent_key: str, raw_label: str | None) -> tuple[str, str] | None:
+    label = str(raw_label or "").strip()
+    if not label:
+        return None
+    return (parent_key, label)
 
 
 def _build_special_anchor_key(
