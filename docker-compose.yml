@@ -12,3 +12,4 @@ services:
       - /media:/media
       - ${AMM_ROOT_DIR:-/app/amm-state}/data:/app/data
       - ${AMM_ROOT_DIR:-/app/amm-state}/logs:/app/logs
+      - ${AMM_ROOT_DIR:-/app/amm-state}/pending:/app/pending

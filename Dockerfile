@@ -21,7 +21,7 @@ COPY backend/ ./backend/
 COPY --from=frontend-builder /app/frontend/dist ./backend/frontend/dist
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && mkdir -p /app/data /app/logs /media
+    && mkdir -p /app/data /app/logs /app/pending /media
 
 ENV PYTHONPATH=/app
 ENV PUID=1000

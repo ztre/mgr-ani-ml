@@ -26,6 +26,9 @@ class ConfigResponse(BaseModel):
     log_retention_days: int
     log_max_task_files: int
     log_cleanup_interval_seconds: int
+    pending_jsonl_path: str
+    unprocessed_items_jsonl_path: str
+    review_jsonl_path: str
 
 
 class ConfigUpdate(BaseModel):
@@ -42,6 +45,9 @@ class ConfigUpdate(BaseModel):
     log_retention_days: int | None = None
     log_max_task_files: int | None = None
     log_cleanup_interval_seconds: int | None = None
+    pending_jsonl_path: str | None = None
+    unprocessed_items_jsonl_path: str | None = None
+    review_jsonl_path: str | None = None
 
 
 class TestConnectionRequest(BaseModel):
@@ -73,6 +79,9 @@ def get_config():
         log_retention_days=int(settings.log_retention_days or 14),
         log_max_task_files=int(settings.log_max_task_files or 200),
         log_cleanup_interval_seconds=int(settings.log_cleanup_interval_seconds or 600),
+        pending_jsonl_path=str(settings.pending_jsonl_path or ""),
+        unprocessed_items_jsonl_path=str(settings.unprocessed_items_jsonl_path or ""),
+        review_jsonl_path=str(settings.review_jsonl_path or ""),
     )
 
 
@@ -104,6 +113,14 @@ def update_config(data: ConfigUpdate):
         settings.log_max_task_files = max(10, data.log_max_task_files)
     if data.log_cleanup_interval_seconds is not None:
         settings.log_cleanup_interval_seconds = max(60, data.log_cleanup_interval_seconds)
+    if data.pending_jsonl_path is not None:
+        settings.pending_jsonl_path = data.pending_jsonl_path.strip()
+    if data.unprocessed_items_jsonl_path is not None:
+        settings.unprocessed_items_jsonl_path = data.unprocessed_items_jsonl_path.strip()
+        # Keep legacy alias synced.
+        settings.unhandled_jsonl_path = settings.unprocessed_items_jsonl_path
+    if data.review_jsonl_path is not None:
+        settings.review_jsonl_path = data.review_jsonl_path.strip()
 
     settings.save_to_env()
     return {"ok": True}

@@ -25,6 +25,10 @@
             <el-icon><WarningFilled /></el-icon>
             <span>待办清单</span>
           </el-menu-item>
+          <el-menu-item index="/pending-logs">
+            <el-icon><Document /></el-icon>
+            <span>人工修正日志</span>
+          </el-menu-item>
           <el-menu-item index="/inodes">
             <el-icon><Files /></el-icon>
             <span>Inode 管理</span>

@@ -127,8 +127,11 @@ class Settings:
   preserve_original_index: bool = True
   max_auto_remap_attempts: int = 3
   special_index_max_digits: int = 3
-  pending_jsonl_path: str = '/media/pending/pending.jsonl'
-  unhandled_jsonl_path: str = '/media/pending/unhandled.jsonl'
+  pending_jsonl_path: str = '/app/pending/pending.jsonl'
+  unprocessed_items_jsonl_path: str = '/app/pending/unprocessed_items.jsonl'
+  review_jsonl_path: str = '/app/pending/review.jsonl'
+  # Backward-compatible alias. Prefer `unprocessed_items_jsonl_path`.
+  unhandled_jsonl_path: str = '/app/pending/unprocessed_items.jsonl'
   use_file_lock: bool = False
   worker_autostart: bool = True
   season_aware_research_enabled: bool = True
@@ -192,7 +195,16 @@ class Settings:
       self.special_index_max_digits,
     )
     self.pending_jsonl_path = data.get(f'{p}PENDING_JSONL_PATH', self.pending_jsonl_path)
-    self.unhandled_jsonl_path = data.get(f'{p}UNHANDLED_JSONL_PATH', self.unhandled_jsonl_path)
+    legacy_unhandled = data.get(f'{p}UNHANDLED_JSONL_PATH')
+    self.unprocessed_items_jsonl_path = data.get(
+      f'{p}UNPROCESSED_ITEMS_JSONL_PATH',
+      legacy_unhandled or self.unprocessed_items_jsonl_path,
+    )
+    self.review_jsonl_path = data.get(
+      f'{p}REVIEW_JSONL_PATH',
+      self.review_jsonl_path,
+    )
+    self.unhandled_jsonl_path = legacy_unhandled or self.unprocessed_items_jsonl_path
     self.use_file_lock = _parse_bool(
       data.get(f'{p}USE_FILE_LOCK'),
       self.use_file_lock,
@@ -255,6 +267,9 @@ class Settings:
       f'{prefix}MAX_AUTO_REMAP_ATTEMPTS': str(int(self.max_auto_remap_attempts)),
       f'{prefix}SPECIAL_INDEX_MAX_DIGITS': str(int(self.special_index_max_digits)),
       f'{prefix}PENDING_JSONL_PATH': self.pending_jsonl_path,
+      f'{prefix}UNPROCESSED_ITEMS_JSONL_PATH': self.unprocessed_items_jsonl_path,
+      f'{prefix}REVIEW_JSONL_PATH': self.review_jsonl_path,
+      # Backward-compatible alias.
       f'{prefix}UNHANDLED_JSONL_PATH': self.unhandled_jsonl_path,
       f'{prefix}USE_FILE_LOCK': str(bool(self.use_file_lock)).lower(),
       f'{prefix}WORKER_AUTOSTART': str(bool(self.worker_autostart)).lower(),

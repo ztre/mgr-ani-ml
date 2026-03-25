@@ -137,11 +137,19 @@ def should_fallback_to_pending(item: dict, assigned_target: Path, existing_cache
 def mark_pending(item: dict, reason: str, pending_jsonl_path: Path) -> None:
     """Append a pending entry to jsonl file."""
     pending_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path = Path(str(item.get("file_path") or ""))
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "tmdbid": item.get("tmdbid"),
+        "original_path": str(file_path) if str(file_path) else None,
         "source_dir": item.get("source_dir"),
-        "original_name": Path(str(item.get("file_path") or "")).name,
+        "sync_group_id": item.get("sync_group_id"),
+        "file_type": item.get("file_type") or ("attachment" if item.get("is_attachment") else "extra"),
+        "tmdb_id": item.get("tmdbid"),
+        "tmdbid": item.get("tmdbid"),
+        "season": item.get("season_key"),
+        "episode": item.get("episode"),
+        "extra_category": item.get("extra_category"),
+        "original_name": file_path.name,
         "detected_prefix": item.get("prefix"),
         "preferred_index": item.get("preferred"),
         "suggested_target": str(item.get("suggested_target") or ""),

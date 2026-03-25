@@ -22,6 +22,10 @@
           <el-icon><Refresh /></el-icon>
           刷新
         </el-button>
+        <el-button @click="$router.push('/pending-logs')">
+          <el-icon><Document /></el-icon>
+          人工修正日志
+        </el-button>
       </div>
     </div>
 

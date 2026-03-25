@@ -101,6 +101,17 @@
         <el-form-item label="清理检查间隔(秒)">
           <el-input-number v-model="form.log_cleanup_interval_seconds" :min="60" :max="86400" />
         </el-form-item>
+        <el-divider content-position="left">待办日志</el-divider>
+        <div class="section-desc section-gap">统一管理待办、未处理项与人工修正登记日志路径。</div>
+        <el-form-item label="Pending 日志路径">
+          <el-input v-model="form.pending_jsonl_path" placeholder="/app/pending/pending.jsonl" />
+        </el-form-item>
+        <el-form-item label="未处理项日志路径">
+          <el-input v-model="form.unprocessed_items_jsonl_path" placeholder="/app/pending/unprocessed_items.jsonl" />
+        </el-form-item>
+        <el-form-item label="人工修正日志路径">
+          <el-input v-model="form.review_jsonl_path" placeholder="/app/pending/review.jsonl" />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="saving" @click="save">保存</el-button>
           <el-button @click="load">重新加载</el-button>
@@ -173,6 +184,9 @@ const form = ref({
   log_retention_days: 14,
   log_max_task_files: 200,
   log_cleanup_interval_seconds: 600,
+  pending_jsonl_path: '/app/pending/pending.jsonl',
+  unprocessed_items_jsonl_path: '/app/pending/unprocessed_items.jsonl',
+  review_jsonl_path: '/app/pending/review.jsonl',
 })
 const saving = ref(false)
 const restarting = ref(false)

@@ -1011,6 +1011,33 @@ def classify_extra_from_text(text: str) -> tuple[str | None, str | None, bool]:
     return None, None, False
 
 
+def extract_strong_extra_fallback_label(text: str) -> str | None:
+    """Best-effort readable label for strong special-dir context only."""
+    candidates = re.findall(r"\[([^\]]+)\]", str(text or ""))
+    if not candidates:
+        return None
+    noise_only = re.compile(
+        r"^(?:\d{1,4}p|x26[45]|h26[45]|hevc|av1|ma10p|hi10p|yuv\d+p?\d*|"
+        r"flac(?:x\d+)?|aac|ac3|dts|ddp\d?\.?\d?|raw|vcb(?:-?studio)?|mawen\d*|mysilu|"
+        r"jpsc|jptc|chs|cht|sc|tc|gb|big5|bd|dvd|webrip|web[-\s]?dl|bdrip|bluray|remux)+$",
+        re.I,
+    )
+    for raw in candidates:
+        cleaned = re.sub(r"\s+", " ", str(raw or "")).strip()
+        if not cleaned:
+            continue
+        if noise_only.match(cleaned):
+            continue
+        if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", cleaned):
+            continue
+        if not re.search(r"[A-Za-z\u4e00-\u9fff]", cleaned):
+            continue
+        normalized = _normalize_extra_label(cleaned)
+        if normalized:
+            return normalized
+    return None
+
+
 def _special_priority_from_raw(raw: str, category: str, label: str) -> int:
     token = str(raw or "")
     upper = token.upper()

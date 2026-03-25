@@ -54,7 +54,8 @@
                   <el-tag size="small" effect="plain" class="type-tag">
                     {{ row.type === 'tv' ? 'TV' : 'Movie' }}
                   </el-tag>
-                  <span class="season-link">{{ row.season_label }}</span>
+                  <span class="season-link">{{ row.season_summary || row.season_label }}</span>
+                  <span v-if="row.type === 'tv'">季数 {{ row.season_count || 0 }}</span>
                   <span v-if="row.tmdb_id">TMDB: {{ row.tmdb_id }}</span>
                   <span>记录 {{ row.record_count }}</span>
                 </div>
@@ -142,23 +143,31 @@
       <div class="drawer-header-actions">
         <div class="drawer-filters">
           <el-input
-            v-model="filters.search"
+            v-model="seasonDrawerSearch"
             placeholder="搜索文件名..."
             clearable
             style="width: 220px"
-            @clear="onFilterChanged"
-            @keyup.enter="onFilterChanged"
           />
-          <el-select v-model="filters.type" placeholder="类型" clearable style="width: 100px" @change="onFilterChanged">
-            <el-option label="TV" value="tv" />
-            <el-option label="电影" value="movie" />
+          <el-select
+            v-if="seasonDrawerType === 'tv'"
+            v-model="seasonDrawerSeason"
+            placeholder="Season"
+            style="width: 140px"
+          >
+            <el-option label="全部 Season" value="all" />
+            <el-option
+              v-for="label in seasonDrawerSeasonOptions"
+              :key="label"
+              :label="label"
+              :value="label"
+            />
           </el-select>
-          <el-select v-model="filters.category" placeholder="分类" style="width: 120px" @change="onFilterChanged">
+          <el-select v-model="seasonDrawerCategory" placeholder="分类" style="width: 120px">
             <el-option label="全部" value="all" />
             <el-option label="正片" value="main" />
             <el-option label="SPs/Extras" value="sps" />
           </el-select>
-          <el-button @click="loadMedia" :loading="loading">
+          <el-button @click="refreshSeasonDrawerItems" :loading="seasonDrawerLoading">
             <el-icon><Refresh /></el-icon>
           </el-button>
           <el-button type="primary" plain @click="openDirFixDialog" :disabled="!seasonDrawerDir">
@@ -197,7 +206,7 @@
         </div>
       </div>
       <el-table
-        :data="seasonDrawerItems"
+        :data="filteredSeasonDrawerItems"
         v-loading="seasonDrawerLoading"
         stripe
         style="width: 100%"
@@ -299,11 +308,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { mediaApi, syncGroupsApi } from '../api/client'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
+import { getCachedMeta, getCachedPoster, setCachedMeta, setCachedPoster } from '../utils/tmdbUiCache'
 
 const route = useRoute()
 const rawItems = ref([])
@@ -324,14 +334,19 @@ const seasonDrawerVisible = ref(false)
 const seasonDrawerLoading = ref(false)
 const seasonDrawerTitle = ref('')
 const seasonDrawerDir = ref('')
+const seasonDrawerType = ref('')
 const seasonDrawerItems = ref([])
 const seasonDrawerSelectedRows = ref([])
+const seasonDrawerSearch = ref('')
+const seasonDrawerCategory = ref('all')
+const seasonDrawerSeason = ref('all')
 const posterCache = reactive({})
 const tmdbMetaCache = reactive({})
 const syncGroupRootNames = reactive({})
 const globalRootNames = ref(new Set())
 const fixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode: 1, episode_offset: undefined })
 const dirFixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode_offset: undefined })
+const AUX_RESOURCE_DIRS = new Set(['extras', 'specials', 'trailers', 'interviews'])
 
 function extractFilename(path) {
   if (!path) return ''
@@ -376,6 +391,23 @@ function extractSeasonDir(path) {
   return extractTargetDir(path)
 }
 
+function extractShowDir(path) {
+  if (!path) return ''
+  const seasonDir = extractSeasonDir(path)
+  if (!seasonDir || seasonDir === path) return extractTargetDir(path)
+  return extractTargetDir(seasonDir)
+}
+
+function extractMovieResourceDir(path) {
+  if (!path) return ''
+  const targetDir = extractTargetDir(path)
+  const leaf = extractFilename(targetDir).toLowerCase()
+  if (AUX_RESOURCE_DIRS.has(leaf)) {
+    return extractTargetDir(targetDir)
+  }
+  return targetDir
+}
+
 function extractSeasonLabelFromPath(path) {
   if (!path) return 'Season --'
   const normalized = String(path).replace(/\\/g, '/')
@@ -385,11 +417,53 @@ function extractSeasonLabelFromPath(path) {
   return n ? `Season ${String(Number(n)).padStart(2, '0')}` : m[1]
 }
 
+function formatSeasonSummary(labels) {
+  const uniq = Array.from(new Set((labels || []).filter(Boolean)))
+  if (!uniq.length) return '-'
+  if (uniq.length <= 2) return uniq.join(' / ')
+  return `${uniq.length} seasons`
+}
+
+function extractDrawerSeasonBucket(path) {
+  if (!path) return 'Other'
+  const normalized = String(path).replace(/\\/g, '/')
+  const seasonMatch = normalized.match(/\/(Season\s+\d{1,2})(?:\/|$)/i)
+  if (seasonMatch?.[1]) return extractSeasonLabelFromPath(path)
+  const auxMatch = normalized.match(/\/(specials|extras|trailers|interviews)(?:\/|$)/i)
+  if (!auxMatch?.[1]) return 'Other'
+  const labelMap = {
+    specials: 'Specials',
+    extras: 'Extras',
+    trailers: 'Trailers',
+    interviews: 'Interviews',
+  }
+  return labelMap[auxMatch[1].toLowerCase()] || 'Other'
+}
+
+function isDrawerExtraLike(row) {
+  const normalized = String(row?.target_path || row?.original_path || '').replace(/\\/g, '/').toLowerCase()
+  if (!normalized) return false
+  return (
+    normalized.includes('/season 00/') ||
+    normalized.includes('/specials/') ||
+    normalized.includes('/extras/') ||
+    normalized.includes('/trailers/') ||
+    normalized.includes('/interviews/')
+  )
+}
+
+function drawerItemMatchesCategory(row, category) {
+  if (!row) return false
+  const isExtraLike = isDrawerExtraLike(row)
+  if (category === 'main') return !isExtraLike
+  if (category === 'sps') return isExtraLike
+  return true
+}
+
 function extractResourceName(path, type) {
   if (!path) return '-'
   if (type === 'movie') {
-    const base = extractFilename(path).replace(/\.[^/.]+$/, '')
-    return base.replace(/\s*-\s*[\w.\- ]{2,20}$/i, '').trim()
+    return String(extractFilename(extractMovieResourceDir(path)) || '-').replace(/\s*\[tmdbid=\d+\]/i, '').trim()
   }
   const seasonDir = extractSeasonDir(path)
   const showDir = extractTargetDir(seasonDir)
@@ -493,6 +567,17 @@ async function loadTmdbMeta(row) {
   const metaKey = `${mediaType}:${tmdbId || ''}`
   const posterKey = posterKeyForRow(row)
   if (!tmdbId || !posterKey || posterCache[posterKey] === '__loading__') return
+  const cachedMeta = getCachedMeta(metaKey)
+  if (cachedMeta && !tmdbMetaCache[metaKey]) {
+    tmdbMetaCache[metaKey] = cachedMeta
+  }
+  const cachedPoster = getCachedPoster(posterKey)
+  if (cachedPoster !== null && cachedPoster !== undefined && !posterCache[posterKey]) {
+    posterCache[posterKey] = cachedPoster
+  }
+  if (tmdbMetaCache[metaKey]?.title && typeof posterCache[posterKey] === 'string' && posterCache[posterKey] !== '__loading__') {
+    return
+  }
   posterCache[posterKey] = '__loading__'
   try {
     const seasonNum = mediaType === 'tv' ? extractSeasonNumber(row?.season_label) : null
@@ -501,82 +586,109 @@ async function loadTmdbMeta(row) {
       const seasonPoster = buildPosterUrl(seasonData?.poster_path)
       if (seasonPoster) {
         posterCache[posterKey] = seasonPoster
+        setCachedPoster(posterKey, seasonPoster)
       }
     }
     const { data } = await mediaApi.searchTmdb({ q: String(tmdbId), media_type: mediaType, limit: 1 })
     const item = data?.items?.[0]
     if (!posterCache[posterKey] || posterCache[posterKey] === '__loading__') {
       posterCache[posterKey] = buildPosterUrl(item?.poster_path) || ''
+      setCachedPoster(posterKey, posterCache[posterKey] || '')
     }
     tmdbMetaCache[metaKey] = {
       title: item?.title || '',
       year: item?.year || null,
     }
+    setCachedMeta(metaKey, tmdbMetaCache[metaKey])
   } catch {
     posterCache[posterKey] = ''
     tmdbMetaCache[metaKey] = { title: '', year: null }
+    setCachedPoster(posterKey, '')
+    setCachedMeta(metaKey, tmdbMetaCache[metaKey])
   }
 }
 
 function groupRows(records) {
-  const collapseByBucket = new Map()
-  const rowsWithDir = (records || []).map((row) => {
-    const basePath = row.target_path || row.original_path || ''
-    const displayDir = row.type === 'tv' ? extractSeasonDir(basePath) : extractTargetDir(basePath)
-    const bucket = `${row.type || ''}:${row.tmdb_id || 0}`
-    if (!collapseByBucket.has(bucket)) collapseByBucket.set(bucket, [])
-    collapseByBucket.get(bucket).push(displayDir)
-    return { row, basePath, displayDir, bucket }
-  })
-
-  const canonicalDirMap = new Map()
-  for (const [bucket, dirs] of collapseByBucket.entries()) {
-    const sorted = Array.from(new Set(dirs.map((d) => normalizePath(d)).filter(Boolean))).sort(
-      (a, b) => splitPathParts(a).length - splitPathParts(b).length
-    )
-    const selected = []
-    for (const dir of sorted) {
-      const parent = selected.find((x) => isAncestorPath(x, dir))
-      if (parent) {
-        canonicalDirMap.set(`${bucket}|${dir}`, parent)
-      } else {
-        selected.push(dir)
-        canonicalDirMap.set(`${bucket}|${dir}`, dir)
-      }
-    }
-  }
-
   const map = new Map()
-  for (const x of rowsWithDir) {
-    const { row, basePath, displayDir, bucket } = x
-    const canonicalDir = canonicalDirMap.get(`${bucket}|${normalizePath(displayDir)}`) || displayDir
-    const key = `${bucket}:${canonicalDir}`
+  for (const row of records || []) {
+    const basePath = row.target_path || row.original_path || ''
+    const resourceDir = row.type === 'tv' ? extractShowDir(basePath) : extractMovieResourceDir(basePath)
+    const seasonDir = row.type === 'tv' ? extractSeasonDir(basePath) : resourceDir
+    const seasonLabel = row.type === 'tv' ? extractSeasonLabelFromPath(basePath) : 'Movie'
+    const key = `${row.type || ''}:${row.tmdb_id || 0}:${normalizePath(resourceDir)}`
     const latest = new Date(row.updated_at || row.created_at || 0).getTime()
     if (!map.has(key)) {
       map.set(key, {
         key,
         type: row.type,
         tmdb_id: row.tmdb_id,
-        season_dir: canonicalDir,
-        season_label: extractSeasonLabelFromPath(basePath),
+        resource_dir: resourceDir,
+        season_dir: seasonDir,
+        season_dirs: seasonDir ? [seasonDir] : [],
+        season_labels: seasonLabel ? [seasonLabel] : [],
+        season_label: seasonLabel,
+        season_summary: seasonLabel,
+        season_count: row.type === 'tv' ? 1 : 0,
         resource_name: extractResourceName(basePath, row.type),
         record_count: 1,
         latest_updated_at: row.updated_at || row.created_at,
         latest_ts: latest,
         sample: row,
+        item_ids: row.id ? [row.id] : [],
       })
       continue
     }
     const item = map.get(key)
     item.record_count += 1
+    if (row.id) item.item_ids.push(row.id)
+    if (seasonDir && !item.season_dirs.includes(seasonDir)) item.season_dirs.push(seasonDir)
+    if (seasonLabel && !item.season_labels.includes(seasonLabel)) item.season_labels.push(seasonLabel)
+    item.season_count = item.type === 'tv' ? item.season_dirs.length : 0
+    item.season_summary = item.type === 'tv' ? formatSeasonSummary(item.season_labels) : 'Movie'
     if (latest > item.latest_ts) {
       item.latest_ts = latest
       item.latest_updated_at = row.updated_at || row.created_at
       item.sample = row
+      item.season_label = seasonLabel
+      item.season_dir = seasonDir
     }
   }
   return Array.from(map.values()).sort((a, b) => b.latest_ts - a.latest_ts)
 }
+
+const seasonDrawerSeasonOptions = computed(() => {
+  if (seasonDrawerType.value !== 'tv') return []
+  const labels = Array.from(new Set(
+    (seasonDrawerItems.value || [])
+      .map((item) => extractDrawerSeasonBucket(item?.target_path || item?.original_path || ''))
+      .filter(Boolean),
+  ))
+  return labels.sort((a, b) => {
+    const aNum = extractSeasonNumber(a)
+    const bNum = extractSeasonNumber(b)
+    if (aNum !== null && bNum !== null) return aNum - bNum
+    if (aNum !== null) return -1
+    if (bNum !== null) return 1
+    return a.localeCompare(b, 'zh-Hans-CN')
+  })
+})
+
+const filteredSeasonDrawerItems = computed(() => {
+  const search = String(seasonDrawerSearch.value || '').trim().toLowerCase()
+  const category = seasonDrawerCategory.value || 'all'
+  const season = seasonDrawerSeason.value || 'all'
+  return (seasonDrawerItems.value || []).filter((row) => {
+    const source = String(row?.original_path || '').toLowerCase()
+    const target = String(row?.target_path || '').toLowerCase()
+    if (search && !source.includes(search) && !target.includes(search)) return false
+    if (!drawerItemMatchesCategory(row, category)) return false
+    if (seasonDrawerType.value === 'tv' && season !== 'all') {
+      const bucket = extractDrawerSeasonBucket(row?.target_path || row?.original_path || '')
+      if (bucket !== season) return false
+    }
+    return true
+  })
+})
 
 function refreshPagedRows() {
   total.value = allSeasonRows.value.length
@@ -710,19 +822,23 @@ function formatTime(t) {
 }
 
 async function openSeasonDrawer(row) {
-  const seasonDir = row?.season_dir
-  if (!seasonDir) return
+  const resourceDir = row?.resource_dir
+  if (!resourceDir) return
   seasonDrawerVisible.value = true
-  seasonDrawerDir.value = seasonDir
-  seasonDrawerTitle.value = `${getResourceName(row)} · ${row.season_label}`
+  seasonDrawerDir.value = resourceDir
+  seasonDrawerType.value = row?.type || ''
+  seasonDrawerTitle.value = `${getResourceName(row)} · ${row.season_summary || row.season_label}`
+  seasonDrawerSearch.value = ''
+  seasonDrawerCategory.value = 'all'
+  seasonDrawerSeason.value = 'all'
   seasonDrawerLoading.value = true
   try {
-    const { data } = await mediaApi.byTargetDir({ target_dir: seasonDir, limit: 1000 })
+    const { data } = await mediaApi.byTargetDir({ target_dir: resourceDir, limit: 1000 })
     seasonDrawerItems.value = data.items || []
     seasonDrawerSelectedRows.value = []
   } catch (e) {
     seasonDrawerItems.value = []
-    ElMessage.error(e?.response?.data?.detail || '加载季目录记录失败')
+    ElMessage.error(e?.response?.data?.detail || '加载资源目录记录失败')
   } finally {
     seasonDrawerLoading.value = false
   }
@@ -730,9 +846,17 @@ async function openSeasonDrawer(row) {
 
 async function refreshSeasonDrawerItems() {
   if (!seasonDrawerDir.value) return
-  const { data } = await mediaApi.byTargetDir({ target_dir: seasonDrawerDir.value, limit: 1000 })
-  seasonDrawerItems.value = data.items || []
-  seasonDrawerSelectedRows.value = []
+  seasonDrawerLoading.value = true
+  try {
+    const { data } = await mediaApi.byTargetDir({ target_dir: seasonDrawerDir.value, limit: 1000 })
+    seasonDrawerItems.value = data.items || []
+    seasonDrawerSelectedRows.value = []
+  } catch (e) {
+    seasonDrawerItems.value = []
+    ElMessage.error(e?.response?.data?.detail || '刷新资源目录记录失败')
+  } finally {
+    seasonDrawerLoading.value = false
+  }
 }
 
 async function deleteByIds(ids, deleteFiles, sceneName) {
@@ -815,10 +939,10 @@ async function onDeleteDrawerResourceCommand(command) {
 
 async function onDeleteResourceCommand(row, command) {
   try {
-    const ok = await deleteResourceByDir(row?.season_dir, command === 'records_and_links')
+    const ok = await deleteResourceByDir(row?.resource_dir || row?.season_dir, command === 'records_and_links')
     if (!ok) return
     await loadMedia()
-    if (seasonDrawerVisible.value && seasonDrawerDir.value === row?.season_dir) {
+    if (seasonDrawerVisible.value && seasonDrawerDir.value === (row?.resource_dir || row?.season_dir)) {
       await refreshSeasonDrawerItems()
     }
   } catch (e) {

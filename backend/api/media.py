@@ -1,7 +1,8 @@
 """Media record and manual operation APIs."""
 from __future__ import annotations
 
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -57,6 +58,21 @@ class ReidentifyDirRequest(BaseModel):
     episode_offset: int | None = None
 
 
+class PendingLogReviewRequest(BaseModel):
+    source_kind: Literal["pending", "unprocessed", "review"]
+    source_original_path: str | None = None
+    source_reason: str | None = None
+    source_timestamp: str | None = None
+    resolution_status: Literal["resolved", "skipped", "false_positive", "needs_followup"]
+    reviewer: str | None = None
+    note: str | None = None
+    tmdb_id: int | None = None
+    season: int | None = None
+    episode: int | None = None
+    extra_category: str | None = None
+    suggested_target: str | None = None
+
+
 @router.get("")
 def list_media(
     db: Session = Depends(get_db),
@@ -103,6 +119,57 @@ def list_pending(
     rows = q.order_by(MediaRecord.updated_at.desc()).offset(offset).limit(limit).all()
     items = [_media_to_dict(x) for x in rows]
     return {"total": total, "items": items, "offset": offset, "limit": limit}
+
+
+@router.get("/pending-logs")
+def list_pending_logs(
+    kind: Literal["pending", "unprocessed", "review"] = Query("pending"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+    search: str | None = None,
+):
+    file_path = _resolve_pending_log_path(kind)
+    items = _load_pending_log_items(file_path, kind)
+    keyword = str(search or "").strip().lower()
+    if keyword:
+        items = [item for item in items if _pending_log_matches(item, keyword)]
+    total = len(items)
+    sliced = items[offset: offset + limit]
+    return {
+        "kind": kind,
+        "path": str(file_path) if file_path else "",
+        "items": sliced,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+@router.post("/pending-logs/review")
+def create_pending_log_review(data: PendingLogReviewRequest):
+    review_path = _resolve_pending_log_path("review")
+    if review_path is None:
+        raise HTTPException(status_code=400, detail="未配置 review.jsonl 路径")
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "entry_type": "manual_review",
+        "source_kind": data.source_kind,
+        "source_original_path": (data.source_original_path or "").strip() or None,
+        "source_reason": (data.source_reason or "").strip() or None,
+        "source_timestamp": (data.source_timestamp or "").strip() or None,
+        "resolution_status": data.resolution_status,
+        "reviewer": (data.reviewer or "").strip() or None,
+        "note": (data.note or "").strip() or None,
+        "tmdb_id": data.tmdb_id,
+        "season": data.season,
+        "episode": data.episode,
+        "extra_category": (data.extra_category or "").strip() or None,
+        "suggested_target": (data.suggested_target or "").strip() or None,
+    }
+    review_path.parent.mkdir(parents=True, exist_ok=True)
+    with review_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return {"ok": True, "message": "人工处理登记已写入 review.jsonl"}
 
 
 @router.get("/stats")
@@ -531,6 +598,53 @@ def _link_or_fail(src: Path, dst: Path) -> None:
     import os
 
     os.link(str(src), str(dst))
+
+
+def _resolve_pending_log_path(kind: str) -> Path | None:
+    if kind == "pending":
+        value = str(getattr(settings, "pending_jsonl_path", "") or "").strip()
+    elif kind == "review":
+        value = str(getattr(settings, "review_jsonl_path", "") or "").strip()
+    else:
+        value = str(getattr(settings, "unprocessed_items_jsonl_path", "") or "").strip()
+        if not value:
+            value = str(getattr(settings, "unhandled_jsonl_path", "") or "").strip()
+    return Path(value) if value else None
+
+
+def _load_pending_log_items(file_path: Path | None, kind: str) -> list[dict]:
+    if file_path is None or not file_path.exists() or not file_path.is_file():
+        return []
+    items: list[dict] = []
+    try:
+        lines = file_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for index, raw in enumerate(reversed(lines), start=1):
+        text = raw.strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = {"raw": text}
+        if not isinstance(payload, dict):
+            payload = {"raw": text}
+        payload["kind"] = kind
+        payload["line_no"] = len(lines) - index + 1
+        items.append(payload)
+    return items
+
+
+def _pending_log_matches(item: dict, keyword: str) -> bool:
+    for key, value in item.items():
+        if key in {"line_no", "kind"}:
+            continue
+        if value is None:
+            continue
+        if keyword in str(value).lower():
+            return True
+    return False
 
 def _media_to_dict(row: MediaRecord) -> dict:
     is_dir_pending = False

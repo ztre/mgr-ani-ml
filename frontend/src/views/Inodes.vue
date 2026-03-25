@@ -62,7 +62,8 @@
                   <el-tag size="small" effect="plain" class="type-tag">
                     {{ getMediaTypeLabel(row) }}
                   </el-tag>
-                  <span class="season-link">{{ row.season_label }}</span>
+                  <span class="season-link">{{ row.season_summary || row.season_label }}</span>
+                  <span v-if="getMediaTypeLabel(row) === 'TV'">季数 {{ row.season_count || 0 }}</span>
                   <span v-if="getTmdbId(row)">TMDB: {{ getTmdbId(row) }}</span>
                   <span>记录 {{ row.record_count }}</span>
                   <span>同步组 {{ row.sync_group_id || '-' }}</span>
@@ -149,6 +150,7 @@ import { ref, computed, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { inodesApi, syncGroupsApi, mediaApi } from '../api/client'
 import dayjs from 'dayjs'
+import { getCachedMeta, getCachedPoster, setCachedMeta, setCachedPoster } from '../utils/tmdbUiCache'
 
 const rawInodes = ref([])
 const groupedRows = ref([])
@@ -172,6 +174,7 @@ const drawerSearch = ref('')
 
 const metaCache = reactive({})
 const posterCache = reactive({})
+const AUX_RESOURCE_DIRS = new Set(['extras', 'specials', 'trailers', 'interviews'])
 
 function normalizePath(path) {
   return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '')
@@ -195,12 +198,36 @@ function extractSeasonDir(path) {
   return extractTargetDir(path)
 }
 
+function extractShowDir(path) {
+  if (!path) return ''
+  const seasonDir = extractSeasonDir(path)
+  if (!seasonDir || seasonDir === path) return extractTargetDir(path)
+  return extractTargetDir(seasonDir)
+}
+
+function extractMovieResourceDir(path) {
+  if (!path) return ''
+  const targetDir = extractTargetDir(path)
+  const leaf = extractFilename(targetDir).toLowerCase()
+  if (AUX_RESOURCE_DIRS.has(leaf)) {
+    return extractTargetDir(targetDir)
+  }
+  return targetDir
+}
+
 function extractSeasonLabel(path) {
   const normalized = normalizePath(path)
   const m = normalized.match(/\/(Season\s+\d{1,2})(?:\/|$)/i)
   if (!m?.[1]) return 'Season --'
   const n = m[1].match(/\d+/)?.[0]
   return n ? `Season ${String(Number(n)).padStart(2, '0')}` : m[1]
+}
+
+function formatSeasonSummary(labels) {
+  const uniq = Array.from(new Set((labels || []).filter(Boolean)))
+  if (!uniq.length) return '-'
+  if (uniq.length <= 2) return uniq.join(' / ')
+  return `${uniq.length} seasons`
 }
 
 function extractSeasonNumber(label) {
@@ -211,8 +238,7 @@ function extractSeasonNumber(label) {
 function extractResourceName(path, type) {
   if (!path) return '未识别资源'
   if (type === 'movie') {
-    const base = extractFilename(path).replace(/\.[^/.]+$/, '')
-    return base.replace(/\s*-\s*[\w.\- ]{2,20}$/i, '').trim() || '未识别资源'
+    return String(extractFilename(extractMovieResourceDir(path)) || '').replace(/\s*\[tmdbid=\d+\]/i, '').trim() || '未识别资源'
   }
   const seasonDir = extractSeasonDir(path)
   const showDir = extractTargetDir(seasonDir)
@@ -228,68 +254,50 @@ function inferMediaTypeByPath(targetPath) {
   return /\/Season\s+\d+/i.test(normalizePath(targetPath)) ? 'tv' : 'movie'
 }
 
+function extractTmdbIdFromPath(path) {
+  const normalized = normalizePath(path)
+  const match = normalized.match(/\[tmdbid=(\d+)\]/i)
+  return match?.[1] || ''
+}
+
+function buildResourceSignature(path, fallbackType, syncGroupId) {
+  const resourceDir = fallbackType === 'tv' ? extractShowDir(path) : extractMovieResourceDir(path)
+  const tmdbId = extractTmdbIdFromPath(resourceDir || path)
+  const resourceName = extractFilename(resourceDir).replace(/\s*\[tmdbid=\d+\]/i, '').trim().toLowerCase()
+  if (tmdbId) {
+    return `${syncGroupId || 0}:tmdb:${tmdbId}`
+  }
+  return `${syncGroupId || 0}:name:${resourceName}`
+}
+
 function toGroupKey(inode) {
   const type = inferMediaTypeByPath(inode?.target_path || '')
-  const dir = type === 'tv' ? extractSeasonDir(inode?.target_path || '') : extractTargetDir(inode?.target_path || '')
-  return `${inode?.sync_group_id || 0}:${type}:${normalizePath(dir)}`
-}
-
-function splitPathParts(path) {
-  return normalizePath(path).split('/').filter(Boolean)
-}
-
-function isAncestorPath(ancestor, child) {
-  const a = normalizePath(ancestor).toLowerCase()
-  const c = normalizePath(child).toLowerCase()
-  if (!a || !c) return false
-  return c === a || c.startsWith(`${a}/`)
+  return buildResourceSignature(inode?.target_path || '', type, inode?.sync_group_id)
 }
 
 function buildGroups(rows) {
-  const collapseByBucket = new Map()
-  const rowsWithDir = rows.map((inode) => {
-    const targetPath = inode?.target_path || ''
-    const fallbackType = inferMediaTypeByPath(targetPath)
-    const dir = fallbackType === 'tv' ? extractSeasonDir(targetPath) : extractTargetDir(targetPath)
-    const bucket = `${inode?.sync_group_id || 0}:${fallbackType}`
-    if (!collapseByBucket.has(bucket)) collapseByBucket.set(bucket, [])
-    if (dir) collapseByBucket.get(bucket).push(normalizePath(dir))
-    return { inode, targetPath, fallbackType, dir, bucket }
-  })
-
-  const canonicalDirMap = new Map()
-  for (const [bucket, dirs] of collapseByBucket.entries()) {
-    const uniq = Array.from(new Set(dirs)).sort((a, b) => splitPathParts(a).length - splitPathParts(b).length)
-    const selected = []
-    for (const dir of uniq) {
-      const parent = selected.find((x) => isAncestorPath(x, dir))
-      if (parent) canonicalDirMap.set(`${bucket}|${dir}`, parent)
-      else {
-        selected.push(dir)
-        canonicalDirMap.set(`${bucket}|${dir}`, dir)
-      }
-    }
-  }
-
   const map = new Map()
-
-  for (const x of rowsWithDir) {
-    const { inode, targetPath, fallbackType, dir, bucket } = x
+  for (const inode of rows || []) {
+    const targetPath = inode?.target_path || ''
     if (!targetPath) continue
-
-    const normalizedDir = normalizePath(dir)
-    const canonicalDir = canonicalDirMap.get(`${bucket}|${normalizedDir}`) || normalizedDir
-    const key = `${inode?.sync_group_id || 0}:${fallbackType}:${canonicalDir}`
+    const fallbackType = inferMediaTypeByPath(targetPath)
+    const resourceDir = fallbackType === 'tv' ? extractShowDir(targetPath) : extractMovieResourceDir(targetPath)
+    const seasonLabel = fallbackType === 'tv' ? extractSeasonLabel(targetPath) : 'Movie'
+    const key = buildResourceSignature(targetPath, fallbackType, inode?.sync_group_id)
     const latest = new Date(inode.updated_at || inode.created_at || 0).getTime()
 
     if (!map.has(key)) {
       map.set(key, {
         key,
         sync_group_id: inode.sync_group_id,
-        target_dir: canonicalDir,
-        season_label: extractSeasonLabel(targetPath),
+        target_dir: resourceDir,
+        season_label: seasonLabel,
+        season_labels: seasonLabel ? [seasonLabel] : [],
+        season_summary: seasonLabel,
+        season_count: fallbackType === 'tv' ? 1 : 0,
         resource_name: extractResourceName(targetPath, fallbackType),
         fallback_type: fallbackType,
+        inferred_types: [fallbackType],
         record_count: 1,
         latest_updated_at: inode.updated_at || inode.created_at,
         latest_ts: latest,
@@ -299,9 +307,18 @@ function buildGroups(rows) {
 
     const item = map.get(key)
     item.record_count += 1
+    if (!item.inferred_types.includes(fallbackType)) item.inferred_types.push(fallbackType)
+    if (seasonLabel && !item.season_labels.includes(seasonLabel)) item.season_labels.push(seasonLabel)
+    if (fallbackType === 'tv') {
+      item.fallback_type = 'tv'
+    }
+    item.season_count = item.fallback_type === 'tv' ? item.season_labels.filter((x) => x !== 'Movie').length : 0
+    item.season_summary = item.fallback_type === 'tv' ? formatSeasonSummary(item.season_labels.filter((x) => x !== 'Movie')) : 'Movie'
     if (latest > item.latest_ts) {
       item.latest_ts = latest
       item.latest_updated_at = inode.updated_at || inode.created_at
+      item.season_label = seasonLabel
+      item.target_dir = resourceDir
     }
   }
 
@@ -358,6 +375,14 @@ function getResourceName(row) {
 async function loadMeta(row) {
   const key = getMetaKey(row)
   if (!key || metaCache[key]?.__loaded || posterCache[key] === '__loading__') return
+  const cachedResolved = getCachedMeta(key)
+  if (cachedResolved?.__row_loaded) {
+    metaCache[key] = cachedResolved
+  }
+  if (typeof getCachedPoster(key) === 'string' && !posterCache[key]) {
+    posterCache[key] = getCachedPoster(key)
+  }
+  if (metaCache[key]?.__loaded && typeof posterCache[key] === 'string' && posterCache[key] !== '__loading__') return
   posterCache[key] = '__loading__'
 
   try {
@@ -366,34 +391,45 @@ async function loadMeta(row) {
     if (!item?.tmdb_id) {
       metaCache[key] = { __loaded: true, media_type: row.fallback_type }
       posterCache[key] = ''
+      setCachedMeta(key, metaCache[key])
+      setCachedPoster(key, '')
       return
     }
 
     const mediaType = item.type || row.fallback_type || 'tv'
     const tmdbId = item.tmdb_id
+    const tmdbMetaKey = `${mediaType}:${tmdbId}`
+    const cachedTmdbMeta = getCachedMeta(tmdbMetaKey)
+    const cachedTmdbPoster = getCachedPoster(tmdbMetaKey)
     let poster = ''
-
-    const seasonNum = mediaType === 'tv' ? extractSeasonNumber(row?.season_label) : null
-    if (seasonNum !== null) {
-      const { data: seasonData } = await mediaApi.seasonPoster({ tmdb_id: tmdbId, season: seasonNum })
-      poster = buildPosterUrl(seasonData?.poster_path)
+    let first = cachedTmdbMeta || null
+    if (cachedTmdbPoster) {
+      poster = cachedTmdbPoster
     }
-
-    const { data: tmdb } = await mediaApi.searchTmdb({ q: String(tmdbId), media_type: mediaType, limit: 1 })
-    const first = (tmdb?.items || [])[0]
-    if (!poster) poster = buildPosterUrl(first?.poster_path)
+    if (!first || !poster) {
+      const { data: tmdb } = await mediaApi.searchTmdb({ q: String(tmdbId), media_type: mediaType, limit: 1 })
+      first = (tmdb?.items || [])[0] || null
+      if (!poster) poster = buildPosterUrl(first?.poster_path)
+      setCachedMeta(tmdbMetaKey, { title: first?.title || '', year: first?.year || null })
+      setCachedPoster(tmdbMetaKey, poster || '')
+    }
 
     metaCache[key] = {
       __loaded: true,
+      __row_loaded: true,
       media_type: mediaType,
       tmdb_id: tmdbId,
       title: first?.title || '',
       year: first?.year || null,
     }
     posterCache[key] = poster || ''
+    setCachedMeta(key, metaCache[key])
+    setCachedPoster(key, posterCache[key])
   } catch {
     metaCache[key] = { __loaded: true, media_type: row.fallback_type }
     posterCache[key] = ''
+    setCachedMeta(key, metaCache[key])
+    setCachedPoster(key, '')
   }
 }
 
@@ -414,7 +450,7 @@ function handleSelectionChange(val) {
 
 function openDrawer(row) {
   drawerVisible.value = true
-  drawerTitle.value = `${getResourceName(row)} · ${row.season_label}`
+  drawerTitle.value = `${getResourceName(row)} · ${row.season_summary || row.season_label}`
   drawerDir.value = row.target_dir || '未生成目标目录'
   drawerGroupKey.value = row.key
   drawerSearch.value = ''

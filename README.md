@@ -8,6 +8,7 @@
 - 媒体记录：按资源聚合展示，右侧抽屉查看明细
 - Inode 管理：支持筛选、清理、批量删除
 - 配置中心：TMDB/Emby 与整理策略统一由网页填写与保存
+- 人工修正日志：`pending / unprocessed / review` 三类 JSONL 可在前端查看与登记处理结果
 
 ### TV 集号识别与冲突规避（2026-03 更新）
 
@@ -41,6 +42,9 @@ cp .env.example .env
 # 默认：
 # PUID=1000, PGID=100
 # AMM_ROOT_DIR=/app/amm-state
+# AMM_PENDING_JSONL_PATH=/app/pending/pending.jsonl
+# AMM_UNPROCESSED_ITEMS_JSONL_PATH=/app/pending/unprocessed_items.jsonl
+# AMM_REVIEW_JSONL_PATH=/app/pending/review.jsonl
 ```
 
 ### 2) 构建并启动
@@ -60,6 +64,7 @@ http://localhost:8000
 - TMDB API Key（必填）
 - Emby 地址 / API Key（如使用 Emby 刷新）
 - 其他策略项（按需）
+- 如需自定义人工修正日志位置，可直接在前端 **配置** 页面修改 `pending / unprocessed / review` 三个路径
 
 ## SQLite 初始化逻辑
 
@@ -72,6 +77,21 @@ http://localhost:8000
 默认 Docker 路径为：`/app/data/anime_media.db`（映射到宿主机 `${AMM_ROOT_DIR}/data`）
 
 配置文件默认路径为：`/app/data/.env`（首次启动自动生成，位于 `${AMM_ROOT_DIR}/data`）
+
+人工修正日志默认路径为：
+
+- `/app/pending/pending.jsonl`
+- `/app/pending/unprocessed_items.jsonl`
+- `/app/pending/review.jsonl`
+
+对应宿主机目录为：`${AMM_ROOT_DIR}/pending`
+
+## 前端说明
+
+- `媒体记录` 和 `Inode 管理` 都按资源级聚合展示，TV 多季会合并到同一行
+- `媒体记录` 抽屉中，TV 资源提供 `Season` 选择器；抽屉不再显示类型选择器
+- `媒体记录 / Inode 管理` 的封面与 TMDB 标题使用浏览器本地缓存，减少重复请求
+- 左侧工具栏新增 `人工修正日志` 页面，可查看 `pending / unprocessed / review` 并追加人工处理登记
 
 ## Docker 镜像打包
 
