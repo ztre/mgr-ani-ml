@@ -74,6 +74,17 @@ EXTRAS_CATEGORIES = {
     "bdextra",
 }
 SPECIAL_ANCHOR_CATEGORIES = {"special", "oped", "making", "trailer", "preview", "pv", "cm", "teaser", "character_pv"}
+SPECIAL_DIR_TOKENS = {
+    "sps",
+    "special",
+    "specials",
+    "extras",
+    "extra",
+    "sp",
+    "bonus",
+    "bonus disc",
+    "special disc",
+}
 
 
 @dataclass
@@ -451,6 +462,7 @@ def run_manual_organize(
         "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
         "special_hint": False,
         "record_status": "manual_fixed",
+        "extra_context": bool(detect_special_dir_context(root_dir)[0]),
         "_has_issues": False,
         "episode_offset": int(episode_offset) if episode_offset is not None else None,
     }
@@ -568,6 +580,7 @@ def reidentify_by_target_dir(
         "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
         "special_hint": False,
         "record_status": "manual_fixed",
+        "extra_context": False,
         "_has_issues": False,
         "episode_offset": int(episode_offset) if episode_offset is not None else None,
     }
@@ -585,6 +598,7 @@ def reidentify_by_target_dir(
 
     if not media_files:
         raise DirectoryProcessError("没有可处理的媒体文件")
+    context["extra_context"] = bool(any(detect_special_dir_context(p)[0] for p in media_files))
 
     video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
     attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
@@ -708,7 +722,10 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
 
     _upsert_dir_state(db, group.id, media_dir, signature, "SCANNED", None)
 
+    dir_special_context, dir_special_token = detect_special_dir_context(media_dir)
     structure_hint = task.media_type or _detect_media_type_from_structure(media_dir)
+    if dir_special_context:
+        structure_hint = "tv"
     best, snapshot, fallback_round = recognize_directory_with_fallback(
         media_dir,
         group.source_type,
@@ -733,6 +750,9 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
     media_files = _collect_media_files_under_dir(media_dir, include, exclude, source)
     video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
     attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
+    extra_context, extra_context_token = detect_special_dir_context(media_dir)
+    if not extra_context and dir_special_context:
+        extra_context, extra_context_token = True, dir_special_token
 
     target_root = tv_target_root if target_type == "tv" else movie_target_root
 
@@ -766,6 +786,8 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         "season_aware_had_candidates": snapshot.season_aware_had_candidates,
         "season_aware_tried_queries": list(snapshot.season_aware_tried_queries or []),
         "recompute_target_names": bool(force_recompute_names),
+        "extra_context": bool(extra_context),
+        "extra_context_token": extra_context_token,
         "_has_issues": False,
     }
 
@@ -920,6 +942,34 @@ def _process_file(
         title=context.get("title") or parse_result.title,
         year=context.get("year") if context.get("year") else parse_result.year,
     )
+    file_special_context, _special_token = detect_special_dir_context(src_path)
+    extra_context = bool(context.get("extra_context")) or file_special_context
+
+    if extra_context and media_type == "tv":
+        forced_category, forced_label, _from_bracket = classify_extra_from_text(src_path.name)
+        if forced_category:
+            parse_result = parse_result._replace(
+                extra_category=forced_category,
+                extra_label=forced_label,
+                is_special=forced_category in {"special", "oped"},
+            )
+        elif ext in VIDEO_EXTS:
+            append_log(f"WARNING: 特典目录文件无法稳定分类，已跳过: {src_path.name}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="extra category unresolved in special dir",
+                file_type="extra",
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+            )
+            if dir_runtime is not None:
+                dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            return
+    if extra_context and parse_result.extra_category is not None and parse_result.extra_category not in {"special", "oped"}:
+        parse_result = parse_result._replace(episode=None)
 
     menu_token = _extract_menu_token(src_path.name)
     if menu_token:
@@ -1002,48 +1052,7 @@ def _process_file(
             )
             return
 
-    # 强制：特殊目录下文件必须进入 Special/Extras 流程
-    if is_under_special_folder(src_path) and parse_result.extra_category is None:
-        extra_category, extra_label, _from_bracket = classify_extra_from_text(src_path.name)
-        if extra_category:
-            parse_result = parse_result._replace(
-                extra_category=extra_category,
-                extra_label=extra_label,
-                is_special=extra_category in {"special", "oped"},
-            )
-        else:
-            bracket_label = _extract_bracket_label(src_path.name)
-            parse_result = parse_result._replace(
-                extra_category="making",
-                extra_label=bracket_label or "Extra",
-                is_special=False,
-            )
-        _log_special_classification(parse_result.extra_category, parse_result.extra_label)
-        special_logged = True
-    else:
-        special_logged = False
-
-    if parse_result.extra_category is None and is_under_special_folder(src_path):
-        extra_category, extra_label, _from_bracket = classify_extra_from_text(src_path.name)
-        if extra_category:
-            parse_result = parse_result._replace(
-                extra_category=extra_category,
-                extra_label=extra_label,
-                is_special=extra_category in {"special", "oped"},
-            )
-            _log_special_classification(extra_category, extra_label)
-            special_logged = True
-        else:
-            bracket_label = _extract_bracket_label(src_path.name)
-            parse_result = parse_result._replace(
-                extra_category="making",
-                extra_label=bracket_label or "Extra",
-                is_special=False,
-            )
-            append_log(f"WARNING: Special 未识别，按 Extras 处理: {src_path.name}")
-            special_logged = True
-
-    if parse_result.extra_category is not None and not special_logged:
+    if parse_result.extra_category is not None:
         _log_special_classification(parse_result.extra_category, parse_result.extra_label)
 
     original_special_label = parse_result.extra_label
@@ -1069,7 +1078,7 @@ def _process_file(
         parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime)
         remapped = bool(before_label and parse_result.extra_label and before_label != parse_result.extra_label)
 
-    if media_type == "tv" and parse_result.extra_category is None and _should_ignore_zero_episode(src_path.name):
+    if media_type == "tv" and (not extra_context) and parse_result.extra_category is None and _should_ignore_zero_episode(src_path.name):
         append_log(f"INFO: 跳过第0集/00集文件: {src_path.name}")
         _record_unhandled_item(
             original_path=src_path,
@@ -1083,7 +1092,7 @@ def _process_file(
         )
         return
 
-    if media_type == "tv":
+    if media_type == "tv" and (not extra_context):
         if parse_result.episode is None and parse_result.extra_category is None:
             ep = _extract_episode_from_filename_loose(src_path.name)
             if ep is not None:
@@ -1142,6 +1151,22 @@ def _process_file(
                 dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
             attempts += 1
             if attempts > 50:
+                if extra_context:
+                    append_log(f"WARNING: 特典目标冲突，已跳过: {src_path.name}")
+                    _record_unhandled_item(
+                        original_path=src_path,
+                        reason="extra target conflict after remap attempts",
+                        file_type="special" if parse_result.extra_category in {"special", "oped"} else "extra",
+                        sync_group_id=sync_group_id,
+                        tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                        season=parse_result.season,
+                        episode=parse_result.episode,
+                        extra_category=parse_result.extra_category,
+                        suggested_target=dst_path,
+                    )
+                    if dir_runtime is not None:
+                        dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+                    return
                 raise DirectoryProcessError(f"多个源文件映射到同一目标: {src_path.name}")
         _log_special_resolution(src_path, parse_result, original_special_label, remapped)
 
@@ -1199,19 +1224,72 @@ def _process_file(
             context["_has_issues"] = True
             return
 
+    if extra_context:
+        prev = seen_targets.get(dst_path)
+        if prev is not None and prev != src_path:
+            append_log(f"WARNING: 特典目标重复冲突，已跳过: {src_path.name}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="extra target duplicated in current batch",
+                file_type="special" if parse_result.extra_category in {"special", "oped"} else ("attachment" if is_attachment else "extra"),
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+                suggested_target=dst_path,
+            )
+            if dir_runtime is not None:
+                dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            return
+        if dst_path.exists() and not is_same_inode(src_path, dst_path):
+            append_log(f"WARNING: 特典目标被占用，已跳过: {src_path.name}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="extra target occupied",
+                file_type="special" if parse_result.extra_category in {"special", "oped"} else ("attachment" if is_attachment else "extra"),
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+                suggested_target=dst_path,
+            )
+            if dir_runtime is not None:
+                dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            return
     _deduplicate_target_or_raise(seen_targets, src_path, dst_path)
 
     should_scrape = (not is_attachment) and _should_scrape_for_target(media_type, dst_path, parse_result)
-    _execute_transactional_outputs(
-        src_path=src_path,
-        dst_path=dst_path,
-        media_type=media_type,
-        parse_result=parse_result,
-        tmdb_data=tmdb_data,
-        should_scrape=should_scrape,
-        display_title=context.get("title"),
-        op_log=op_log,
-    )
+    try:
+        _execute_transactional_outputs(
+            src_path=src_path,
+            dst_path=dst_path,
+            media_type=media_type,
+            parse_result=parse_result,
+            tmdb_data=tmdb_data,
+            should_scrape=should_scrape,
+            display_title=context.get("title"),
+            op_log=op_log,
+        )
+    except DirectoryProcessError as e:
+        if extra_context and ("目标路径已被其他文件占用" in str(e) or "多个源文件映射到同一目标" in str(e)):
+            append_log(f"WARNING: 特典写入冲突，已跳过: {src_path.name}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="extra transactional output conflict",
+                file_type="special" if parse_result.extra_category in {"special", "oped"} else ("attachment" if is_attachment else "extra"),
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+                suggested_target=dst_path,
+            )
+            if dir_runtime is not None:
+                dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+            return
+        raise
 
     _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
     _upsert_inode_record(db, sync_group_id, src_path, dst_path)
@@ -1251,12 +1329,20 @@ def _has_explicit_season_token(name: str) -> bool:
     return False
 
 
+def detect_special_dir_context(path: Path) -> tuple[bool, str | None]:
+    nodes = [path] + list(path.parents)
+    for node in nodes:
+        raw = str(node.name or "").strip().lower()
+        if not raw:
+            continue
+        normalized = re.sub(r"[\s._\-]+", " ", raw).strip()
+        if normalized in SPECIAL_DIR_TOKENS:
+            return True, normalized
+    return False, None
+
+
 def is_under_special_folder(file_path: Path) -> bool:
-    for parent in file_path.parents:
-        name = parent.name.lower()
-        if name in {"sps", "special", "specials", "extras", "sp"}:
-            return True
-    return False
+    return detect_special_dir_context(file_path)[0]
 
 
 def _extract_episode_from_filename_loose(filename: str) -> int | None:
@@ -1990,6 +2076,9 @@ def _detect_media_type_from_structure(media_dir: Path) -> str | None:
     video_files = [p for p in media_dir.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS and not _is_ignored_name(p.name)]
     if not video_files:
         return None
+    special_ctx, _token = detect_special_dir_context(media_dir)
+    if special_ctx:
+        return "tv"
     if len(video_files) == 1:
         return "movie"
     episode_hits = 0
@@ -2085,9 +2174,20 @@ def _build_allocation_items(
         ext = src_path.suffix.lower()
         if ext not in MEDIA_EXTS:
             continue
+        special_ctx, _token = detect_special_dir_context(src_path)
         parse_result = parse_tv_filename(str(src_path)) if media_type == "tv" else parse_movie_filename(str(src_path))
         if parse_result is None:
             continue
+        if media_type == "tv" and special_ctx:
+            forced_category, forced_label, _from_bracket = classify_extra_from_text(src_path.name)
+            if forced_category:
+                parse_result = parse_result._replace(
+                    extra_category=forced_category,
+                    extra_label=forced_label,
+                    is_special=forced_category in {"special", "oped"},
+                )
+            else:
+                continue
         if media_type == "tv":
             # 显式季号优先；若文件名未显式标注季号，则使用解析到的 resolved_season
             season_from_path = _extract_season_from_path(src_path)
