@@ -50,6 +50,8 @@ _TITLE_NUMBER_PROTECTED_PATTERNS = [
     r"\b91\s*days\b",
     r"\bi\s*\+\s*ii\b",
     r"\b3\s*-?\s*gatsu\b",
+    r"\btokyo\s*magnitude\s*8(?:[\s.]?0)\b",
+    r"\b東京マグニチュード\s*8(?:[\s.]?0)\b",
 ]
 
 SPECIAL_TYPE_MAP = {
@@ -1357,7 +1359,11 @@ def _extract_season_episode_priority(text: str) -> tuple[int, int, tuple[int, in
     text = _strip_fps_tokens(text)
     m = re.search(r"\bS(\d{1,2})\s*E(\d{1,3})\b", text, re.I)
     if m:
-        return int(m.group(1)), int(m.group(2)), m.span(), "sxxeyy"
+        season_val = int(m.group(1))
+        episode_val = int(m.group(2))
+        if episode_val <= 0:
+            return None
+        return season_val, episode_val, m.span(), "sxxeyy"
 
     m = re.search(r"\b(\d{1,2})\s*[xX]\s*(\d{1,3})\b", text)
     if m:
@@ -1365,19 +1371,31 @@ def _extract_season_episode_priority(text: str) -> tuple[int, int, tuple[int, in
 
     m = re.search(r"\bEpisode\s*(\d{1,3})\b", text, re.I)
     if m:
-        return 1, int(m.group(1)), m.span(), "episode"
+        val = int(m.group(1))
+        if val <= 0:
+            return None
+        return 1, val, m.span(), "episode"
 
     m = re.search(r"\bEP[_\-\s]*([0-9]{1,3})\b", text, re.I)
     if m:
-        return 1, int(m.group(1)), m.span(), "ep"
+        val = int(m.group(1))
+        if val <= 0:
+            return None
+        return 1, val, m.span(), "ep"
 
     m = re.search(r"\bE\s*([0-9]{1,3})\b", text, re.I)
     if m:
-        return 1, int(m.group(1)), m.span(), "e"
+        val = int(m.group(1))
+        if val <= 0:
+            return None
+        return 1, val, m.span(), "e"
 
     m = re.search(r"(?<!\d)(\d{2})(?!\d)", text)
     if m and not _has_alpha_neighbor(text, m.span()):
-        return 1, int(m.group(1)), m.span(), "two_digit"
+        val = int(m.group(1))
+        if val <= 0:
+            return None
+        return 1, val, m.span(), "two_digit"
 
     last_token = None
     for m in re.finditer(r"\b(\d{1,3})\b", text):

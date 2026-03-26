@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .parser import (
     get_tmdb_tv_details_sync,
+    is_title_number_safe,
     make_search_name,
     parse_tv_filename,
     search_tmdb_movie_candidates_sync,
@@ -585,6 +586,9 @@ def _extract_trailing_season_number(text: str) -> int | None:
     s = re.sub(r"\s+", " ", str(text or "")).strip()
     m = re.search(r"(?:^|[\s._-])([2-9])\s*$", s)
     if not m:
+        return None
+    title_part = s[: m.start(1)].strip(" ._-")
+    if title_part and not is_title_number_safe(title_part):
         return None
     val = int(m.group(1))
     if val < 2 or val > 30:

@@ -90,6 +90,16 @@ def _read_env_file(path: Path) -> dict[str, str]:
   return data
 
 
+def _migrate_legacy_pending_path(path_value: str | None, default_value: str) -> str:
+  raw = str(path_value or "").strip()
+  if not raw:
+    return default_value
+  legacy_prefix = "/media/pending/"
+  if raw.startswith(legacy_prefix):
+    return "/app/pending/" + raw[len(legacy_prefix):]
+  return raw
+
+
 @dataclass
 class Settings:
   media_root: str = '/media'
@@ -194,17 +204,29 @@ class Settings:
       data.get(f'{p}SPECIAL_INDEX_MAX_DIGITS'),
       self.special_index_max_digits,
     )
-    self.pending_jsonl_path = data.get(f'{p}PENDING_JSONL_PATH', self.pending_jsonl_path)
-    legacy_unhandled = data.get(f'{p}UNHANDLED_JSONL_PATH')
-    self.unprocessed_items_jsonl_path = data.get(
-      f'{p}UNPROCESSED_ITEMS_JSONL_PATH',
-      legacy_unhandled or self.unprocessed_items_jsonl_path,
+    self.pending_jsonl_path = _migrate_legacy_pending_path(
+      data.get(f'{p}PENDING_JSONL_PATH', self.pending_jsonl_path),
+      self.pending_jsonl_path,
     )
-    self.review_jsonl_path = data.get(
-      f'{p}REVIEW_JSONL_PATH',
+    legacy_unhandled = data.get(f'{p}UNHANDLED_JSONL_PATH')
+    self.unprocessed_items_jsonl_path = _migrate_legacy_pending_path(
+      data.get(
+        f'{p}UNPROCESSED_ITEMS_JSONL_PATH',
+        legacy_unhandled or self.unprocessed_items_jsonl_path,
+      ),
+      self.unprocessed_items_jsonl_path,
+    )
+    self.review_jsonl_path = _migrate_legacy_pending_path(
+      data.get(
+        f'{p}REVIEW_JSONL_PATH',
+        self.review_jsonl_path,
+      ),
       self.review_jsonl_path,
     )
-    self.unhandled_jsonl_path = legacy_unhandled or self.unprocessed_items_jsonl_path
+    self.unhandled_jsonl_path = _migrate_legacy_pending_path(
+      legacy_unhandled or self.unprocessed_items_jsonl_path,
+      self.unprocessed_items_jsonl_path,
+    )
     self.use_file_lock = _parse_bool(
       data.get(f'{p}USE_FILE_LOCK'),
       self.use_file_lock,

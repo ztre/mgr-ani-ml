@@ -33,6 +33,7 @@ from .parser import (
     classify_extra_from_text,
     extract_strong_extra_fallback_label,
     get_tmdb_tv_details_sync,
+    is_title_number_safe,
     parse_movie_filename,
     parse_tv_filename,
 )
@@ -206,6 +207,12 @@ def _record_unhandled_item(
         "extra_category": extra_category,
         "suggested_target": str(suggested_target) if suggested_target else None,
     }
+    payload["codeai_brief"] = (
+        f"path={payload['original_path']} | reason={payload['reason']} | type={payload['file_type']} | "
+        f"group={payload['sync_group_id']} | tmdb={payload['tmdb_id']} | "
+        f"s{payload['season']}e{payload['episode']} | extra={payload['extra_category']} | "
+        f"suggested={payload['suggested_target']}"
+    )
     _append_jsonl_record(unprocessed_path, payload)
 
 
@@ -283,7 +290,7 @@ def _media_task_worker() -> None:
                 if error_kind == "deterministic_conflict" and not recompute_retry_used:
                     recompute_retry_used = True
                     append_log(
-                        f"WARNING: MediaTask deterministic conflict: {task.path} | {e} | trigger target-name recompute retry"
+                        f"WARNING: MediaTask 确定性冲突: {task.path} | {e} | trigger target-name recompute retry"
                     )
                     continue
                 if error_kind == "deterministic_conflict" and recompute_retry_used:
@@ -299,23 +306,23 @@ def _media_task_worker() -> None:
                             reason,
                         )
                         append_log(
-                            f"WARNING: MediaTask deterministic conflict unresolved, moved to pending_manual: {task.path}"
+                            f"WARNING: MediaTask 确定性冲突未解决，已移至 pending_manual: {task.path}"
                         )
                     else:
                         append_log(
-                            f"WARNING: MediaTask deterministic conflict unresolved (group missing): {task.path} | {e}"
+                            f"WARNING: MediaTask 确定性冲突未解决 (组缺失): {task.path} | {e}"
                         )
                     break
                 if error_kind == "transient" and retries < 3:
                     retries += 1
                     backoff = 2 ** retries
                     append_log(
-                        f"WARNING: MediaTask transient failure ({retries}/3): {task.path} | {e} | backoff={backoff}s"
+                        f"WARNING: MediaTask 暂时性失败 ({retries}/3): {task.path} | {e} | backoff={backoff}s"
                     )
                     time.sleep(backoff)
                     continue
                 append_log(
-                    f"WARNING: MediaTask permanent failure ({error_kind}): {task.path} | {e}"
+                    f"WARNING: MediaTask 暂时性失败 ({error_kind}): {task.path} | {e}"
                 )
                 break
             finally:
@@ -1103,6 +1110,7 @@ def _process_file(
         return
     if extra_context and parse_result.extra_category is not None and parse_result.extra_category not in {"special", "oped"}:
         parse_result = parse_result._replace(episode=None)
+    parse_result = _apply_parallel_variant_suffix(parse_result, src_path)
 
     menu_token = _extract_menu_token(src_path.name)
     if menu_token:
@@ -1218,7 +1226,20 @@ def _process_file(
         parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime)
         remapped = bool(before_label and parse_result.extra_label and before_label != parse_result.extra_label)
 
-    if media_type == "tv" and (not extra_context) and parse_result.extra_category is None and _should_ignore_zero_episode(src_path.name):
+    if media_type == "tv" and parse_result.extra_category is None and _is_missing_or_invalid_episode(parse_result.episode):
+        parse_result = parse_result._replace(episode=None)
+
+    if (
+        media_type == "tv"
+        and (not extra_context)
+        and parse_result.extra_category is None
+        and _is_missing_or_invalid_episode(parse_result.episode)
+        and _should_ignore_zero_episode(
+            src_path.name,
+            parse_result=parse_result,
+            context_title=str(context.get("title") or ""),
+        )
+    ):
         append_log(f"INFO: 跳过第0集/00集文件: {src_path.name}")
         _record_unhandled_item(
             original_path=src_path,
@@ -1233,11 +1254,11 @@ def _process_file(
         return
 
     if media_type == "tv" and (not extra_context):
-        if parse_result.episode is None and parse_result.extra_category is None:
+        if _is_missing_or_invalid_episode(parse_result.episode) and parse_result.extra_category is None:
             ep = _extract_episode_from_filename_loose(src_path.name)
             if ep is not None:
                 parse_result = parse_result._replace(episode=ep)
-        if parse_result.extra_category is None and parse_result.episode is None:
+        if parse_result.extra_category is None and _is_missing_or_invalid_episode(parse_result.episode):
             _record_unhandled_item(
                 original_path=src_path,
                 reason="main video missing episode signal",
@@ -1577,6 +1598,10 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
             return None
         if raw_target != "__missing__":
             return raw_target
+    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+        # For special attachments, raw_label -> final_target mapping is mandatory.
+        # Never fallback to coarse anchors when raw label has no unique match.
+        return None
 
     special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
     if special_key is not None:
@@ -1586,9 +1611,6 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
         if len(candidates) > 1:
             append_log(f"WARNING: special attachment anchor conflict: {src_path.name} -> {len(candidates)} candidates")
             return None
-    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
-        # Keep trying episode/stem for special attachments, but never fallback to parent/recent.
-        pass
 
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
@@ -1615,10 +1637,10 @@ def _build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseRe
 
 
 def _build_special_raw_label_key(parent_key: str, raw_label: str | None) -> tuple[str, str] | None:
-    label = str(raw_label or "").strip()
+    label = re.sub(r"\s+", " ", str(raw_label or "")).strip()
     if not label:
         return None
-    return (parent_key, label)
+    return (parent_key, label.upper())
 
 
 def _build_special_anchor_key(
@@ -2209,15 +2231,75 @@ def _should_ignore_fractional_episode(filename: str) -> bool:
     return re.search(r"(?:^|[\[\(\s\-_])\d{1,3}\.5(?:$|[\]\)\s\-_])", stem, re.I) is not None
 
 
-def _should_ignore_zero_episode(filename: str) -> bool:
+def _should_ignore_zero_episode(
+    filename: str,
+    *,
+    parse_result: ParseResult | None = None,
+    context_title: str | None = None,
+) -> bool:
     stem = Path(filename).stem
+    if _has_explicit_nonzero_episode_signal(stem):
+        return False
+    if _is_title_number_protected_context(filename, parse_result=parse_result, context_title=context_title):
+        return False
     patterns = [
         r"[\[\(]\s*0{1,2}\s*[\]\)]",   # [00] / (0)
         r"\bEP?\s*0+\b",               # EP0 / E00
         r"第\s*0+\s*[集话話]",          # 第0集
-        r"(?:^|[\s._-])0{1,2}(?:$|[\s._-])",  # token 0 / 00
     ]
-    return any(re.search(p, stem, re.I) is not None for p in patterns)
+    if any(re.search(p, stem, re.I) is not None for p in patterns):
+        return True
+    normalized = re.sub(r"[\s._\-]+", " ", stem).strip().lower()
+    if re.fullmatch(r"(?:0|00|ep0+|e0+|sp0+|ova0+)", normalized):
+        return True
+    return False
+
+
+def _has_explicit_nonzero_episode_signal(stem: str) -> bool:
+    if _extract_episode_from_filename_loose(stem) is not None:
+        return True
+    checks = [
+        r"\bEP?\s*0*[1-9]\d{0,2}\b",
+        r"\bE\s*0*[1-9]\d{0,2}\b",
+        r"第\s*0*[1-9]\d{0,2}\s*[集话話]",
+        r"[\[\(]\s*0*[1-9]\d{0,2}\s*[\]\)]",
+    ]
+    return any(re.search(p, stem, re.I) is not None for p in checks)
+
+
+def _is_missing_or_invalid_episode(episode: int | None) -> bool:
+    if episode is None:
+        return True
+    try:
+        return int(episode) <= 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _is_title_number_protected_context(
+    filename: str,
+    *,
+    parse_result: ParseResult | None = None,
+    context_title: str | None = None,
+) -> bool:
+    candidates = [
+        str(context_title or "").strip(),
+        str(parse_result.title if parse_result else "").strip(),
+        Path(filename).stem,
+        str(Path(filename).parent.name or "").strip(),
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        normalized = re.sub(r"[\[\]\(\)\{\}_\-]+", " ", cand)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if normalized and not is_title_number_safe(normalized):
+            return True
+        if re.search(r"(?:tokyo|東京).{0,12}magnitude.{0,8}8(?:[\s.]?0)\b", normalized, re.I):
+            return True
+        if re.search(r"(?:東京マグニチュード)\s*8(?:[\s.]?0)\b", normalized, re.I):
+            return True
+    return False
 
 
 def _extract_menu_token(filename: str) -> str | None:
@@ -2440,6 +2522,7 @@ def _build_allocation_items(
             else:
                 season = parse_result.season or resolved_season or 1
             parse_result = parse_result._replace(season=season)
+        parse_result = _apply_parallel_variant_suffix(parse_result, src_path)
         prefix = _resolve_prefix_for_parse(parse_result)
         if not prefix:
             continue
@@ -2514,6 +2597,48 @@ def _extract_stable_label_index(label: str | None) -> int | None:
         if 1 <= val <= 999:
             return val
     return None
+
+
+def _extract_parallel_variant_suffix(text: str) -> str | None:
+    s = str(text or "")
+    if not s:
+        return None
+    patterns = [
+        (r"\bNC\s*Ver\.?\b", "NC Ver"),
+        (r"\bOn\s*Air\s*Ver\.?\b", "On Air Ver"),
+        (r"\bOriginal\s*Staff\s*Credit\s*Ver\.?\b", "Original Staff Credit Ver"),
+        (r"\b([A-Za-z][A-Za-z0-9]{1,24})\s*[-_ ]hen\b", r"\1-hen"),
+        (r"\bMovie\s*([1-9])(?:\s*/\s*([1-9]))?\b", None),
+        (r"\bPart\s*([1-9])(?:\s*/\s*([1-9]))?\b", None),
+    ]
+    for pattern, template in patterns:
+        m = re.search(pattern, s, re.I)
+        if not m:
+            continue
+        if template:
+            if r"\1" in template and m.lastindex and m.lastindex >= 1:
+                return re.sub(r"\s+", " ", template.replace(r"\1", m.group(1))).strip()
+            return template
+        left = m.group(1) if m.lastindex and m.lastindex >= 1 else ""
+        right = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+        if right:
+            return f"Movie {left}/{right}"
+        return f"Movie {left}"
+    return None
+
+
+def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) -> ParseResult:
+    if parse_result.extra_category not in {"special", "oped"} | EXTRAS_CATEGORIES:
+        return parse_result
+    variant = _extract_parallel_variant_suffix(src_path.stem)
+    if not variant:
+        return parse_result
+    label = str(parse_result.extra_label or "").strip()
+    if not label:
+        return parse_result._replace(extra_label=variant)
+    if variant.lower() in label.lower():
+        return parse_result
+    return parse_result._replace(extra_label=f"{label} {variant}")
 
 
 def _needs_readable_suffix(parse_result: ParseResult) -> bool:
@@ -2791,9 +2916,6 @@ def _resolve_chinese_title_by_tmdb(
             cn = _fetch_tmdb_localized_title(client, url, media_type, "zh-CN")
             tw = _fetch_tmdb_localized_title(client, url, media_type, "zh-TW")
         chosen, lang = _pick_display_title(cn, tw, fallback_title)
-        if strict and lang == "fallback":
-            append_log("INFO: tmdb title resolved: lang=fallback, title=")
-            return None
         append_log(f"INFO: tmdb title resolved: lang={lang}, title={chosen or ''}")
         if chosen:
             return chosen
