@@ -77,6 +77,11 @@ def compute_tv_target_path(
     season_dir = show_dir / f"Season {season:02d}"
     episode = parse_result.episode or 1
     base_name = f"{title} - S{season:02d}E{episode:02d}"
+    # 主视频也支持 extra_label（用于补强后的源标签编码）
+    if parse_result.extra_label:
+        normalized_label = _normalize_extra_label_for_name(parse_result.extra_label, None)
+        if normalized_label:
+            base_name += f" - {normalized_label}"
     if parse_result.subtitle_lang:
         base_name += parse_result.subtitle_lang
     return season_dir / f"{base_name}{ext}"

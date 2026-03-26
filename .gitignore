@@ -17,12 +17,15 @@ env/
 # Runtime data
 data/
 logs/
+tests/
 *.log
 *.db
 *.sqlite
 *.sqlite3
 /backend/*.db
 /backend/*.sqlite*
+*.db-shm
+*.db-wal
 
 # Frontend build / deps
 frontend/node_modules/

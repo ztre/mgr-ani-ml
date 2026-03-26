@@ -1146,7 +1146,14 @@ def _process_file(
             except DirectoryProcessError as e:
                 if "目标路径已被其他文件占用" in str(e):
                     context["_has_issues"] = True
-                    append_log(f"WARNING: 附件跟随目标冲突已跳过: {src_path.name} -> {dst_path}")
+                    append_log(
+                        "WARNING: 附件跟随目标冲突已跳过: %s -> %s%s"
+                        % (
+                            src_path.name,
+                            dst_path,
+                            _format_conflict_diff_suffix(merged_tags=_extract_distinguish_source_tags(src_path.stem)),
+                        )
+                    )
                     _record_unhandled_item(
                         original_path=src_path,
                         reason="attachment follow target occupied",
@@ -1174,6 +1181,16 @@ def _process_file(
                 raw_value = dir_runtime.get("special_target_by_raw_label", {}).get(raw_key, "__missing__")
             if raw_value is None:
                 reason = "special attachment raw-label conflict"
+            fine_key = _build_special_fine_label_key(
+                str(src_path.parent),
+                raw_label=parse_result.extra_label,
+                source_text=src_path.stem,
+                category=parse_result.extra_category,
+            )
+            if fine_key is not None:
+                fine_value = dir_runtime.get("special_target_by_fine_label", {}).get(fine_key, "__missing__")
+                if fine_value is None:
+                    reason = "special attachment raw-label conflict"
             _record_unhandled_item(
                 original_path=src_path,
                 reason=reason,
@@ -1204,6 +1221,7 @@ def _process_file(
         _log_special_classification(parse_result.extra_category, parse_result.extra_label)
 
     original_special_label = parse_result.extra_label
+    source_diff_tags = _extract_distinguish_source_tags(src_path.stem)
     remapped = False
     assignments = context.get("allocator_assignments") or {}
     item_map = context.get("allocator_items") or {}
@@ -1286,14 +1304,82 @@ def _process_file(
         if offset is not None and parse_result.episode is not None and parse_result.extra_category is None:
             adjusted = parse_result.episode - int(offset)
             parse_result = parse_result._replace(episode=max(1, adjusted))
-    parse_result = _apply_readable_suffix_for_unnumbered_extra(parse_result, src_path, dir_runtime)
+        parse_result = _apply_readable_suffix_for_unnumbered_extra(parse_result, src_path, dir_runtime)
     if media_type == "tv":
         dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
     else:
         dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
 
-    if parse_result.extra_category in {"special", "oped"} | EXTRAS_CATEGORIES:
+    # 新增：通用冲突补强，主视频和特典都先走一次
+    source_diff_tags = _extract_distinguish_source_tags(src_path.stem)
+    merged_tags_once: list[str] = []
+    dropped_diffs_once: list[str] = []
+    used_conflict_enrichment = False
+
+    def _recalc_target() -> None:
+        nonlocal dst_path
+        if media_type == "tv":
+            dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
+        else:
+            dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
+
+    conflict_now = dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path))
+    if conflict_now and source_diff_tags:
+        new_label, merged_tags, dropped_diffs = _merge_distinguish_tags_into_label(
+            parse_result.extra_label, source_diff_tags
+        )
+        if merged_tags and new_label and new_label != parse_result.extra_label:
+            parse_result = parse_result._replace(extra_label=new_label)
+            _recalc_target()
+            merged_tags_once = merged_tags
+            dropped_diffs_once = dropped_diffs
+            used_conflict_enrichment = True
+
+    if parse_result.extra_category is None:
+        # 主视频冲突补强循环：通过合并源标签来解决冲突
         attempts = 0
+        used_conflict_enrichment = False
+        main_video_conflict_enriched = False
+        while attempts < 2:
+            conflict = dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path))
+            if not conflict:
+                break
+            if not used_conflict_enrichment and source_diff_tags:
+                new_label, merged_tags, dropped_diffs = _merge_distinguish_tags_into_label(parse_result.extra_label, source_diff_tags)
+                if merged_tags and new_label and new_label != parse_result.extra_label:
+                    parse_result = parse_result._replace(extra_label=new_label)
+                    _recalc_target()
+                    if merged_tags:
+                        append_log(
+                            "INFO: main video target-name conflict enriched: %s | merged_tags=%s"
+                            % (src_path.name, ",".join(merged_tags))
+                        )
+                        main_video_conflict_enriched = True
+                    used_conflict_enrichment = True
+                    attempts += 1
+                    continue
+                used_conflict_enrichment = True
+            # 主视频无法进一步补强，转待办
+            append_log(f"WARNING: 主视频目标冲突已转待办: {src_path.name}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="main video target conflict unresolved",
+                file_type="video",
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+                suggested_target=dst_path,
+            )
+            context["_has_issues"] = True
+            return
+
+    elif parse_result.extra_category in {"special", "oped"} | EXTRAS_CATEGORIES:
+        attempts = 0
+        merged_tags_once: list[str] = []
+        dropped_diffs_once: list[str] = []
+        used_conflict_enrichment = False
         while True:
             conflict = False
             if dst_path in seen_targets:
@@ -1302,6 +1388,21 @@ def _process_file(
                 conflict = True
             if not conflict:
                 break
+            if (not used_conflict_enrichment) and source_diff_tags:
+                new_label, merged_tags, dropped_diffs = _merge_distinguish_tags_into_label(parse_result.extra_label, source_diff_tags)
+                if merged_tags and new_label and new_label != parse_result.extra_label:
+                    parse_result = parse_result._replace(extra_label=new_label)
+                    if media_type == "tv":
+                        dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
+                    else:
+                        dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
+                    merged_tags_once = merged_tags
+                    dropped_diffs_once = dropped_diffs
+                    used_conflict_enrichment = True
+                    continue
+                if dropped_diffs and not dropped_diffs_once:
+                    dropped_diffs_once = dropped_diffs
+                used_conflict_enrichment = True
             if assigned_by_allocator:
                 break
             remapped = True
@@ -1313,7 +1414,13 @@ def _process_file(
             attempts += 1
             if attempts > 50:
                 if extra_context:
-                    append_log(f"WARNING: 特典目标冲突，已跳过: {src_path.name}")
+                    append_log(
+                        "WARNING: 特典目标冲突，已跳过: %s%s"
+                        % (
+                            src_path.name,
+                            _format_conflict_diff_suffix(merged_tags_once, dropped_diffs_once),
+                        )
+                    )
                     _record_unhandled_item(
                         original_path=src_path,
                         reason="extra target conflict after remap attempts",
@@ -1329,6 +1436,14 @@ def _process_file(
                         dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
                     return
                 raise DirectoryProcessError(f"多个源文件映射到同一目标: {src_path.name}")
+        if used_conflict_enrichment and (merged_tags_once or dropped_diffs_once):
+            append_log(
+                "INFO: target-name conflict enriched: %s%s"
+                % (
+                    src_path.name,
+                    _format_conflict_diff_suffix(merged_tags_once, dropped_diffs_once),
+                )
+            )
         _log_special_resolution(src_path, parse_result, original_special_label, remapped)
 
     if assigned_by_allocator and item:
@@ -1556,6 +1671,7 @@ def _register_video_anchor(
     by_parent_special = dir_runtime.setdefault("video_anchor_by_parent_special", {})
     by_parent_recent = dir_runtime.setdefault("video_anchor_recent_by_parent", {})
     special_by_raw = dir_runtime.setdefault("special_target_by_raw_label", {})
+    special_by_fine = dir_runtime.setdefault("special_target_by_fine_label", {})
     parent_key = str(src_path.parent)
     by_parent[parent_key] = dst_path
     by_parent_recent[parent_key] = dst_path
@@ -1577,6 +1693,18 @@ def _register_video_anchor(
             special_by_raw[raw_key] = dst_path
         elif existing != dst_path:
             special_by_raw[raw_key] = None
+    fine_key = _build_special_fine_label_key(
+        parent_key,
+        raw_label=raw_label or parse_result.extra_label,
+        source_text=src_path.stem,
+        category=parse_result.extra_category,
+    )
+    if fine_key is not None:
+        existing_fine = special_by_fine.get(fine_key)
+        if existing_fine is None:
+            special_by_fine[fine_key] = dst_path
+        elif existing_fine != dst_path:
+            special_by_fine[fine_key] = None
 
 
 def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> Path | None:
@@ -1588,16 +1716,56 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
     by_parent_special = dir_runtime.get("video_anchor_by_parent_special", {})
     by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
     special_by_raw = dir_runtime.get("special_target_by_raw_label", {})
+    special_by_fine = dir_runtime.get("special_target_by_fine_label", {})
     parent_key = str(src_path.parent)
 
     raw_key = _build_special_raw_label_key(parent_key, parse_result.extra_label)
     if raw_key is not None:
         raw_target = special_by_raw.get(raw_key, "__missing__")
         if raw_target is None:
-            append_log(f"WARNING: special attachment raw-label conflict: {src_path.name} -> {parse_result.extra_label}")
+            merged_tags = _extract_distinguish_source_tags(src_path.stem)
+            append_log(
+                "WARNING: special attachment raw-label conflict: %s -> %s%s"
+                % (
+                    src_path.name,
+                    parse_result.extra_label,
+                    _format_conflict_diff_suffix(merged_tags=merged_tags),
+                )
+            )
+            fine_key = _build_special_fine_label_key(
+                parent_key,
+                raw_label=parse_result.extra_label,
+                source_text=src_path.stem,
+                category=parse_result.extra_category,
+            )
+            if fine_key is not None:
+                fine_target = special_by_fine.get(fine_key, "__missing__")
+                if fine_target not in {"__missing__", None}:
+                    return fine_target
             return None
         if raw_target != "__missing__":
             return raw_target
+    fine_key = _build_special_fine_label_key(
+        parent_key,
+        raw_label=parse_result.extra_label,
+        source_text=src_path.stem,
+        category=parse_result.extra_category,
+    )
+    if fine_key is not None:
+        fine_target = special_by_fine.get(fine_key, "__missing__")
+        if fine_target is None:
+            merged_tags = _extract_distinguish_source_tags(src_path.stem)
+            append_log(
+                "WARNING: special attachment fine-label conflict: %s -> %s%s"
+                % (
+                    src_path.name,
+                    parse_result.extra_label,
+                    _format_conflict_diff_suffix(merged_tags=merged_tags),
+                )
+            )
+            return None
+        if fine_target != "__missing__":
+            return fine_target
     if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
         # For special attachments, raw_label -> final_target mapping is mandatory.
         # Never fallback to coarse anchors when raw label has no unique match.
@@ -1641,6 +1809,41 @@ def _build_special_raw_label_key(parent_key: str, raw_label: str | None) -> tupl
     if not label:
         return None
     return (parent_key, label.upper())
+
+
+def _build_special_fine_label_key(
+    parent_key: str,
+    raw_label: str | None,
+    source_text: str,
+    category: str | None,
+) -> tuple[str, str, str] | None:
+    coarse = _build_special_raw_label_key(parent_key, raw_label)
+    if coarse is None:
+        return None
+    token = _build_source_diff_token(source_text, category=category)
+    if not token:
+        return None
+    return (coarse[0], coarse[1], token)
+
+
+def _build_source_diff_token(source_text: str, category: str | None) -> str:
+    tags = _extract_distinguish_source_tags(source_text)
+    token_parts: list[str] = []
+    if tags:
+        token_parts.extend(tags)
+    scene = _extract_scene_fragment(source_text)
+    if scene:
+        normalized_scene = _normalize_special_anchor_token(scene, category)
+        if normalized_scene:
+            token_parts.append(normalized_scene)
+    if not token_parts:
+        normalized = _normalize_special_anchor_token(source_text, category)
+        if normalized:
+            token_parts.append(normalized[:24])
+    if not token_parts:
+        return ""
+    joined = "|".join(x for x in token_parts if x)
+    return joined[:96]
 
 
 def _build_special_anchor_key(
@@ -2625,6 +2828,76 @@ def _extract_parallel_variant_suffix(text: str) -> str | None:
             return f"Movie {left}/{right}"
         return f"Movie {left}"
     return None
+
+
+def _extract_distinguish_source_tags(text: str) -> list[str]:
+    s = str(text or "")
+    if not s:
+        return []
+    patterns = [
+        (r"\bNC(?:OP|ED)?(?=\d|\b)", "NC Ver"),
+        (r"\bOn\s*Air\s*Ver\.?\b", "On Air Ver"),
+        (r"\bTrue\s*Birth\s*Edition\b", "True Birth Edition"),
+        (r"\b([A-Za-z][A-Za-z0-9]{1,24})\s*[-_ ]hen\b", r"\1-hen"),
+        (r"\bEX\s*Season\s*0*(\d{1,2})\b", r"EX Season \1"),
+        (r"\bOriginal\s*Staff\s*Credit\s*Ver\.?\b", "Original Staff Credit Ver"),
+        (r"\b(?:ver\.?\s*\d+|v\d+)\b", None),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for pattern, template in patterns:
+        for m in re.finditer(pattern, s, re.I):
+            if template:
+                tag = template
+                if r"\1" in template and m.lastindex and m.lastindex >= 1:
+                    tag = template.replace(r"\1", m.group(1))
+                tag = re.sub(r"\s+", " ", tag).strip()
+            else:
+                tag = re.sub(r"\s+", " ", str(m.group(0) or "")).strip().rstrip(".")
+            if not tag:
+                continue
+            key = tag.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(tag)
+    return out[:6]
+
+
+def _merge_distinguish_tags_into_label(label: str | None, tags: list[str], max_len: int = 120) -> tuple[str | None, list[str], list[str]]:
+    base = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not tags:
+        return (base or None), [], []
+    lower_base = base.lower()
+    merged: list[str] = []
+    dropped: list[str] = []
+    for tag in tags:
+        token = re.sub(r"\s+", " ", str(tag or "")).strip()
+        if not token:
+            continue
+        if lower_base and token.lower() in lower_base:
+            continue
+        candidate = f"{base} {token}".strip() if base else token
+        if len(candidate) > max_len:
+            dropped.append(token)
+            continue
+        base = candidate
+        lower_base = base.lower()
+        merged.append(token)
+    return (base or None), merged, dropped
+
+
+def _format_conflict_diff_suffix(merged_tags: list[str] | None = None, dropped_diffs: list[str] | None = None) -> str:
+    merged = [x for x in (merged_tags or []) if x]
+    dropped = [x for x in (dropped_diffs or []) if x]
+    if not merged and not dropped:
+        return ""
+    parts: list[str] = []
+    if merged:
+        parts.append(f"merged_tags={','.join(merged)}")
+    if dropped:
+        parts.append(f"dropped_diffs={','.join(dropped)}")
+    return " | " + " | ".join(parts)
 
 
 def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) -> ParseResult:
