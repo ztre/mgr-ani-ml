@@ -26,6 +26,7 @@ tests/
 /backend/*.sqlite*
 *.db-shm
 *.db-wal
+.trae/
 
 # Frontend build / deps
 frontend/node_modules/

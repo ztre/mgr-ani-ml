@@ -9,12 +9,12 @@ from pathlib import Path
 from .parser import (
     get_tmdb_tv_details_sync,
     is_title_number_safe,
-    make_search_name,
     parse_tv_filename,
     search_tmdb_movie_candidates_sync,
     search_tmdb_tv_candidates_sync,
     split_main_subtitle,
 )
+from .search_name_builder import build_search_name, build_search_name_profile
 from ..api.logs import append_log
 from ..config import settings
 
@@ -161,13 +161,14 @@ def resolve_season(tmdb_client, tmdbid: int, season_hint: int | None, final_hint
 
 def generate_candidate_titles(snapshot: LocalParseSnapshot, include_season_variants: bool = True) -> list[str]:
     candidates: list[str] = []
-    search_name = make_search_name(snapshot.main_title or snapshot.cleaned_name)
+    profile = build_search_name_profile(snapshot.main_title or snapshot.cleaned_name, snapshot.season_hint)
+    search_name = profile.primary
     # season_hint 存在时，为 TMDB 搜索构造季号变体
     if include_season_variants and snapshot.season_hint:
-        _push_candidate(candidates, f"{search_name} season {snapshot.season_hint}")
-        _push_candidate(candidates, f"{search_name} S{snapshot.season_hint}")
-        _push_candidate(candidates, f"{search_name} {snapshot.season_hint}")
+        for query in profile.season_aware:
+            _push_candidate(candidates, query)
     _push_candidate(candidates, search_name)
+    _push_candidate(candidates, profile.fallback)
     _push_candidate(candidates, snapshot.cleaned_name)
     if snapshot.subtitle:
         _push_candidate(candidates, f"{snapshot.main_title} {snapshot.subtitle}")
@@ -193,7 +194,7 @@ def recognize_directory_with_fallback(
     - 使用的 fallback 轮次（0 表示首轮）
     """
     snapshot = parse_structure_locally(media_dir, structure_hint=structure_hint)
-    search_name = make_search_name(snapshot.main_title or snapshot.cleaned_name)
+    search_name = build_search_name(snapshot.main_title or snapshot.cleaned_name)
     append_log(f'INFO: search_name="{search_name}"')
     fast_best: RankedCandidate | None = None
     fast_tried: list[str] = []
@@ -353,8 +354,9 @@ def recognize_directory_with_season_hint_trace(
     if not season_hint:
         return None, [], False
 
-    search_name = make_search_name(snapshot.main_title or snapshot.cleaned_name)
-    queries = _build_season_aware_queries(search_name, season_hint)
+    profile = build_search_name_profile(snapshot.main_title or snapshot.cleaned_name, season_hint)
+    search_name = profile.primary
+    queries = list(profile.season_aware) or _build_season_aware_queries(search_name, season_hint)
     if not queries:
         return None, [], False
 
@@ -366,6 +368,7 @@ def recognize_directory_with_season_hint_trace(
 
     broad_queries: list[str] = []
     _push_candidate(broad_queries, search_name)
+    _push_candidate(broad_queries, profile.fallback)
     broad_pool = _collect_tv_candidates_from_queries(broad_queries, snapshot.year_hint)
     had_candidates = had_candidates or bool(broad_pool)
     best = _select_season_matched_candidate(broad_pool, season_hint)
@@ -471,7 +474,7 @@ def _build_alias_queries_from_pool(pool: list[RankedCandidate], season_hint: int
         if not isinstance(details, dict):
             continue
         for alias in _extract_alias_titles(details):
-            base = make_search_name(alias)
+            base = build_search_name(alias)
             for q in _build_season_aware_queries(base, season_hint):
                 _push_candidate(out, q)
     return out

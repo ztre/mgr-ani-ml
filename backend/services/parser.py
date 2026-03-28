@@ -12,6 +12,7 @@ from typing import NamedTuple
 import httpx
 
 from ..config import settings
+from .search_name_builder import build_search_name
 
 PATTERNS = {
     "bracket_ep": r"\[(\d{1,3})([a-zA-Zβ]*)?\]",
@@ -90,32 +91,7 @@ class ParseResult(NamedTuple):
 
 
 def make_search_name(raw_name: str) -> str:
-    """Build a cleaner TMDB query name from raw directory/file name."""
-    text = _preprocess(raw_name or "")
-    if not text:
-        return ""
-    text = _strip_leading_date_prefix(text)
-    text = _strip_trailing_release_group(text)
-    main, subtitle = split_main_subtitle(text)
-    if subtitle:
-        text = f"{main} {subtitle}".strip()
-    else:
-        text = main
-    text = SEARCH_NOISE_PATTERN.sub(" ", text)
-    text = re.sub(r"\b\d{3,4}\s*x\s*\d{3,4}\s*p\s*\d{1,3}\b", " ", text, flags=re.I)
-    text = re.sub(r"\b\d{3,4}\s*x\s*\d{3,4}\b", " ", text, flags=re.I)
-    text = re.sub(r"\bx\s*\d{3,4}\b", " ", text, flags=re.I)
-    text = re.sub(r"\bbd\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(19\d{2}|20\d{2})\b", " ", text)
-    text = re.sub(r"\bWEB\s+Preview", "Preview", text, flags=re.I)
-    text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    m = re.search(r"(?:^| )([2-9]|[12]\d|30)$", text)
-    if m:
-        prefix = text[: m.start(1)].strip()
-        if not re.search(r"\b(?:season|s)\s*$", prefix, re.I):
-            text = prefix
-    return text
+    return build_search_name(raw_name)
 
 
 # ----- TMDB API protection/caching -----

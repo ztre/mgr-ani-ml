@@ -1,0 +1,1014 @@
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ..api.logs import append_log
+from .linker import is_same_inode
+from .media_content_types import EXTRA_CATEGORIES, SPECIAL_CATEGORIES
+from .parser import ParseResult
+from .renamer import compute_movie_target_path, compute_tv_target_path
+
+SPECIAL_ANCHOR_CATEGORIES = {
+    "special",
+    "oped",
+    "making",
+    "trailer",
+    "preview",
+    "pv",
+    "cm",
+    "teaser",
+    "character_pv",
+}
+
+
+@dataclass
+class TargetDecision:
+    parse_result: ParseResult
+    dst_path: Path | None
+    status: str = "ok"
+    reason: str | None = None
+    file_type: str | None = None
+    remapped: bool = False
+    assigned_by_allocator: bool = False
+    item: dict | None = None
+    original_special_label: str | None = None
+    merged_tags: list[str] = field(default_factory=list)
+    dropped_tags: list[str] = field(default_factory=list)
+    used_conflict_enrichment: bool = False
+
+
+def build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseResult, ext: str, src_path: Path | None = None) -> Path:
+    base = _strip_attachment_base_noise(anchor_dst.stem)
+    if src_path is not None:
+        suffix = _build_attachment_source_suffix(src_path, parse_result, base)
+        if suffix:
+            base = f"{base} {suffix}".strip()
+    lang = parse_result.subtitle_lang or ""
+    return anchor_dst.with_name(f"{base}{lang}{ext}")
+
+
+def deduplicate_target_or_raise(seen_targets: dict[Path, Path], src_path: Path, dst_path: Path) -> None:
+    prev = seen_targets.get(dst_path)
+    if prev is None:
+        seen_targets[dst_path] = src_path
+        return
+    if prev != src_path:
+        raise ValueError(f"多个源文件映射到同一目标: {prev.name} / {src_path.name}")
+
+
+def resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> Path | None:
+    if dir_runtime is None:
+        return None
+    by_parent = dir_runtime.get("video_anchor_by_parent", {})
+    by_parent_ep = dir_runtime.get("video_anchor_by_parent_episode", {})
+    by_parent_stem = dir_runtime.get("video_anchor_by_parent_stem", {})
+    by_parent_special = dir_runtime.get("video_anchor_by_parent_special", {})
+    by_parent_special_prefix = dir_runtime.get("video_anchor_by_parent_special_prefix", {})
+    by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
+    special_by_raw = dir_runtime.get("special_target_by_raw_label", {})
+    special_by_raw_multi = dir_runtime.get("special_targets_by_raw_label_multi", {})
+    special_by_fine = dir_runtime.get("special_target_by_fine_label", {})
+    parent_key = str(src_path.parent)
+
+    raw_key = _build_special_raw_label_key(parent_key, parse_result.extra_label)
+    if raw_key is not None:
+        raw_target = special_by_raw.get(raw_key, "__missing__")
+        if raw_target is None:
+            candidates = list(special_by_raw_multi.get(raw_key) or [])
+            best = _pick_best_anchor_candidate(candidates, src_path, parse_result)
+            if best is not None:
+                return best
+            fine_key = _build_special_fine_label_key(
+                parent_key,
+                raw_label=parse_result.extra_label,
+                source_text=src_path.stem,
+                category=parse_result.extra_category,
+            )
+            if fine_key is not None:
+                fine_target = special_by_fine.get(fine_key, "__missing__")
+                if fine_target not in {"__missing__", None}:
+                    return fine_target
+            return None
+        if raw_target != "__missing__":
+            return raw_target
+    fine_key = _build_special_fine_label_key(
+        parent_key,
+        raw_label=parse_result.extra_label,
+        source_text=src_path.stem,
+        category=parse_result.extra_category,
+    )
+    if fine_key is not None:
+        fine_target = special_by_fine.get(fine_key, "__missing__")
+        if fine_target is None:
+            candidates = list(special_by_raw_multi.get(_build_special_raw_label_key(parent_key, parse_result.extra_label)) or [])
+            best = _pick_best_anchor_candidate(candidates, src_path, parse_result)
+            if best is not None:
+                return best
+        elif fine_target not in {"__missing__", None}:
+            return fine_target
+    if parse_result.extra_category in SPECIAL_CATEGORIES:
+        prefix = _special_label_prefix(parse_result.extra_category, parse_result.extra_label)
+        if prefix:
+            candidate = by_parent_special_prefix.get((parent_key, parse_result.extra_category, prefix.upper()))
+            if candidate:
+                return candidate
+    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+        return None
+    special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
+    if special_key is not None:
+        candidates = list(by_parent_special.get(special_key) or [])
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            append_log(f"WARNING: special attachment anchor conflict: {src_path.name} -> {len(candidates)} candidates")
+            return None
+    ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
+    if ep_key is not None:
+        candidate = by_parent_ep.get((parent_key, int(ep_key)))
+        if candidate:
+            return candidate
+    stem_candidates = [_normalize_media_stem(src_path.stem), _normalize_attachment_stem(src_path.stem)]
+    for stem_key in stem_candidates:
+        if not stem_key:
+            continue
+        candidate = by_parent_stem.get((parent_key, stem_key))
+        if candidate:
+            return candidate
+    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+        return None
+    recent = by_parent_recent.get(parent_key)
+    if recent:
+        return recent
+    return by_parent.get(parent_key)
+
+
+def apply_readable_suffix_for_unnumbered_extra(parse_result: ParseResult, src_path: Path, dir_runtime: dict | None) -> ParseResult:
+    if not _needs_readable_suffix(parse_result):
+        return parse_result
+    if parse_result.extra_category in SPECIAL_CATEGORIES:
+        parse_result = _assign_sequential_episode_for_unnumbered(parse_result, src_path, dir_runtime)
+    suffix = _build_readable_suffix(src_path, parse_result)
+    if not suffix:
+        suffix = f"h{hashlib.md5(src_path.name.encode('utf-8')).hexdigest()[:6]}"
+    candidate = _ensure_unique_suffix_label(suffix, src_path, parse_result, dir_runtime)
+    return parse_result._replace(extra_label=candidate)
+
+
+def apply_special_indexing(parse_result: ParseResult, src_path: Path, dir_runtime: dict | None, force_next: bool = False) -> ParseResult:
+    if dir_runtime is None:
+        return parse_result
+    category = parse_result.extra_category
+    if category not in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
+        return parse_result
+    label = parse_result.extra_label or ""
+    prefix = _special_label_prefix(category, label)
+    used = dir_runtime.setdefault("special_used", {}).setdefault((category, prefix), set())
+    idx = None if force_next else _extract_stable_label_index(label)
+    version_suffix = ""
+    m_ver = re.search(r"\b(?:ver\.?\s*\d+|v\d+)\b", label, re.I)
+    if m_ver:
+        version_suffix = m_ver.group(0).strip()
+    if idx is None or force_next:
+        next_idx = 1
+        while next_idx in used:
+            next_idx += 1
+        if force_next:
+            append_log(f"INFO: Special remap: {prefix}{next_idx:02d} for {src_path.name}")
+        idx = next_idx
+    used.add(idx)
+    new_label = _compose_indexed_extra_label(prefix, idx, label)
+    if version_suffix and version_suffix.lower() not in new_label.lower():
+        new_label = f"{new_label} {version_suffix}"
+    updated = parse_result._replace(extra_label=new_label)
+    if category in SPECIAL_CATEGORIES:
+        updated = updated._replace(episode=idx)
+    return updated
+
+
+def compute_target_path(
+    media_type: str,
+    target_root: Path,
+    parse_result: ParseResult,
+    tmdb_id: int | None,
+    ext: str,
+    src_filename: str,
+) -> Path:
+    if media_type == "tv":
+        return compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_filename)
+    return compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
+
+
+def resolve_final_target(
+    *,
+    src_path: Path,
+    parse_result: ParseResult,
+    media_type: str,
+    target_root: Path,
+    tmdb_id: int | None,
+    ext: str,
+    seen_targets: dict[Path, Path],
+    dir_runtime: dict | None,
+    assignments: dict,
+    item_map: dict,
+    is_attachment: bool = False,
+) -> TargetDecision:
+    original_special_label = parse_result.extra_label
+    source_diff_tags = _extract_distinguish_source_tags(src_path.stem)
+    remapped = False
+    assigned_by_allocator = False
+    item = item_map.get(str(src_path))
+    assigned_index = assignments.get(str(src_path))
+    if item and assigned_index is not None:
+        prefix = item.get("prefix") or _special_label_prefix(parse_result.extra_category, parse_result.extra_label)
+        preferred = item.get("preferred")
+        if preferred and int(preferred) != int(assigned_index):
+            append_log(f"INFO: Special remap: {prefix}{int(preferred):02d} -> {prefix}{int(assigned_index):02d} for {src_path.name}")
+            remapped = True
+        seed = item.get("final_label_seed") or parse_result.extra_label
+        parse_result = parse_result._replace(extra_label=_compose_indexed_extra_label(prefix, int(assigned_index), seed))
+        if parse_result.extra_category in SPECIAL_CATEGORIES:
+            parse_result = parse_result._replace(episode=int(assigned_index))
+        assigned_by_allocator = True
+    else:
+        before_label = parse_result.extra_label
+        parse_result = apply_special_indexing(parse_result, src_path, dir_runtime)
+        remapped = bool(before_label and parse_result.extra_label and before_label != parse_result.extra_label)
+    parse_result = _apply_variant_label_hint(parse_result, src_path)
+    dst_path = compute_target_path(
+        media_type=media_type,
+        target_root=target_root,
+        parse_result=parse_result,
+        tmdb_id=tmdb_id,
+        ext=ext,
+        src_filename=src_path.name,
+    )
+    merged_tags_once: list[str] = []
+    dropped_diffs_once: list[str] = []
+    used_conflict_enrichment = False
+
+    def _recalc_target() -> Path:
+        return compute_target_path(
+            media_type=media_type,
+            target_root=target_root,
+            parse_result=parse_result,
+            tmdb_id=tmdb_id,
+            ext=ext,
+            src_filename=src_path.name,
+        )
+
+    conflict_now = dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path))
+    if conflict_now and source_diff_tags:
+        new_label, merged_tags, dropped_diffs = _merge_distinguish_tags_into_label(parse_result.extra_label, source_diff_tags)
+        if merged_tags and new_label and new_label != parse_result.extra_label:
+            parse_result = parse_result._replace(extra_label=new_label)
+            dst_path = _recalc_target()
+            merged_tags_once = merged_tags
+            dropped_diffs_once = dropped_diffs
+            used_conflict_enrichment = True
+
+    if parse_result.extra_category is None:
+        attempts = 0
+        used_conflict_enrichment = False
+        while attempts < 2:
+            conflict = dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path))
+            if not conflict:
+                break
+            if not used_conflict_enrichment and source_diff_tags:
+                new_label, merged_tags, _dropped = _merge_distinguish_tags_into_label(parse_result.extra_label, source_diff_tags)
+                if merged_tags and new_label and new_label != parse_result.extra_label:
+                    parse_result = parse_result._replace(extra_label=new_label)
+                    dst_path = _recalc_target()
+                    used_conflict_enrichment = True
+                    attempts += 1
+                    continue
+                used_conflict_enrichment = True
+            return TargetDecision(
+                parse_result=parse_result,
+                dst_path=dst_path,
+                status="pending",
+                reason="main video target conflict unresolved",
+                file_type="video",
+            )
+    elif parse_result.extra_category in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
+        attempts = 0
+        merged_tags_once = []
+        dropped_diffs_once = []
+        used_conflict_enrichment = False
+        while True:
+            conflict = dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path))
+            if not conflict:
+                break
+            if (not used_conflict_enrichment) and source_diff_tags:
+                new_label, merged_tags, dropped_diffs = _merge_distinguish_tags_into_label(parse_result.extra_label, source_diff_tags)
+                if merged_tags and new_label and new_label != parse_result.extra_label:
+                    parse_result = parse_result._replace(extra_label=new_label)
+                    dst_path = _recalc_target()
+                    merged_tags_once = merged_tags
+                    dropped_diffs_once = dropped_diffs
+                    used_conflict_enrichment = True
+                    continue
+                if dropped_diffs and not dropped_diffs_once:
+                    dropped_diffs_once = dropped_diffs
+                used_conflict_enrichment = True
+            if assigned_by_allocator:
+                break
+            remapped = True
+            parse_result = apply_special_indexing(parse_result, src_path, dir_runtime, force_next=True)
+            dst_path = _recalc_target()
+            attempts += 1
+            if attempts > 50:
+                return TargetDecision(
+                    parse_result=parse_result,
+                    dst_path=dst_path,
+                    status="skip",
+                    reason="extra target conflict after remap attempts",
+                    file_type="special" if parse_result.extra_category in SPECIAL_CATEGORIES else "extra",
+                    remapped=remapped,
+                    assigned_by_allocator=assigned_by_allocator,
+                    item=item,
+                    original_special_label=original_special_label,
+                    merged_tags=merged_tags_once,
+                    dropped_tags=dropped_diffs_once,
+                    used_conflict_enrichment=used_conflict_enrichment,
+                )
+    file_type = "attachment" if is_attachment else ("special" if parse_result.extra_category in SPECIAL_CATEGORIES else ("extra" if parse_result.extra_category in EXTRA_CATEGORIES else "video"))
+    if dst_path.exists() and not is_same_inode(src_path, dst_path):
+        if is_attachment:
+            return TargetDecision(
+                parse_result=parse_result,
+                dst_path=dst_path,
+                status="skip",
+                reason="attachment target occupied by other source",
+                file_type="attachment",
+                remapped=remapped,
+                assigned_by_allocator=assigned_by_allocator,
+                item=item,
+                original_special_label=original_special_label,
+                merged_tags=merged_tags_once,
+                dropped_tags=dropped_diffs_once,
+                used_conflict_enrichment=used_conflict_enrichment,
+            )
+        if parse_result.extra_category in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
+            return TargetDecision(
+                parse_result=parse_result,
+                dst_path=dst_path,
+                status="skip",
+                reason="extra target occupied",
+                file_type=file_type,
+                remapped=remapped,
+                assigned_by_allocator=assigned_by_allocator,
+                item=item,
+                original_special_label=original_special_label,
+                merged_tags=merged_tags_once,
+                dropped_tags=dropped_diffs_once,
+                used_conflict_enrichment=used_conflict_enrichment,
+            )
+        return TargetDecision(
+            parse_result=parse_result,
+            dst_path=dst_path,
+            status="pending",
+            reason="target occupied by other source",
+            file_type="video",
+            remapped=remapped,
+            assigned_by_allocator=assigned_by_allocator,
+            item=item,
+            original_special_label=original_special_label,
+            merged_tags=merged_tags_once,
+            dropped_tags=dropped_diffs_once,
+            used_conflict_enrichment=used_conflict_enrichment,
+        )
+    try:
+        deduplicate_target_or_raise(seen_targets, src_path, dst_path)
+    except ValueError:
+        if is_attachment:
+            return TargetDecision(
+                parse_result=parse_result,
+                dst_path=dst_path,
+                status="skip",
+                reason="attachment target duplicated in current batch",
+                file_type="attachment",
+                remapped=remapped,
+                assigned_by_allocator=assigned_by_allocator,
+                item=item,
+                original_special_label=original_special_label,
+                merged_tags=merged_tags_once,
+                dropped_tags=dropped_diffs_once,
+                used_conflict_enrichment=used_conflict_enrichment,
+            )
+        if parse_result.extra_category in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
+            return TargetDecision(
+                parse_result=parse_result,
+                dst_path=dst_path,
+                status="skip",
+                reason="extra target duplicated in current batch",
+                file_type=file_type,
+                remapped=remapped,
+                assigned_by_allocator=assigned_by_allocator,
+                item=item,
+                original_special_label=original_special_label,
+                merged_tags=merged_tags_once,
+                dropped_tags=dropped_diffs_once,
+                used_conflict_enrichment=used_conflict_enrichment,
+            )
+        return TargetDecision(
+            parse_result=parse_result,
+            dst_path=dst_path,
+            status="pending",
+            reason="batch target conflict",
+            file_type="video",
+            remapped=remapped,
+            assigned_by_allocator=assigned_by_allocator,
+            item=item,
+            original_special_label=original_special_label,
+            merged_tags=merged_tags_once,
+            dropped_tags=dropped_diffs_once,
+            used_conflict_enrichment=used_conflict_enrichment,
+        )
+    return TargetDecision(
+        parse_result=parse_result,
+        dst_path=dst_path,
+        status="ok",
+        file_type=file_type,
+        remapped=remapped,
+        assigned_by_allocator=assigned_by_allocator,
+        item=item,
+        original_special_label=original_special_label,
+        merged_tags=merged_tags_once,
+        dropped_tags=dropped_diffs_once,
+        used_conflict_enrichment=used_conflict_enrichment,
+    )
+
+
+def _build_special_raw_label_key(parent_key: str, raw_label: str | None) -> tuple[str, str] | None:
+    label = re.sub(r"\s+", " ", str(raw_label or "")).strip()
+    if not label:
+        return None
+    return (parent_key, label.upper())
+
+
+def _build_special_fine_label_key(parent_key: str, raw_label: str | None, source_text: str, category: str | None) -> tuple[str, str, str] | None:
+    coarse = _build_special_raw_label_key(parent_key, raw_label)
+    if coarse is None:
+        return None
+    token = _build_source_diff_token(source_text, category=category)
+    if not token:
+        return None
+    return (coarse[0], coarse[1], token)
+
+
+def _build_source_diff_token(source_text: str, category: str | None) -> str:
+    tags = _extract_distinguish_source_tags(source_text)
+    token_parts: list[str] = []
+    if tags:
+        token_parts.extend(tags)
+    scene = _extract_scene_fragment(source_text)
+    if scene:
+        normalized_scene = _normalize_special_anchor_token(scene, category)
+        if normalized_scene:
+            token_parts.append(normalized_scene)
+    if not token_parts:
+        normalized = _normalize_special_anchor_token(source_text, category)
+        if normalized:
+            token_parts.append(normalized[:24])
+    if not token_parts:
+        return ""
+    joined = "|".join(x for x in token_parts if x)
+    return joined[:96]
+
+
+def _build_special_anchor_key(parse_result: ParseResult, src_path: Path, original_label: str | None = None) -> tuple[str, str, str, str] | None:
+    category = str(parse_result.extra_category or "")
+    if category not in SPECIAL_ANCHOR_CATEGORIES:
+        return None
+    parent_key = str(src_path.parent)
+    stem_key = _normalize_media_stem(src_path.stem)
+    if not stem_key:
+        return None
+    token = _special_anchor_token(parse_result, src_path, original_label=original_label)
+    if not token:
+        return None
+    return (parent_key, stem_key, category, token)
+
+
+def _special_anchor_token(parse_result: ParseResult, src_path: Path, original_label: str | None = None) -> str:
+    label = str(original_label or parse_result.extra_label or "").strip()
+    if not label:
+        label = _extract_scene_fragment(src_path.stem) or _normalize_suffix_text(src_path.stem)
+    return _normalize_special_anchor_token(label, parse_result.extra_category)
+
+
+def _normalize_special_anchor_token(text: str, category: str | None) -> str:
+    s = str(text or "")
+    s = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", s)
+    s = s.replace(".", " ").replace("_", " ")
+    s = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", s, flags=re.U)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    if not s:
+        return ""
+    cat = str(category or "")
+    if cat == "making":
+        s = re.sub(r"^making\s*\d{0,3}\b", "", s, flags=re.I)
+    elif cat == "special":
+        s = re.sub(r"^sp\s*\d{0,3}\b", "", s, flags=re.I)
+    elif cat == "oped":
+        s = re.sub(r"^(?:op|ed)\s*\d{0,3}\b", "", s, flags=re.I)
+    return re.sub(r"\s+", " ", s).strip(" -_")
+
+
+def _extract_scene_fragment(text: str) -> str | None:
+    s = str(text or "")
+    if not s:
+        return None
+    m = re.search(r"\b(Scene)\s*[-_ ]*([0-9]{1,3}(?:[A-Za-z]{1,8})?)\b", s, re.I)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+    return None
+
+
+def _normalized_episode_key(parse_result: ParseResult, src_path: Path, filename: str) -> int | None:
+    if parse_result.extra_category in SPECIAL_CATEGORIES:
+        season = parse_result.season or _extract_season_from_path(src_path) or 1
+        index = parse_result.episode or _extract_episode_from_filename_loose(filename) or 1
+        if parse_result.extra_category == "oped":
+            label = str(parse_result.extra_label or "").upper()
+            if label.startswith("ED"):
+                return season * 100 + int(index * 2)
+            return season * 100 + int(index * 2 - 1)
+        return season * 100 + int(index)
+    ep = parse_result.episode or _extract_episode_from_filename_loose(filename)
+    return int(ep) if ep is not None else None
+
+
+def _extract_episode_from_filename_loose(filename: str) -> int | None:
+    stem = Path(filename).stem
+    patterns = [
+        r"\b\d{1,2}\s*[xX]\s*(\d{1,3})\b",
+        r"\[(\d{2,3})\]",
+        r"\((\d{1,3})\)",
+        r"\bEP?(\d{2,3})\b",
+        r"\bEP[_\-\s]*(\d{1,3})\b",
+        r"\bEpisode\s*(\d{1,3})\b",
+        r"\bEp\s*(\d{1,3})\b",
+        r"\bE(\d{1,3})\b",
+        r"第\s*(\d{1,3})\s*[集话話]",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, stem, re.I)
+        if not m:
+            continue
+        ep = int(m.group(1))
+        if 1 <= ep <= 999 and ep not in {2160, 1080, 720, 480, 265, 264}:
+            return ep
+    return None
+
+
+def _extract_season_from_path(src_path: Path) -> int | None:
+    for part in src_path.parts:
+        m1 = re.match(r"^season\s*(\d{1,2})$", part, re.I)
+        if m1:
+            return int(m1.group(1))
+        m2 = re.match(r"^s(\d{1,2})$", part, re.I)
+        if m2:
+            return int(m2.group(1))
+        m3 = re.match(r"^第\s*(\d{1,2})\s*季$", part)
+        if m3:
+            return int(m3.group(1))
+    return None
+
+
+def _normalize_media_stem(stem: str) -> str:
+    text = str(stem or "")
+    text = re.sub(r"[\[\]\(\)\{\}]", " ", text)
+    text = text.replace(".", " ").replace("_", " ")
+    text = re.sub(r"\b(?:2160p|1080p|720p|480p|4k)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:x264|x265|h264|h265|hevc|av1|hi10p|ma10p)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:flac|aac|ac3|dts|ddp\d?\.\d?)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:webrip|web-dl|bdrip|bluray|remux)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:chs|cht|sc|tc|gb|big5|jpn|jp|ja|eng|en|zh[-_ ]?(?:cn|tw))\b", " ", text, flags=re.I)
+    text = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", text, flags=re.U)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    if not text:
+        return ""
+    return text[:96]
+
+
+def _normalize_attachment_stem(stem: str) -> str:
+    s = str(stem or "")
+    if not s:
+        return ""
+    s = re.sub(r"\.(?:sc|tc|chs|cht|jpsc|jptc|zh[\-_]?(?:cn|tw)|ass|srt|ssa|vtt)\s*$", "", s, flags=re.I)
+    s = re.sub(r"\b(?:sc|tc|chs|cht|jpsc|jptc|zh[\-_]?(?:cn|tw))\s*$", "", s, flags=re.I)
+    return _normalize_media_stem(s)
+
+
+def _pick_best_anchor_candidate(candidates: list[Path], src_path: Path, parse_result: ParseResult) -> Path | None:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    tags = _extract_distinguish_source_tags(src_path.stem)
+    label_hint = _normalize_media_stem(parse_result.extra_label or "")
+    scene_hint = _normalize_media_stem(_extract_scene_fragment(src_path.stem) or "")
+    stem_hint = _normalize_attachment_stem(src_path.stem)
+    best: Path | None = None
+    best_score = -1
+    tie = False
+    for candidate in candidates:
+        candidate_key = _normalize_media_stem(candidate.stem)
+        score = 0
+        if stem_hint and stem_hint in candidate_key:
+            score += 5
+        if label_hint and label_hint in candidate_key:
+            score += 4
+        if scene_hint and scene_hint in candidate_key:
+            score += 3
+        for tag in tags:
+            token = _normalize_media_stem(tag)
+            if token and token in candidate_key:
+                score += 2
+        if score > best_score:
+            best_score = score
+            best = candidate
+            tie = False
+        elif score == best_score:
+            tie = True
+    if best_score <= 0 or tie:
+        return None
+    return best
+
+
+def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, anchor_stem: str) -> str:
+    if parse_result.extra_category in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
+        return ""
+    anchor_key = _normalize_media_stem(anchor_stem)
+    parts: list[str] = []
+    attachment_token = _extract_attachment_distinguish_token(src_path.stem)
+    if attachment_token:
+        parts.append(attachment_token)
+    scene = _extract_scene_fragment(src_path.stem)
+    if scene:
+        parts.append(re.sub(r"\s+", " ", scene).strip())
+    ep = _extract_episode_from_filename_loose(src_path.name)
+    if ep is not None:
+        parts.append(f"E{int(ep):02d}")
+    for tag in _extract_distinguish_source_tags(src_path.stem):
+        parts.append(tag)
+    seen: set[str] = set()
+    for part in parts:
+        token = re.sub(r"\s+", " ", str(part or "")).strip()
+        if not token:
+            continue
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized = _normalize_media_stem(token)
+        if normalized and normalized in anchor_key:
+            continue
+        return token[:40]
+    return ""
+
+
+def _extract_attachment_distinguish_token(stem: str) -> str:
+    tokens = re.findall(r"\[([^\]]+)\]", str(stem or ""))
+    for raw in tokens:
+        text = re.sub(r"\s+", " ", str(raw or "")).strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if re.search(r"(?:2160p|1080p|720p|x26[45]|h26[45]|hevc|av1|ma\d+p(?:[_-]?\d{3,4}p)?|flac|aac|ac3|dts|vcb|studio)", lower):
+            continue
+        text = re.sub(r"\((?:NC|On\s*Air)\s*Ver\.?\)", "", text, flags=re.I).strip(" -_")
+        if not text:
+            continue
+        if re.search(r"[a-zA-Z\u4e00-\u9fff]", text) and re.search(r"\d", text):
+            return text[:40]
+    return ""
+
+
+def _strip_attachment_base_noise(stem: str) -> str:
+    s = re.sub(r"\s+", " ", str(stem or "")).strip()
+    if not s:
+        return ""
+    s = _strip_release_group_fragments(s)
+    s = re.sub(r"\s+(?:ma\d+p[_\s-]*\d{3,4}p|\d{3,4}p)\b", "", s, flags=re.I)
+    s = re.sub(r"\s+(?:x26[45]|h26[45]|hevc|av1|flac|aac|ac3|dts)\b", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _special_label_prefix(category: str | None, label: str | None) -> str:
+    label = str(label or "").strip()
+    if category == "oped":
+        upper = label.upper()
+        if upper.startswith("NCED") or upper.startswith("ED"):
+            return "ED"
+        if upper.startswith("NCOP") or upper.startswith("OP"):
+            return "OP"
+        for token in ("NCOP", "NCED", "OP", "ED"):
+            if re.search(rf"\b{token}\b", label, re.I):
+                return "ED" if token == "NCED" else ("OP" if token == "NCOP" else token)
+        return "OP"
+    if category == "special":
+        upper = label.upper()
+        if upper.startswith("OVA"):
+            return "OVA"
+        if upper.startswith("OAD"):
+            return "OAD"
+        if upper.startswith("SP") or upper.startswith("SPECIAL"):
+            return "SP"
+        for token in ("OVA", "OAD", "SP", "SPECIAL"):
+            if re.search(rf"\b{token}\s*0*\d{{0,3}}\b", label, re.I):
+                return "SP" if token == "SPECIAL" else token
+        return "SP"
+    if category == "pv":
+        return "PV"
+    if category == "cm":
+        return "CM"
+    if category == "preview":
+        if re.search(r"\bWEBPREVIEW\b", label, re.I):
+            return "WebPreview"
+        return "Preview"
+    if category == "character_pv":
+        return "CharacterPV"
+    if category == "trailer":
+        return "Trailer"
+    if category == "teaser":
+        return "Teaser"
+    if category == "mv":
+        return "MV"
+    if category == "making":
+        return "Making"
+    if category == "interview":
+        return "Interview"
+    if category == "bdextra":
+        return "BDExtra"
+    return "Extra"
+
+
+def _extract_stable_label_index(label: str | None) -> int | None:
+    s = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not s:
+        return None
+    patterns = [
+        r"\b(?:SP|OVA|OAD|OAV|SPECIAL)\s*0*(\d{1,3})\b",
+        r"\b(?:OP|ED|NCOP|NCED)\s*0*(\d{1,3})\b",
+        r"\b(?:PV|CM|Preview|Trailer|Teaser|CharacterPV|WebPreview|MV|Interview|Making|BDExtra)\s*0*(\d{1,3})\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, s, re.I)
+        if not m:
+            continue
+        val = int(m.group(1))
+        if 1 <= val <= 999:
+            return val
+    return None
+
+
+def _compose_indexed_extra_label(prefix: str, idx: int, seed_label: str | None) -> str:
+    base = f"{prefix}{int(idx):02d}"
+    suffix = _extract_preserved_extra_suffix(seed_label, prefix)
+    if not suffix:
+        return base
+    return f"{base} {suffix}"
+
+
+def _extract_preserved_extra_suffix(label: str | None, prefix: str) -> str:
+    s = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not s:
+        return ""
+    s = re.sub(rf"^\s*{re.escape(prefix)}\s*0*\d{{1,3}}\b", "", s, flags=re.I)
+    s = re.sub(rf"^\s*{re.escape(prefix)}\b", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" -_")
+    return _sanitize_extra_suffix(s)
+
+
+def _merge_distinguish_tags_into_label(label: str | None, tags: list[str], max_len: int = 120) -> tuple[str | None, list[str], list[str]]:
+    base = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not tags:
+        return (base or None), [], []
+    lower_base = base.lower()
+    merged: list[str] = []
+    dropped: list[str] = []
+    for tag in tags:
+        token = re.sub(r"\s+", " ", str(tag or "")).strip()
+        if not token:
+            continue
+        if lower_base and token.lower() in lower_base:
+            continue
+        candidate = f"{base} {token}".strip() if base else token
+        if len(candidate) > max_len:
+            dropped.append(token)
+            continue
+        base = candidate
+        lower_base = base.lower()
+        merged.append(token)
+    return (base or None), merged, dropped
+
+
+def _extract_distinguish_source_tags(text: str) -> list[str]:
+    s = str(text or "")
+    if not s:
+        return []
+    patterns = [
+        (r"\bNC(?:OP|ED)?(?=\d|\b)", "NC Ver"),
+        (r"\bOn\s*Air\s*Ver\.?\b", "On Air Ver"),
+        (r"\bTrue\s*Birth\s*Edition\b", "True Birth Edition"),
+        (r"\b([A-Za-z][A-Za-z0-9]{1,24})\s*[-_ ]hen\b", r"\1-hen"),
+        (r"\bEX\s*Season\s*0*(\d{1,2})\b", r"EX Season \1"),
+        (r"\bOriginal\s*Staff\s*Credit\s*Ver\.?\b", "Original Staff Credit Ver"),
+        (r"\b(?:ver\.?\s*\d+|v\d+)\b", None),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for pattern, template in patterns:
+        for m in re.finditer(pattern, s, re.I):
+            if template:
+                tag = template
+                if r"\1" in template and m.lastindex and m.lastindex >= 1:
+                    tag = template.replace(r"\1", m.group(1))
+                tag = re.sub(r"\s+", " ", tag).strip()
+            else:
+                tag = re.sub(r"\s+", " ", str(m.group(0) or "")).strip().rstrip(".")
+            if not tag:
+                continue
+            key = tag.lower()
+            if key in seen:
+                continue
+            if key in {"nc ver", "on air ver"}:
+                continue
+            seen.add(key)
+            out.append(tag)
+    return out[:6]
+
+
+def _apply_variant_label_hint(parse_result: ParseResult, src_path: Path) -> ParseResult:
+    if parse_result.extra_category not in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
+        return parse_result
+    tags = _extract_distinguish_source_tags(src_path.stem)
+    if not tags:
+        return parse_result
+    label = re.sub(r"\s+", " ", str(parse_result.extra_label or "")).strip()
+    if not label:
+        return parse_result
+    out = label
+    lower = out.lower()
+    for tag in tags:
+        token = re.sub(r"\s+", " ", str(tag or "")).strip()
+        if not token:
+            continue
+        if token.lower() in lower:
+            continue
+        candidate = f"{out} {token}".strip()
+        if len(candidate) > 120:
+            continue
+        out = candidate
+        lower = out.lower()
+    if out == label:
+        return parse_result
+    return parse_result._replace(extra_label=out)
+
+
+def _needs_readable_suffix(parse_result: ParseResult) -> bool:
+    if parse_result.extra_category not in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
+        return False
+    stable_idx = _extract_stable_label_index(parse_result.extra_label)
+    if stable_idx is not None:
+        return False
+    if parse_result.episode is None:
+        return True
+    return int(parse_result.episode) == 1
+
+
+def _normalize_suffix_text(text: str) -> str:
+    s = str(text or "")
+    s = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", s)
+    s = s.replace(".", " ").replace("_", " ")
+    s = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", s, flags=re.U)
+    return re.sub(r"\s+", " ", s).strip(" -_")
+
+
+def _build_readable_suffix(src_path: Path, parse_result: ParseResult) -> str:
+    raw = re.sub(r"\s*-\s*(?:mawen\d*|vcb(?:-?studio)?|mysilu)\s*$", "", src_path.stem, flags=re.I)
+    raw = re.sub(r"\[[^\]]*\]", " ", raw)
+    candidates = re.split(r"\s*-\s*", raw)
+    title_norm = _normalize_suffix_text(parse_result.title).lower()
+    for segment in candidates:
+        cleaned = _normalize_suffix_text(segment)
+        if not cleaned:
+            continue
+        if title_norm and cleaned.lower() == title_norm:
+            continue
+        if re.fullmatch(r"\d+", cleaned):
+            continue
+        if re.search(r"[A-Za-z\u4e00-\u9fff]", cleaned) is None:
+            continue
+        if len(cleaned) < 3 and re.search(r"[\u4e00-\u9fff]", cleaned) is None:
+            continue
+        if _is_release_group_phrase(cleaned):
+            continue
+        return cleaned[:28]
+    cleaned_all = _normalize_suffix_text(raw)
+    if cleaned_all and not re.fullmatch(r"\d+", cleaned_all) and not _is_release_group_phrase(cleaned_all):
+        return cleaned_all[:28]
+    return f"h{hashlib.md5(str(src_path).encode('utf-8')).hexdigest()[:6]}"
+
+
+def _ensure_unique_suffix_label(base_label: str, src_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> str:
+    if dir_runtime is None:
+        return base_label
+    registry = dir_runtime.setdefault("suffix_label_registry", {})
+    parent_key = str(src_path.parent)
+    category_key = str(parse_result.extra_category or "extra")
+    key = (parent_key, category_key, base_label.lower())
+    idx = int(registry.get(key, 0)) + 1
+    registry[key] = idx
+    if idx == 1:
+        return base_label
+    candidate = f"{base_label} #{idx:02d}"
+    if len(candidate) > 80:
+        candidate = candidate[:80].rstrip()
+    return candidate
+
+
+def _assign_sequential_episode_for_unnumbered(parse_result: ParseResult, src_path: Path, dir_runtime: dict | None) -> ParseResult:
+    if dir_runtime is None:
+        return parse_result
+    stable_idx = _extract_stable_label_index(parse_result.extra_label)
+    if stable_idx is not None:
+        return parse_result._replace(episode=stable_idx)
+    parent_key = str(src_path.parent)
+    key = (parent_key, str(parse_result.extra_category or "special"))
+    seq_map = dir_runtime.setdefault("unnumbered_special_seq", {})
+    current = int(seq_map.get(key, 0)) + 1
+    seq_map[key] = current
+    return parse_result._replace(episode=current)
+
+
+def _sanitize_extra_suffix(text: str) -> str:
+    s = re.sub(r"\s+", " ", str(text or "")).strip(" -_")
+    if not s:
+        return ""
+    s = _strip_release_group_fragments(s)
+    s = re.sub(r"\b(?:nc|on\s*air)\s*ver\.?\b", " ", s, flags=re.I)
+    s = re.sub(r"\((?:nc|on\s*air)\s*ver\.?\)", " ", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" -_")
+    if not s:
+        return ""
+    if _is_release_group_phrase(s):
+        return ""
+    return s
+
+
+def _strip_release_group_fragments(text: str) -> str:
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not s:
+        return ""
+    patterns = [
+        r"\bnekomoe(?:\s+kissaten)?\b",
+        r"\bvcb(?:\s*-\s*studio|\s+studio)?\b",
+        r"\bmawen\d*\b",
+        r"\bmysilu\b",
+        r"\bairota\b",
+        r"\bdmhy\b",
+        r"\b(?:fansub|raws?|sub)\b",
+        r"(?:字幕组|字幕社|压制组|搬运组)",
+    ]
+    for pattern in patterns:
+        s = re.sub(pattern, " ", s, flags=re.I)
+    s = re.sub(r"\s*[&/|+]+\s*", " ", s)
+    s = re.sub(r"\(\s*\)", " ", s)
+    s = re.sub(r"\[\s*\]", " ", s)
+    return re.sub(r"\s+", " ", s).strip(" -_")
+
+
+def _is_release_group_phrase(text: str) -> bool:
+    s = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not s:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", s):
+        return bool(re.search(r"(字幕组|字幕社|压制组|搬运组)$", s))
+    tokens = [tok for tok in re.split(r"[\s\-_.&+/]+", s) if tok]
+    if not tokens:
+        return False
+    noise_patterns = [
+        r"vcb(?:studio)?",
+        r"mawen\d*",
+        r"mysilu",
+        r"nekomoe",
+        r"kissaten",
+        r"airota",
+        r"dmhy",
+        r"sub",
+        r"fansub",
+        r"raws?",
+        r"studio",
+    ]
+    matched = 0
+    for tok in tokens:
+        if any(re.fullmatch(p, tok, flags=re.I) for p in noise_patterns):
+            matched += 1
+    return matched == len(tokens)

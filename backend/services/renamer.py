@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .media_content_types import EXTRA_CATEGORIES, SPECIAL_CATEGORIES
 from .parser import ParseResult
 
 
@@ -22,7 +23,7 @@ def compute_tv_target_path(
 
     season = parse_result.season if parse_result.season is not None else 1
 
-    if parse_result.extra_category in {"special", "oped"}:
+    if parse_result.extra_category in SPECIAL_CATEGORIES:
         season_dir = show_dir / "Season 00"
         stable_idx = _extract_stable_label_index(parse_result.extra_label, parse_result.extra_category)
         has_stable_idx = stable_idx is not None
@@ -62,7 +63,7 @@ def compute_tv_target_path(
             base_name += parse_result.subtitle_lang
         return season_dir / f"{base_name}{ext}"
 
-    if parse_result.extra_category and parse_result.extra_category not in {"special", "oped"}:
+    if parse_result.extra_category and parse_result.extra_category in EXTRA_CATEGORIES:
         extras_dir = show_dir / "extras"
         normalized = _normalize_extra_label_for_name(parse_result.extra_label, parse_result.extra_category)
         cleaned_suffix = _clean_extra_suffix(normalized)

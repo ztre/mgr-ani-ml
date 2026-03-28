@@ -111,26 +111,6 @@ def should_fallback_to_pending(item: dict, assigned_target: Path, existing_cache
     if remap_attempts > int(config.get("max_auto_remap_attempts", 3)):
         return True, "exceeded max auto remap attempts"
 
-    if assigned_target.exists():
-        owner_dir = item.get("owner_dir")
-        source_dir = item.get("source_dir")
-        if owner_dir and source_dir:
-            try:
-                if Path(str(owner_dir)).resolve() == Path(str(source_dir)).resolve():
-                    return False, ""
-            except Exception:
-                if str(owner_dir) == str(source_dir):
-                    return False, ""
-        src_path = Path(str(item.get("file_path") or ""))
-        try:
-            if src_path.exists() and assigned_target.samefile(src_path):
-                return False, ""
-        except OSError:
-            pass
-        if item.get("is_attachment"):
-            return True, "attachment target occupied by other source"
-        return True, "target occupied by other source"
-
     return False, ""
 
 

@@ -44,12 +44,19 @@ from .recognition_flow import (
     recognize_directory_with_season_hint_trace,
     resolve_season as resolve_season_by_tmdb,
 )
-from .renamer import compute_movie_target_path, compute_tv_target_path
 from .allocator import (
     allocate_indices_for_batch,
     mark_pending,
     scan_existing_special_indices,
     should_fallback_to_pending,
+)
+from .media_content_types import ALL_EXTRA_LIKE_CATEGORIES, EXTRA_CATEGORIES, SPECIAL_CATEGORIES, classify_content_type
+from .target_path_resolver import (
+    apply_readable_suffix_for_unnumbered_extra as resolver_apply_readable_suffix_for_unnumbered_extra,
+    build_attachment_target_from_anchor as resolver_build_attachment_target_from_anchor,
+    deduplicate_target_or_raise as resolver_deduplicate_target_or_raise,
+    resolve_attachment_follow_target as resolver_resolve_attachment_follow_target,
+    resolve_final_target,
 )
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv", ".ts", ".m2ts"}
@@ -62,19 +69,7 @@ _WORKER_LOCK = Lock()
 _WORKER_LOCK_FD = None
 
 IGNORED_TOKENS = {"bdmv", "menu", "sample", "scan", "disc", "iso", "font"}
-EXTRAS_CATEGORIES = {
-    "pv",
-    "cm",
-    "preview",
-    "trailer",
-    "teaser",
-    "character_pv",
-    "iv",
-    "mv",
-    "making",
-    "interview",
-    "bdextra",
-}
+EXTRAS_CATEGORIES = set(EXTRA_CATEGORIES)
 SPECIAL_ANCHOR_CATEGORIES = {"special", "oped", "making", "trailer", "preview", "pv", "cm", "teaser", "character_pv"}
 SPECIAL_DIR_TOKENS = {
     "sps",
@@ -1052,7 +1047,7 @@ def _process_file(
             parse_result = parse_result._replace(
                 extra_category=forced_category,
                 extra_label=forced_label,
-                is_special=forced_category in {"special", "oped"},
+                is_special=forced_category in SPECIAL_CATEGORIES,
             )
         elif strong_extra_context and ext in VIDEO_EXTS:
             fallback_label = extract_strong_extra_fallback_label(src_path.name)
@@ -1108,7 +1103,7 @@ def _process_file(
         if dir_runtime is not None:
             dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
         return
-    if extra_context and parse_result.extra_category is not None and parse_result.extra_category not in {"special", "oped"}:
+    if extra_context and parse_result.extra_category is not None and parse_result.extra_category not in SPECIAL_CATEGORIES:
         parse_result = parse_result._replace(episode=None)
     parse_result = _apply_parallel_variant_suffix(parse_result, src_path)
 
@@ -1127,46 +1122,59 @@ def _process_file(
         )
         return
 
-    # 附件跟随正片：优先复用同目录(同集)视频的目标路径。
     if is_attachment:
-        anchor_dst = _resolve_attachment_follow_target(src_path, parse_result, dir_runtime)
+        anchor_dst = resolver_resolve_attachment_follow_target(src_path, parse_result, dir_runtime)
         if anchor_dst is not None:
-            dst_path = _build_attachment_target_from_anchor(anchor_dst, parse_result, ext)
-            try:
-                _execute_transactional_outputs(
-                    src_path=src_path,
-                    dst_path=dst_path,
-                    media_type=media_type,
-                    parse_result=parse_result,
-                    tmdb_data=tmdb_data,
-                    should_scrape=False,
-                    display_title=context.get("title"),
-                    op_log=op_log,
+            dst_path = resolver_build_attachment_target_from_anchor(anchor_dst, parse_result, ext, src_path=src_path)
+            if dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path)):
+                context["_has_issues"] = True
+                append_log(
+                    "WARNING: 附件跟随目标冲突已跳过: %s -> %s%s"
+                    % (
+                        src_path.name,
+                        dst_path,
+                        _format_conflict_diff_suffix(merged_tags=_extract_distinguish_source_tags(src_path.stem)),
+                    )
                 )
-            except DirectoryProcessError as e:
-                if "目标路径已被其他文件占用" in str(e):
-                    context["_has_issues"] = True
-                    append_log(
-                        "WARNING: 附件跟随目标冲突已跳过: %s -> %s%s"
-                        % (
-                            src_path.name,
-                            dst_path,
-                            _format_conflict_diff_suffix(merged_tags=_extract_distinguish_source_tags(src_path.stem)),
-                        )
-                    )
-                    _record_unhandled_item(
-                        original_path=src_path,
-                        reason="attachment follow target occupied",
-                        file_type="attachment",
-                        sync_group_id=sync_group_id,
-                        tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                        season=parse_result.season,
-                        episode=parse_result.episode,
-                        extra_category=parse_result.extra_category,
-                        suggested_target=dst_path,
-                    )
-                    return
-                raise
+                _record_unhandled_item(
+                    original_path=src_path,
+                    reason="attachment follow target occupied",
+                    file_type="attachment",
+                    sync_group_id=sync_group_id,
+                    tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                    season=parse_result.season,
+                    episode=parse_result.episode,
+                    extra_category=parse_result.extra_category,
+                    suggested_target=dst_path,
+                )
+                return
+            try:
+                resolver_deduplicate_target_or_raise(seen_targets, src_path, dst_path)
+            except ValueError:
+                context["_has_issues"] = True
+                append_log(f"WARNING: 附件跟随目标冲突已跳过: {src_path.name} -> {dst_path}")
+                _record_unhandled_item(
+                    original_path=src_path,
+                    reason="attachment follow target occupied",
+                    file_type="attachment",
+                    sync_group_id=sync_group_id,
+                    tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                    season=parse_result.season,
+                    episode=parse_result.episode,
+                    extra_category=parse_result.extra_category,
+                    suggested_target=dst_path,
+                )
+                return
+            _execute_transactional_outputs(
+                src_path=src_path,
+                dst_path=dst_path,
+                media_type=media_type,
+                parse_result=parse_result,
+                tmdb_data=tmdb_data,
+                should_scrape=False,
+                display_title=context.get("title"),
+                op_log=op_log,
+            )
             _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
             _upsert_inode_record(db, sync_group_id, src_path, dst_path)
             append_log(f"INFO: 附件跟随正片: {src_path.name} -> {dst_path}")
@@ -1220,29 +1228,8 @@ def _process_file(
     if parse_result.extra_category is not None:
         _log_special_classification(parse_result.extra_category, parse_result.extra_label)
 
-    original_special_label = parse_result.extra_label
-    source_diff_tags = _extract_distinguish_source_tags(src_path.stem)
-    remapped = False
     assignments = context.get("allocator_assignments") or {}
     item_map = context.get("allocator_items") or {}
-    assigned_by_allocator = False
-    item = item_map.get(str(src_path))
-    assigned_index = assignments.get(str(src_path))
-    if item and assigned_index is not None:
-        prefix = item.get("prefix") or _special_label_prefix(parse_result.extra_category, parse_result.extra_label)
-        preferred = item.get("preferred")
-        if preferred and int(preferred) != int(assigned_index):
-            append_log(f"INFO: Special remap: {prefix}{int(preferred):02d} -> {prefix}{int(assigned_index):02d} for {src_path.name}")
-            remapped = True
-        seed = item.get("final_label_seed") or parse_result.extra_label
-        parse_result = parse_result._replace(extra_label=_compose_indexed_extra_label(prefix, int(assigned_index), seed))
-        if parse_result.extra_category in {"special", "oped"}:
-            parse_result = parse_result._replace(episode=int(assigned_index))
-        assigned_by_allocator = True
-    else:
-        before_label = parse_result.extra_label
-        parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime)
-        remapped = bool(before_label and parse_result.extra_label and before_label != parse_result.extra_label)
 
     if media_type == "tv" and parse_result.extra_category is None and _is_missing_or_invalid_episode(parse_result.episode):
         parse_result = parse_result._replace(episode=None)
@@ -1304,147 +1291,93 @@ def _process_file(
         if offset is not None and parse_result.episode is not None and parse_result.extra_category is None:
             adjusted = parse_result.episode - int(offset)
             parse_result = parse_result._replace(episode=max(1, adjusted))
-        parse_result = _apply_readable_suffix_for_unnumbered_extra(parse_result, src_path, dir_runtime)
-    if media_type == "tv":
-        dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
-    else:
-        dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
-
-    # 新增：通用冲突补强，主视频和特典都先走一次
-    source_diff_tags = _extract_distinguish_source_tags(src_path.stem)
-    merged_tags_once: list[str] = []
-    dropped_diffs_once: list[str] = []
-    used_conflict_enrichment = False
-
-    def _recalc_target() -> None:
-        nonlocal dst_path
-        if media_type == "tv":
-            dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
-        else:
-            dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
-
-    conflict_now = dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path))
-    if conflict_now and source_diff_tags:
-        new_label, merged_tags, dropped_diffs = _merge_distinguish_tags_into_label(
-            parse_result.extra_label, source_diff_tags
-        )
-        if merged_tags and new_label and new_label != parse_result.extra_label:
-            parse_result = parse_result._replace(extra_label=new_label)
-            _recalc_target()
-            merged_tags_once = merged_tags
-            dropped_diffs_once = dropped_diffs
-            used_conflict_enrichment = True
-
-    if parse_result.extra_category is None:
-        # 主视频冲突补强循环：通过合并源标签来解决冲突
-        attempts = 0
-        used_conflict_enrichment = False
-        main_video_conflict_enriched = False
-        while attempts < 2:
-            conflict = dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path))
-            if not conflict:
-                break
-            if not used_conflict_enrichment and source_diff_tags:
-                new_label, merged_tags, dropped_diffs = _merge_distinguish_tags_into_label(parse_result.extra_label, source_diff_tags)
-                if merged_tags and new_label and new_label != parse_result.extra_label:
-                    parse_result = parse_result._replace(extra_label=new_label)
-                    _recalc_target()
-                    if merged_tags:
-                        append_log(
-                            "INFO: main video target-name conflict enriched: %s | merged_tags=%s"
-                            % (src_path.name, ",".join(merged_tags))
-                        )
-                        main_video_conflict_enriched = True
-                    used_conflict_enrichment = True
-                    attempts += 1
-                    continue
-                used_conflict_enrichment = True
-            # 主视频无法进一步补强，转待办
+        parse_result = resolver_apply_readable_suffix_for_unnumbered_extra(parse_result, src_path, dir_runtime)
+    decision = resolve_final_target(
+        src_path=src_path,
+        parse_result=parse_result,
+        media_type=media_type,
+        target_root=target_root,
+        tmdb_id=tmdb_id,
+        ext=ext,
+        seen_targets=seen_targets,
+        dir_runtime=dir_runtime,
+        assignments=assignments,
+        item_map=item_map,
+        is_attachment=is_attachment,
+    )
+    if decision.status == "pending":
+        if decision.reason == "main video target conflict unresolved":
             append_log(f"WARNING: 主视频目标冲突已转待办: {src_path.name}")
-            _record_unhandled_item(
-                original_path=src_path,
-                reason="main video target conflict unresolved",
-                file_type="video",
-                sync_group_id=sync_group_id,
-                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                season=parse_result.season,
-                episode=parse_result.episode,
-                extra_category=parse_result.extra_category,
-                suggested_target=dst_path,
-            )
-            context["_has_issues"] = True
-            return
-
-    elif parse_result.extra_category in {"special", "oped"} | EXTRAS_CATEGORIES:
-        attempts = 0
-        merged_tags_once: list[str] = []
-        dropped_diffs_once: list[str] = []
-        used_conflict_enrichment = False
-        while True:
-            conflict = False
-            if dst_path in seen_targets:
-                conflict = True
-            elif dst_path.exists() and not is_same_inode(src_path, dst_path):
-                conflict = True
-            if not conflict:
-                break
-            if (not used_conflict_enrichment) and source_diff_tags:
-                new_label, merged_tags, dropped_diffs = _merge_distinguish_tags_into_label(parse_result.extra_label, source_diff_tags)
-                if merged_tags and new_label and new_label != parse_result.extra_label:
-                    parse_result = parse_result._replace(extra_label=new_label)
-                    if media_type == "tv":
-                        dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
-                    else:
-                        dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
-                    merged_tags_once = merged_tags
-                    dropped_diffs_once = dropped_diffs
-                    used_conflict_enrichment = True
-                    continue
-                if dropped_diffs and not dropped_diffs_once:
-                    dropped_diffs_once = dropped_diffs
-                used_conflict_enrichment = True
-            if assigned_by_allocator:
-                break
-            remapped = True
-            parse_result = _apply_special_indexing(parse_result, src_path, dir_runtime, force_next=True)
-            if media_type == "tv":
-                dst_path = compute_tv_target_path(target_root, parse_result, tmdb_id, ext, src_filename=src_path.name)
-            else:
-                dst_path = compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
-            attempts += 1
-            if attempts > 50:
-                if extra_context:
-                    append_log(
-                        "WARNING: 特典目标冲突，已跳过: %s%s"
-                        % (
-                            src_path.name,
-                            _format_conflict_diff_suffix(merged_tags_once, dropped_diffs_once),
-                        )
-                    )
-                    _record_unhandled_item(
-                        original_path=src_path,
-                        reason="extra target conflict after remap attempts",
-                        file_type="special" if parse_result.extra_category in {"special", "oped"} else "extra",
-                        sync_group_id=sync_group_id,
-                        tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                        season=parse_result.season,
-                        episode=parse_result.episode,
-                        extra_category=parse_result.extra_category,
-                        suggested_target=dst_path,
-                    )
-                    if dir_runtime is not None:
-                        dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
-                    return
-                raise DirectoryProcessError(f"多个源文件映射到同一目标: {src_path.name}")
-        if used_conflict_enrichment and (merged_tags_once or dropped_diffs_once):
+        else:
+            append_log(f"WARNING: Pending: {src_path.name} | reason: {decision.reason}")
+        _record_unhandled_item(
+            original_path=src_path,
+            reason=decision.reason or "target occupied by other source",
+            file_type=decision.file_type or "video",
+            sync_group_id=sync_group_id,
+            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+            season=decision.parse_result.season,
+            episode=decision.parse_result.episode,
+            extra_category=decision.parse_result.extra_category,
+            suggested_target=decision.dst_path,
+        )
+        context["_has_issues"] = True
+        return
+    if decision.status == "skip":
+        if decision.reason and decision.reason.startswith("attachment"):
             append_log(
-                "INFO: target-name conflict enriched: %s%s"
+                "WARNING: 附件跟随目标冲突已跳过: %s -> %s%s"
                 % (
                     src_path.name,
-                    _format_conflict_diff_suffix(merged_tags_once, dropped_diffs_once),
+                    decision.dst_path,
+                    _format_conflict_diff_suffix(decision.merged_tags, decision.dropped_tags),
                 )
             )
+        else:
+            append_log(
+                "WARNING: 特典目标冲突，已跳过: %s%s"
+                % (
+                    src_path.name,
+                    _format_conflict_diff_suffix(decision.merged_tags, decision.dropped_tags),
+                )
+            )
+        _record_unhandled_item(
+            original_path=src_path,
+            reason=decision.reason or "extra target conflict after remap attempts",
+            file_type=decision.file_type or ("attachment" if is_attachment else "extra"),
+            sync_group_id=sync_group_id,
+            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+            season=decision.parse_result.season,
+            episode=decision.parse_result.episode,
+            extra_category=decision.parse_result.extra_category,
+            suggested_target=decision.dst_path,
+        )
+        if dir_runtime is not None:
+            dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+        return
+
+    parse_result = decision.parse_result
+    dst_path = decision.dst_path
+    remapped = decision.remapped
+    assigned_by_allocator = decision.assigned_by_allocator
+    item = decision.item
+    original_special_label = decision.original_special_label
+    if decision.used_conflict_enrichment and (decision.merged_tags or decision.dropped_tags):
+        append_log(
+            "INFO: target-name conflict enriched: %s%s"
+            % (
+                src_path.name,
+                _format_conflict_diff_suffix(decision.merged_tags, decision.dropped_tags),
+            )
+        )
+    if parse_result.extra_category in ALL_EXTRA_LIKE_CATEGORIES:
         _log_special_resolution(src_path, parse_result, original_special_label, remapped)
+    content_info = classify_content_type(parse_result, is_attachment)
+    file_type_for_result = (
+        "attachment"
+        if content_info.content_type == "ATTACHMENT"
+        else ("special" if content_info.content_type == "SPECIAL" else ("extra" if content_info.content_type == "EXTRA" else "video"))
+    )
 
     if assigned_by_allocator and item:
         item["suggested_target"] = str(dst_path)
@@ -1453,33 +1386,6 @@ def _process_file(
         pending_cfg = {
             "max_auto_remap_attempts": getattr(settings, "max_auto_remap_attempts", 3),
         }
-        if dst_path.exists():
-            existing_rec = (
-                db.query(MediaRecord)
-                .filter(MediaRecord.target_path == str(dst_path))
-                .order_by(MediaRecord.id.desc())
-                .first()
-            )
-            if existing_rec and existing_rec.original_path:
-                item["owner_dir"] = str(Path(existing_rec.original_path).parent)
-        if dst_path in seen_targets:
-            if pending_path:
-                mark_pending(item, "batch target conflict", pending_path)
-            append_log(f"WARNING: Pending: {src_path.name} | reason: batch target conflict")
-            _record_unhandled_item(
-                original_path=src_path,
-                reason="batch target conflict",
-                file_type="attachment" if is_attachment else ("special" if parse_result.extra_category in {"special", "oped"} else "extra"),
-                sync_group_id=sync_group_id,
-                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                season=parse_result.season,
-                episode=parse_result.episode,
-                extra_category=parse_result.extra_category,
-                suggested_target=dst_path,
-            )
-            dir_runtime["pending_count"] = int(dir_runtime.get("pending_count") or 0) + 1
-            context["_has_issues"] = True
-            return
         fallback, reason = should_fallback_to_pending(item, dst_path, {}, pending_cfg)
         if fallback:
             if pending_path:
@@ -1488,7 +1394,7 @@ def _process_file(
             _record_unhandled_item(
                 original_path=src_path,
                 reason=reason,
-                file_type="attachment" if is_attachment else ("special" if parse_result.extra_category in {"special", "oped"} else "extra"),
+                file_type=file_type_for_result,
                 sync_group_id=sync_group_id,
                 tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
                 season=parse_result.season,
@@ -1499,42 +1405,6 @@ def _process_file(
             dir_runtime["pending_count"] = int(dir_runtime.get("pending_count") or 0) + 1
             context["_has_issues"] = True
             return
-
-    if extra_context:
-        prev = seen_targets.get(dst_path)
-        if prev is not None and prev != src_path:
-            append_log(f"WARNING: 特典目标重复冲突，已跳过: {src_path.name}")
-            _record_unhandled_item(
-                original_path=src_path,
-                reason="extra target duplicated in current batch",
-                file_type="special" if parse_result.extra_category in {"special", "oped"} else ("attachment" if is_attachment else "extra"),
-                sync_group_id=sync_group_id,
-                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                season=parse_result.season,
-                episode=parse_result.episode,
-                extra_category=parse_result.extra_category,
-                suggested_target=dst_path,
-            )
-            if dir_runtime is not None:
-                dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
-            return
-        if dst_path.exists() and not is_same_inode(src_path, dst_path):
-            append_log(f"WARNING: 特典目标被占用，已跳过: {src_path.name}")
-            _record_unhandled_item(
-                original_path=src_path,
-                reason="extra target occupied",
-                file_type="special" if parse_result.extra_category in {"special", "oped"} else ("attachment" if is_attachment else "extra"),
-                sync_group_id=sync_group_id,
-                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                season=parse_result.season,
-                episode=parse_result.episode,
-                extra_category=parse_result.extra_category,
-                suggested_target=dst_path,
-            )
-            if dir_runtime is not None:
-                dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
-            return
-    _deduplicate_target_or_raise(seen_targets, src_path, dst_path)
 
     should_scrape = (not is_attachment) and _should_scrape_for_target(media_type, dst_path, parse_result)
     try:
@@ -1554,7 +1424,7 @@ def _process_file(
             _record_unhandled_item(
                 original_path=src_path,
                 reason="extra transactional output conflict",
-                file_type="special" if parse_result.extra_category in {"special", "oped"} else ("attachment" if is_attachment else "extra"),
+                file_type=file_type_for_result,
                 sync_group_id=sync_group_id,
                 tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
                 season=parse_result.season,
@@ -1669,8 +1539,10 @@ def _register_video_anchor(
     by_parent_ep = dir_runtime.setdefault("video_anchor_by_parent_episode", {})
     by_parent_stem = dir_runtime.setdefault("video_anchor_by_parent_stem", {})
     by_parent_special = dir_runtime.setdefault("video_anchor_by_parent_special", {})
+    by_parent_special_prefix = dir_runtime.setdefault("video_anchor_by_parent_special_prefix", {})
     by_parent_recent = dir_runtime.setdefault("video_anchor_recent_by_parent", {})
     special_by_raw = dir_runtime.setdefault("special_target_by_raw_label", {})
+    special_by_raw_multi = dir_runtime.setdefault("special_targets_by_raw_label_multi", {})
     special_by_fine = dir_runtime.setdefault("special_target_by_fine_label", {})
     parent_key = str(src_path.parent)
     by_parent[parent_key] = dst_path
@@ -1680,6 +1552,10 @@ def _register_video_anchor(
         bucket = by_parent_special.setdefault(special_key, [])
         if dst_path not in bucket:
             bucket.append(dst_path)
+    if parse_result.extra_category in SPECIAL_CATEGORIES:
+        prefix = _special_label_prefix(parse_result.extra_category, parse_result.extra_label or raw_label)
+        if prefix:
+            by_parent_special_prefix[(parent_key, parse_result.extra_category, prefix.upper())] = dst_path
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
         by_parent_ep[(parent_key, int(ep_key))] = dst_path
@@ -1688,6 +1564,9 @@ def _register_video_anchor(
         by_parent_stem[(parent_key, stem_key)] = dst_path
     raw_key = _build_special_raw_label_key(parent_key, raw_label)
     if raw_key is not None:
+        multi_bucket = special_by_raw_multi.setdefault(raw_key, [])
+        if dst_path not in multi_bucket:
+            multi_bucket.append(dst_path)
         existing = special_by_raw.get(raw_key)
         if existing is None:
             special_by_raw[raw_key] = dst_path
@@ -1705,103 +1584,6 @@ def _register_video_anchor(
             special_by_fine[fine_key] = dst_path
         elif existing_fine != dst_path:
             special_by_fine[fine_key] = None
-
-
-def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> Path | None:
-    if dir_runtime is None:
-        return None
-    by_parent = dir_runtime.get("video_anchor_by_parent", {})
-    by_parent_ep = dir_runtime.get("video_anchor_by_parent_episode", {})
-    by_parent_stem = dir_runtime.get("video_anchor_by_parent_stem", {})
-    by_parent_special = dir_runtime.get("video_anchor_by_parent_special", {})
-    by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
-    special_by_raw = dir_runtime.get("special_target_by_raw_label", {})
-    special_by_fine = dir_runtime.get("special_target_by_fine_label", {})
-    parent_key = str(src_path.parent)
-
-    raw_key = _build_special_raw_label_key(parent_key, parse_result.extra_label)
-    if raw_key is not None:
-        raw_target = special_by_raw.get(raw_key, "__missing__")
-        if raw_target is None:
-            merged_tags = _extract_distinguish_source_tags(src_path.stem)
-            append_log(
-                "WARNING: special attachment raw-label conflict: %s -> %s%s"
-                % (
-                    src_path.name,
-                    parse_result.extra_label,
-                    _format_conflict_diff_suffix(merged_tags=merged_tags),
-                )
-            )
-            fine_key = _build_special_fine_label_key(
-                parent_key,
-                raw_label=parse_result.extra_label,
-                source_text=src_path.stem,
-                category=parse_result.extra_category,
-            )
-            if fine_key is not None:
-                fine_target = special_by_fine.get(fine_key, "__missing__")
-                if fine_target not in {"__missing__", None}:
-                    return fine_target
-            return None
-        if raw_target != "__missing__":
-            return raw_target
-    fine_key = _build_special_fine_label_key(
-        parent_key,
-        raw_label=parse_result.extra_label,
-        source_text=src_path.stem,
-        category=parse_result.extra_category,
-    )
-    if fine_key is not None:
-        fine_target = special_by_fine.get(fine_key, "__missing__")
-        if fine_target is None:
-            merged_tags = _extract_distinguish_source_tags(src_path.stem)
-            append_log(
-                "WARNING: special attachment fine-label conflict: %s -> %s%s"
-                % (
-                    src_path.name,
-                    parse_result.extra_label,
-                    _format_conflict_diff_suffix(merged_tags=merged_tags),
-                )
-            )
-            return None
-        if fine_target != "__missing__":
-            return fine_target
-    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
-        # For special attachments, raw_label -> final_target mapping is mandatory.
-        # Never fallback to coarse anchors when raw label has no unique match.
-        return None
-
-    special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
-    if special_key is not None:
-        candidates = list(by_parent_special.get(special_key) or [])
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            append_log(f"WARNING: special attachment anchor conflict: {src_path.name} -> {len(candidates)} candidates")
-            return None
-
-    ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
-    if ep_key is not None:
-        candidate = by_parent_ep.get((parent_key, int(ep_key)))
-        if candidate:
-            return candidate
-    stem_key = _normalize_media_stem(src_path.stem)
-    if stem_key:
-        candidate = by_parent_stem.get((parent_key, stem_key))
-        if candidate:
-            return candidate
-    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
-        return None
-    recent = by_parent_recent.get(parent_key)
-    if recent:
-        return recent
-    return by_parent.get(parent_key)
-
-
-def _build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseResult, ext: str) -> Path:
-    base = anchor_dst.stem
-    lang = parse_result.subtitle_lang or ""
-    return anchor_dst.with_name(f"{base}{lang}{ext}")
 
 
 def _build_special_raw_label_key(parent_key: str, raw_label: str | None) -> tuple[str, str] | None:
@@ -1993,19 +1775,6 @@ def _rollback_operations(op_log: OperationLog) -> None:
                 d.rmdir()
         except OSError:
             pass
-
-
-def _deduplicate_target_or_raise(
-    seen_targets: dict[Path, Path],
-    src_path: Path,
-    dst_path: Path,
-) -> None:
-    prev = seen_targets.get(dst_path)
-    if prev is None:
-        seen_targets[dst_path] = src_path
-        return
-    if prev != src_path:
-        raise DirectoryProcessError(f"多个源文件映射到同一目标: {prev.name} / {src_path.name}")
 
 
 def _should_scrape_for_target(media_type: str, dst_path: Path, parse_result: ParseResult) -> bool:
@@ -2523,15 +2292,15 @@ def _is_ignored_name(name: str) -> bool:
 
 def _normalize_media_stem(stem: str) -> str:
     s = str(stem or "")
-    s = re.sub(r"\[[^\]]*\]", " ", s)
-    s = re.sub(r"\([^\)]*\)", " ", s)
-    s = re.sub(r"\{[^\}]*\}", " ", s)
+    s = re.sub(r"[\[\]\(\)\{\}]", " ", s)
+    s = s.replace("_", " ").replace(".", " ")
     s = re.sub(r"\b(?:2160p|1080p|720p|480p|4k)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:x264|x265|h264|h265|hevc|av1|hi10p|ma10p)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:flac|aac|ac3|dts|ddp\d?\.\d?)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:webrip|web-dl|bdrip|bluray|remux)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:chs|cht|sc|tc|gb|big5|jpn|jp|ja|eng|en|zh[-_ ]?(?:cn|tw))\b", " ", s, flags=re.I)
-    s = re.sub(r"\s+", " ", s.replace("_", " ").replace(".", " ")).strip()
+    s = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", s, flags=re.U)
+    s = re.sub(r"\s+", " ", s).strip()
     return s.lower()
 
 
@@ -2619,8 +2388,15 @@ def _special_label_prefix(category: str | None, label: str | None) -> str:
                 return "ED" if token == "NCED" else ("OP" if token == "NCOP" else token)
         return "OP"
     if category == "special":
+        upper = label.upper()
+        if upper.startswith("OVA"):
+            return "OVA"
+        if upper.startswith("OAD"):
+            return "OAD"
+        if upper.startswith("SP") or upper.startswith("SPECIAL"):
+            return "SP"
         for token in ("OVA", "OAD", "SP", "SPECIAL"):
-            if re.search(rf"\b{token}\b", label, re.I):
+            if re.search(rf"\b{token}\s*0*\d{{0,3}}\b", label, re.I):
                 return "SP" if token == "SPECIAL" else token
         return "SP"
     if category == "pv":
@@ -2698,7 +2474,7 @@ def _build_allocation_items(
                 parse_result = parse_result._replace(
                     extra_category=forced_category,
                     extra_label=forced_label,
-                    is_special=forced_category in {"special", "oped"},
+                    is_special=forced_category in SPECIAL_CATEGORIES,
                 )
             elif strong_special_ctx and ext in VIDEO_EXTS:
                 fallback_label = extract_strong_extra_fallback_label(src_path.name)
@@ -2729,7 +2505,7 @@ def _build_allocation_items(
         prefix = _resolve_prefix_for_parse(parse_result)
         if not prefix:
             continue
-        if parse_result.extra_category not in {"special", "oped"} | EXTRAS_CATEGORIES:
+        if parse_result.extra_category not in ALL_EXTRA_LIKE_CATEGORIES:
             continue
         preferred = _preferred_index_for_extra(parse_result)
         item = {
@@ -2740,7 +2516,7 @@ def _build_allocation_items(
             "season_key": parse_result.season if media_type == "tv" else None,
             "episode": parse_result.episode,
             "extra_category": parse_result.extra_category,
-            "file_type": "attachment" if ext in ATTACHMENT_EXTS else ("special" if parse_result.extra_category in {"special", "oped"} else "extra"),
+            "file_type": "attachment" if ext in ATTACHMENT_EXTS else ("special" if parse_result.extra_category in SPECIAL_CATEGORIES else "extra"),
             "prefix": prefix,
             "preferred": preferred,
             "final_label_seed": parse_result.extra_label,
@@ -2901,7 +2677,7 @@ def _format_conflict_diff_suffix(merged_tags: list[str] | None = None, dropped_d
 
 
 def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) -> ParseResult:
-    if parse_result.extra_category not in {"special", "oped"} | EXTRAS_CATEGORIES:
+    if parse_result.extra_category not in ALL_EXTRA_LIKE_CATEGORIES:
         return parse_result
     variant = _extract_parallel_variant_suffix(src_path.stem)
     if not variant:
@@ -2915,7 +2691,7 @@ def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) ->
 
 
 def _needs_readable_suffix(parse_result: ParseResult) -> bool:
-    if parse_result.extra_category not in {"special", "oped"} | EXTRAS_CATEGORIES:
+    if parse_result.extra_category not in ALL_EXTRA_LIKE_CATEGORIES:
         return False
     stable_idx = _extract_stable_label_index(parse_result.extra_label)
     if stable_idx is not None:
@@ -2999,7 +2775,7 @@ def _apply_readable_suffix_for_unnumbered_extra(
 ) -> ParseResult:
     if not _needs_readable_suffix(parse_result):
         return parse_result
-    if parse_result.extra_category in {"special", "oped"}:
+    if parse_result.extra_category in SPECIAL_CATEGORIES:
         parse_result = _assign_sequential_episode_for_unnumbered(parse_result, src_path, dir_runtime)
     suffix = _build_readable_suffix(src_path, parse_result)
     if not suffix:
@@ -3036,7 +2812,7 @@ def _apply_special_indexing(
     if dir_runtime is None:
         return parse_result
     category = parse_result.extra_category
-    if category not in {"special", "oped"} | EXTRAS_CATEGORIES:
+    if category not in ALL_EXTRA_LIKE_CATEGORIES:
         return parse_result
 
     label = parse_result.extra_label or ""
@@ -3062,7 +2838,7 @@ def _apply_special_indexing(
     if version_suffix and version_suffix.lower() not in new_label.lower():
         new_label = f"{new_label} {version_suffix}"
     updated = parse_result._replace(extra_label=new_label)
-    if category in {"special", "oped"}:
+    if category in SPECIAL_CATEGORIES:
         updated = updated._replace(episode=idx)
     return updated
 
@@ -3081,6 +2857,28 @@ def _extract_preserved_extra_suffix(label: str | None, prefix: str) -> str:
         return ""
     s = re.sub(rf"^\s*{re.escape(prefix)}\s*0*\d{{1,3}}\b", "", s, flags=re.I)
     s = re.sub(rf"^\s*{re.escape(prefix)}\b", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" -_")
+    return s
+
+
+def _sanitize_special_log_label(label: str | None) -> str:
+    s = re.sub(r"\s+", " ", str(label or "")).strip(" -_")
+    if not s:
+        return ""
+    patterns = [
+        r"\bnekomoe(?:\s+kissaten)?\b",
+        r"\bvcb(?:\s*-\s*studio|\s+studio)?\b",
+        r"\bmawen\d*\b",
+        r"\bmysilu\b",
+        r"\bairota\b",
+        r"\bdmhy\b",
+        r"\b(?:fansub|raws?|sub)\b",
+        r"(?:字幕组|字幕社|压制组|搬运组)",
+        r"\b(?:nc|on\s*air)\s*ver\.?\b",
+    ]
+    for pattern in patterns:
+        s = re.sub(pattern, " ", s, flags=re.I)
+    s = re.sub(r"\s*[&/|+]+\s*", " ", s)
     s = re.sub(r"\s+", " ", s).strip(" -_")
     return s
 
@@ -3109,8 +2907,11 @@ def _log_special_classification(category: str | None, label: str | None) -> None
             display = "OP"
         elif upper.startswith("ED"):
             display = "ED"
-    if label:
-        append_log(f"Special 识别: {label} -> {display}")
+    clean_label = _sanitize_special_log_label(label)
+    if clean_label:
+        append_log(f"Special 识别: {clean_label} -> {display}")
+    elif label:
+        append_log(f"Special 识别: {display} -> {display}")
     else:
         append_log(f"Special 分类: {display}")
 
@@ -3124,8 +2925,8 @@ def _log_special_resolution(
     category = parse_result.extra_category
     if category is None:
         return
-    final_label = parse_result.extra_label or "-"
-    raw = raw_label or "-"
+    final_label = _sanitize_special_log_label(parse_result.extra_label) or "-"
+    raw = _sanitize_special_log_label(raw_label) or "-"
     index_text = str(parse_result.episode) if parse_result.episode is not None else "-"
     append_log(
         "INFO: special resolved: file=%s, raw_label=%s, category=%s, final_label=%s, index=%s, remap=%s"
@@ -3134,7 +2935,7 @@ def _log_special_resolution(
 
 
 def _normalized_episode_key(parse_result: ParseResult, src_path: Path, filename: str) -> int | None:
-    if parse_result.extra_category in {"special", "oped"}:
+    if parse_result.extra_category in SPECIAL_CATEGORIES:
         season = parse_result.season or _extract_season_from_path(src_path) or 1
         index = parse_result.episode
         if index is None:
