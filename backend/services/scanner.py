@@ -234,10 +234,10 @@ def _start_media_worker() -> None:
             try:
                 fcntl.flock(_WORKER_LOCK_FD.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                append_log("WARNING: Worker lock is held by another process; continuing with local queue worker.")
+                append_log("WARNING: Worker 进程锁被其他进程持有，继续使用本地队列 Worker。")
         _WORKER_THREAD = Thread(target=_media_task_worker, daemon=True)
         _WORKER_THREAD.start()
-        append_log("INFO: Media worker started")
+        append_log("INFO: 媒体处理 Worker 已启动")
 
 
 def _stop_media_worker() -> None:
@@ -250,7 +250,7 @@ def _stop_media_worker() -> None:
         # 优雅退出：最多等待 3 秒，避免阻塞退出流程
         _WORKER_THREAD.join(timeout=3.0)
         if _WORKER_THREAD.is_alive():
-            append_log("WARNING: Media worker did not exit in time; continuing shutdown")
+            append_log("WARNING: 媒体 Worker 未及时退出，继续关闭")
         _WORKER_THREAD = None
         if _WORKER_LOCK_FD is not None:
             try:
@@ -271,7 +271,7 @@ def _media_task_worker() -> None:
         token = None
         if task.task_id:
             token = current_task_id.set(task.task_id)
-        append_log(f"INFO: MediaTask start: {task.path}")
+        append_log(f"INFO: 媒体任务开始: {task.path}")
         retries = 0
         recompute_retry_used = False
         while True:
@@ -279,7 +279,7 @@ def _media_task_worker() -> None:
             try:
                 _handle_media_task(local_db, task, force_recompute_names=recompute_retry_used)
                 local_db.commit()
-                append_log(f"INFO: MediaTask done: {task.path}")
+                append_log(f"INFO: 媒体任务完成: {task.path}")
                 break
             except Exception as e:
                 local_db.rollback()
@@ -903,10 +903,10 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         with lock_ctx:
             # 批量预扫描 + 批量分配：消除 N×M 重排
             existing_cache = scan_existing_special_indices(target_root, context.get("tmdb_id"))
-            append_log(f"INFO: scan existing specials: {existing_cache}")
+            append_log(f"INFO: 扫描已有特典索引: {existing_cache}")
             all_files = video_files + attachment_files
             if force_recompute_names:
-                append_log("INFO: recompute mode enabled: skip allocator assignments and recalculate target names")
+                append_log("INFO: 重算模式已启用：跳过分配器分配并重新计算目标文件名")
                 items, item_map, assignments = [], {}, {}
             else:
                 items, item_map = _build_allocation_items(all_files, context, target_type)
@@ -1232,7 +1232,7 @@ def _process_file(
             append_log(f"INFO: 附件跟随正片: {src_path.name} -> {dst_path}")
             return
         if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
-            append_log(f"WARNING: special attachment unmatched, skipped: {src_path.name}")
+            append_log(f"WARNING: 特典附件未能匹配任何视频，已跳过: {src_path.name}")
             dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
             reason = "special attachment raw-label unmatched"
             raw_key = _build_special_raw_label_key(str(src_path.parent), parse_result.extra_label)
@@ -1379,7 +1379,7 @@ def _process_file(
             )
             append_log(f"WARNING: 主视频目标冲突已转待办: {src_path.name} | 原因: {decision.reason}")
         else:
-            append_log(f"WARNING: Pending: {src_path.name} | reason: {decision.reason}")
+            append_log(f"WARNING: 转待办: {src_path.name} | 原因: {decision.reason}")
         _record_unhandled_item(
             original_path=src_path,
             reason=decision.reason or "target occupied by other source",
@@ -1460,7 +1460,7 @@ def _process_file(
         if fallback:
             if pending_path:
                 mark_pending(item, reason, pending_path)
-            append_log(f"WARNING: Pending: {src_path.name} | reason: {reason}")
+            append_log(f"WARNING: 转待办: {src_path.name} | 原因: {reason}")
             _record_unhandled_item(
                 original_path=src_path,
                 reason=reason,
@@ -2203,7 +2203,7 @@ def _upsert_dir_state(
             db.execute(stmt)
             return
         except OperationalError:
-            # Legacy DB may miss unique constraint; fallback to manual upsert.
+            # 旧版数据库可能缺少唯一约束，降级为手动 upsert
             pass
 
     state = db.query(DirectoryState).filter(
@@ -2239,11 +2239,11 @@ def _commit_with_retry(db: Session, add_record: object | None = None) -> None:
             return
         except OperationalError as e:
             db.rollback()
-            append_log(f"WARNING: DB write retry {attempt}: {e}")
+            append_log(f"WARNING: 数据库写入重试第 {attempt} 次: {e}")
             time.sleep(delay)
         except IntegrityError as e:
             db.rollback()
-            append_log(f"WARNING: DB write retry {attempt}: {e}")
+            append_log(f"WARNING: 数据库写入重试第 {attempt} 次: {e}")
             time.sleep(delay)
     db.commit()
 
@@ -2394,8 +2394,7 @@ class _ShowLock:
     def __enter__(self):
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.lock_path.open("a+")
-        # 注意：文件锁只对单机多进程有效，分布式需集中锁/单写服务
-        # Single-host advisory lock only. Use centralized locks for multi-host deployments.
+        # 注意：文件锁只对单机多进程有效，分布式需使用集中锁或单写服务
         fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
         return self
 
@@ -2904,7 +2903,7 @@ def _apply_special_indexing(
         while next_idx in used:
             next_idx += 1
         if force_next:
-            append_log(f"INFO: Special remap: {prefix}{next_idx:02d} for {src_path.name}")
+            append_log(f"INFO: 特典重映射: {prefix}{next_idx:02d} ← {src_path.name}")
         idx = next_idx
 
     used.add(idx)
@@ -3064,7 +3063,7 @@ def _resolve_chinese_title_by_tmdb(
             cn = _fetch_tmdb_localized_title(client, url, media_type, "zh-CN")
             tw = _fetch_tmdb_localized_title(client, url, media_type, "zh-TW")
         chosen, lang = _pick_display_title(cn, tw, fallback_title)
-        append_log(f"INFO: tmdb title resolved: lang={lang}, title={chosen or ''}")
+        append_log(f"INFO: TMDB 标题已解析: 语言={lang}, 标题={chosen or ''}")
         if chosen:
             return chosen
         return None if strict else fallback_title
@@ -3172,7 +3171,7 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         chosen = 1
     if chosen and valid_seasons and chosen not in valid_seasons:
         append_log(
-            f"INFO: chosen season {chosen} not found in TMDB seasons for candidate tmdbid {tmdb_id} - re-search attempted"
+            f"INFO: 季号 {chosen} 在 TMDB 候选 tmdbid={tmdb_id} 中不存在，尝试重新搜索"
         )
         reliable_hint = season_from_path is not None or season_hint_confidence == "high"
         # K-ON!! 类情形：季号仅来自标题 !! 符号，属于弱提示，不触发 re-search
@@ -3186,12 +3185,12 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
                     f"INFO: season_hint={season_hint} 来自标题 !! 轻提示，降为不可信，不触发 re-search"
                 )
         if not reliable_hint:
-            append_log("INFO: season hint appears weak/title-number-like, skip re-search and fallback to default season")
+            append_log("INFO: 季号提示较弱或疑似标题数字，跳过重新搜索并回退到默认季号")
             chosen = None
         elif season_aware_done and season_aware_had_candidates:
             return False, f"季号不匹配 TMDB: season_hint={chosen}, already checked in recognition"
         elif season_aware_done and not season_aware_had_candidates:
-            append_log("INFO: recognition season-aware had no candidates, allow one re-search in stabilize")
+            append_log("INFO: 识别阶段季号感知无候选结果，允许在稳定阶段再次搜索")
         if chosen is None:
             resolved = resolve_season_by_tmdb(None, int(tmdb_id), chosen, final_hint=is_final)
             if resolved is None:
@@ -3213,7 +3212,7 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         context["season_aware_had_candidates"] = had_candidates
         context["season_aware_tried_queries"] = tried_queries
         if tried_queries:
-            append_log(f"INFO: re-search tried: {tried_queries}")
+            append_log(f"INFO: 已尝试重新搜索的查询: {tried_queries}")
         if best and best.tmdb_id and int(best.tmdb_id) != int(tmdb_id):
             context["tmdb_id"] = int(best.tmdb_id)
             context["tmdb_data"] = _get_tmdb_item_by_id("tv", best.tmdb_id) or best.tmdb_data

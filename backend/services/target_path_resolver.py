@@ -123,7 +123,7 @@ def resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult, 
         if len(candidates) == 1:
             return candidates[0]
         if len(candidates) > 1:
-            append_log(f"WARNING: special attachment anchor conflict: {src_path.name} -> {len(candidates)} candidates")
+            append_log(f"WARNING: 特典附件锨点冲突: {src_path.name} -> {len(candidates)} 个候选")
             return None
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
@@ -176,7 +176,7 @@ def apply_special_indexing(parse_result: ParseResult, src_path: Path, dir_runtim
         while next_idx in used:
             next_idx += 1
         if force_next:
-            append_log(f"INFO: Special remap: {prefix}{next_idx:02d} for {src_path.name}")
+            append_log(f"INFO: 特典重映射: {prefix}{next_idx:02d} ← {src_path.name}")
         idx = next_idx
     used.add(idx)
     new_label = _compose_indexed_extra_label(prefix, idx, label)
@@ -225,7 +225,7 @@ def resolve_final_target(
         prefix = item.get("prefix") or _special_label_prefix(parse_result.extra_category, parse_result.extra_label)
         preferred = item.get("preferred")
         if preferred and int(preferred) != int(assigned_index):
-            append_log(f"INFO: Special remap: {prefix}{int(preferred):02d} -> {prefix}{int(assigned_index):02d} for {src_path.name}")
+            append_log(f"INFO: 特典重映射: {prefix}{int(preferred):02d} → {prefix}{int(assigned_index):02d} ← {src_path.name}")
             remapped = True
         seed = item.get("final_label_seed") or parse_result.extra_label
         parse_result = parse_result._replace(extra_label=_compose_indexed_extra_label(prefix, int(assigned_index), seed))

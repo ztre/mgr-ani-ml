@@ -1,4 +1,4 @@
-"""Recognition parser v3: layered anime regex + TMDB search/caching helpers."""
+"""识别解析器 v3：分层动漫正则匹配 + TMDB 搜索/缓存辅助函数。"""
 from __future__ import annotations
 
 import asyncio
@@ -56,19 +56,19 @@ _TITLE_NUMBER_PROTECTED_PATTERNS = [
 ]
 
 SPECIAL_TYPE_MAP = {
-    # Season 00 pool
+    # 第 00 季池（OP / ED）
     "OP": ("season00", "OP"),
     "NCOP": ("season00", "OP"),
     "ED": ("season00", "ED"),
     "NCED": ("season00", "ED"),
-    # extras pools
+    # 附加内容池（CM / Making / 活动等）
     "CM": ("extras", "CM"),
     "Making": ("extras", "Making"),
     "Event": ("extras", "Event"),
     "Interview": ("extras", "Interview"),
     "Trailer": ("extras", "Trailer"),
     "IV": ("extras", "IV"),
-    # previews
+    # 预告片池
     "PV": ("extras", "PV"),
     "Preview": ("extras", "Preview"),
 }
@@ -107,7 +107,7 @@ _TMDB_CACHE: OrderedDict[tuple, tuple[float, object]] = OrderedDict()
 
 
 def parse_tv_filename(filename: str, structure_hint: str | None = None) -> ParseResult | None:
-    """Layered anime regex parser for TV-oriented extraction."""
+    """分层动漫正则解析器，面向 TV 集号/季号提取。"""
     raw_stem = _stem(filename)
     clean = _preprocess(raw_stem)
     if not clean:
@@ -136,7 +136,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             extra_label = None
             is_special = False
 
-    # Extras only short-circuit when no strong TV episode structure exists.
+    # 仅在无强 TV 集号结构时才提前返回特典分支
     if extra_category is not None and not _has_strong_episode_structure(episode_text):
         season = _extract_explicit_season_hint_for_extra(episode_text) or 1
         episode = _extract_extra_index(extra_label) if extra_category in {"special", "oped"} else None
@@ -157,7 +157,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             False,
         )
 
-    # Pattern A: explicit bracket episode (strongest)
+    # 模式 A：方括号显式集号（最高优先）
     if bracket_episode is not None and bracket_episode > 0:
         season_hint = _extract_season_hint(episode_text)
         title = _cleanup_title(_remove_bracket_episode(raw_stem))
@@ -179,7 +179,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             version_tag,
         )
 
-    # Pattern B: SxxEyy (strong TV)
+    # 模式 B：SxxEyy 格式（强 TV 信号）
     se = se_preview or _extract_season_episode_priority(episode_text)
     if se is not None:
         season, episode, span, kind = se
@@ -209,7 +209,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
                 False,
             )
 
-    # Pattern C: season keyword (strong TV)
+    # 模式 C：Season/S 关键字（强 TV 信号）
     season = _extract_season_keyword(clean)
     if season is not None:
         title = _cleanup_title(_remove_season_tokens(clean))
@@ -229,7 +229,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             False,
         )
 
-    # Pattern D: roman numeral season (TV)
+    # 模式 D：罗马数字季号
     roman_season = _extract_roman_season(clean)
     if roman_season is not None:
         title = _cleanup_title(re.sub(r"\b(?:II|III|IV|V|VI|VII|VIII|IX|X)\b", " ", clean, flags=re.I))
@@ -249,7 +249,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             False,
         )
 
-    # Pattern E: bang season (anime) — weak hint only; scanner resolves final season
+    # 模式 E：叹号季号（!! 动漫）— 弱提示，最终季号由 scanner 决策
     bang_season = _extract_bang_season(clean)
     if bang_season is not None:
         title = _cleanup_title(re.sub(r"!{2,4}\s*$", " ", clean))
@@ -272,7 +272,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             True,
         )
 
-    # Pattern F: word season
+    # 模式 F：英文单词季号（first/second…）
     word_season = _extract_word_season(clean)
     if word_season is not None:
         title = _cleanup_title(re.sub(r"\b(first|second|third|fourth|fifth|sixth)\s+season\b", " ", clean, flags=re.I))
@@ -292,7 +292,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             False,
         )
 
-    # Pattern G: trailing season number
+    # 模式 G：尾部数字季号
     trailing_season = _extract_trailing_season_number(clean, structure_hint=structure_hint or "tv")
     if trailing_season is not None:
         # 尾部季号仅在结构提示为 TV 时启用（避免误判标题数字）
@@ -313,7 +313,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             False,
         )
 
-    # Pattern H: final season (TV)
+    # 模式 H：Final Season 标记
     final_match = re.search(r"\b(?:the\s+)?final\s+season(?:\s+part\s*\d+)?\b", clean, re.I)
     if final_match:
         title = _cleanup_title(_remove_span(clean, final_match.span()))
@@ -334,7 +334,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             True,
         )
 
-    # Pattern I: episode only (weak TV hint)
+    # 模式 I：仅集号（弱 TV 提示）
     episode = _extract_episode_only(clean, _cleanup_title(clean))
     if episode is not None:
         title = _cleanup_title(_remove_episode_tokens(clean))
@@ -355,7 +355,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             False,
         )
 
-    # Fallback
+    # 兜底：返回清理后标题，无集号
     fallback_title = _cleanup_title(clean)
     if not fallback_title:
         return None
@@ -376,7 +376,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
 
 
 def parse_movie_filename(filename: str) -> ParseResult | None:
-    """Movie parser with v3 preprocess and subtitle-pattern preference."""
+    """电影文件名解析器，优先识别副标题分隔符。"""
     raw_stem = _stem(filename)
     clean = _preprocess(raw_stem)
     if not clean:
@@ -388,7 +388,7 @@ def parse_movie_filename(filename: str) -> ParseResult | None:
     extra_category, extra_label, _extra_from_bracket = classify_extra_from_text(raw_stem)
     is_special = extra_category in {"special", "oped"}
 
-    # Movie subtitle pattern: "Title - Subtitle" (when no strong TV token)
+    # 电影副标题模式：「主题 - 副题」（无强 TV 标记时）
     if not _has_strong_tv_token(clean):
         m = re.match(r"^(?P<left>.+?)\s*-\s*(?P<right>.+)$", clean)
         if m:
@@ -427,7 +427,7 @@ def parse_movie_filename(filename: str) -> ParseResult | None:
 
 
 async def search_tmdb_tv_candidates(title: str, year: int | None = None) -> list[dict]:
-    """TMDB TV candidates; year matches are promoted but not exclusive."""
+    """搜索 TMDB TV 候选，年份匹配优先排前但不排他。"""
     results = await _tmdb_search("tv", title)
     if not year:
         return results
@@ -442,7 +442,7 @@ async def search_tmdb_tv_candidates(title: str, year: int | None = None) -> list
 
 
 async def search_tmdb_movie_candidates(title: str, year: int | None = None) -> list[dict]:
-    """TMDB movie candidates; year matches are promoted but not exclusive."""
+    """搜索 TMDB 电影候选，年份匹配优先排前但不排他。"""
     results = await _tmdb_search("movie", title)
     if not year:
         return results
@@ -457,7 +457,7 @@ async def search_tmdb_movie_candidates(title: str, year: int | None = None) -> l
 
 
 async def get_tmdb_tv_details(tv_id: int) -> dict | None:
-    """TMDB TV detail endpoint."""
+    """获取 TMDB TV 详情（季信息等）。"""
     if not settings.tmdb_api_key:
         return None
 
@@ -487,17 +487,17 @@ async def get_tmdb_tv_details(tv_id: int) -> dict | None:
 
 
 def search_tmdb_tv_candidates_sync(title: str, year: int | None = None) -> list[dict]:
-    """Sync wrapper for TMDB TV candidate search."""
+    """TMDB TV 候选搜索的同步封装。"""
     return asyncio.run(search_tmdb_tv_candidates(title, year))
 
 
 def search_tmdb_movie_candidates_sync(title: str, year: int | None = None) -> list[dict]:
-    """Sync wrapper for TMDB movie candidate search."""
+    """TMDB 电影候选搜索的同步封装。"""
     return asyncio.run(search_tmdb_movie_candidates(title, year))
 
 
 def get_tmdb_tv_details_sync(tv_id: int) -> dict | None:
-    """Sync wrapper for TMDB TV detail."""
+    """TMDB TV 详情获取的同步封装。"""
     return asyncio.run(get_tmdb_tv_details(tv_id))
 
 
@@ -660,11 +660,10 @@ def _cleanup_title(text: str) -> str:
 
 
 def extract_bracket_episode(name: str) -> tuple[int | None, str | None]:
-    """Extract explicit bracket episode like [01], [01a], [01β], [13v2].
+    """提取方括号显式集号，如 [01]、[01a]、[01β]、[13v2]。
 
-    Returns (episode, suffix) where suffix is the trailing non-digit tag (e.g. 'a', 'β').
-    Version tags like 'v2' are NOT returned as suffix — call extract_bracket_version_tag()
-    separately to retrieve them.
+    返回 (集号, 后缀)，后缀为字母标记（如 'a'、'β'）。
+    版本标记 'v2' 不作为后缀返回——调用 extract_bracket_version_tag() 单独获取。
     """
     text = str(name or "")
     for m in re.finditer(PATTERNS["bracket_ep"], text):
@@ -675,7 +674,7 @@ def extract_bracket_episode(name: str) -> tuple[int | None, str | None]:
         ep = int(raw_num)
         if ep <= 0:
             return None, suffix or None
-        # v\d+ is a version tag, not an episode suffix
+        # v\d+ 是版本标记，不作为集号后缀
         if suffix and re.match(r"^v\d+$", suffix, re.I):
             return ep, None
         if suffix and not suffix.isdigit():
@@ -685,7 +684,7 @@ def extract_bracket_episode(name: str) -> tuple[int | None, str | None]:
 
 
 def extract_bracket_version_tag(name: str) -> str | None:
-    """Return version tag like 'v2', 'v3' from bracket episode markers like [13v2]."""
+    """从方括号集号标记（如 [13v2]）中提取版本标记 'v2'、'v3'。"""
     text = str(name or "")
     for m in re.finditer(PATTERNS["bracket_ep"], text):
         raw_num = m.group(1)
@@ -698,7 +697,7 @@ def extract_bracket_version_tag(name: str) -> str | None:
 
 
 def extract_bang_season(title: str) -> int | None:
-    """Public wrapper: return bang-season count for titles like K-ON!! (2) or Gintama!!! (3)."""
+    """公开封装：返回标题叹号对应的季号，如 K-ON!!→2，Gintama!!!→3。"""
     return _extract_bang_season(title)
 
 
@@ -707,7 +706,7 @@ def _remove_bracket_episode(text: str) -> str:
 
 
 def is_title_number_safe(cleaned_title: str) -> bool:
-    """Heuristic guard for title numbers like 'Steins;Gate 0', '86', '91 Days', '3-gatsu'."""
+    """启发式保护：标题中的数字（如 'Steins;Gate 0'、'86'、'91 Days'）不被误判为季/集号。"""
     title = re.sub(r"\s+", " ", str(cleaned_title or "")).strip().lower()
     if not title:
         return True
@@ -812,7 +811,7 @@ def _is_nc_ver_skip_file(name: str) -> bool:
     s = str(name or "")
     if re.search(r"\bNCOPED\b", s, re.I):
         return True
-    # NC Ver present but NOT forming NCOP or NCED
+    # 含 NC Ver 但不构成 NCOP 或 NCED 前缀时跳过
     if re.search(r"\bNC\s*Ver\b", s, re.I) and not re.search(r"\bNC(?:OP|ED)\b", s, re.I):
         return True
     return False
@@ -1142,10 +1141,10 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
 
     # 2) OP / ED
     oped_patterns = [
-        # NCED_EP04-05 range format (must be before simple NCED)
+        # NCED_EP04-05 区间格式（必须优先于简单 NCED 模式）
         r"\b(NCED)_EP\s*0?(\d{1,3})-(\d{1,3})\b",
         r"\b(NCOP)_EP\s*0?(\d{1,3})-(\d{1,3})\b",
-        # NCED_EP04 single format
+        # NCED_EP04 单集格式
         r"\b(NCED)_EP\s*0?(\d{1,3})\b",
         r"\b(NCOP)_EP\s*0?(\d{1,3})\b",
         r"\b(NCOP)\s*0?(\d{0,3})\b",
@@ -1163,7 +1162,7 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         if m:
             token = m.group(1)
             upper = token.upper()
-            # Range format: NCED_EP04-05 → ED04-05
+            # 区间格式：NCED_EP04-05 → ED04-05
             if upper in ("NCED", "NCOP") and m.lastindex and m.lastindex >= 3:
                 start_n = m.group(2)
                 end_n = m.group(3)
@@ -1343,7 +1342,7 @@ def _extract_extra_label_fragment(source: str, match: re.Match) -> str | None:
 def _normalize_extra_label(text: str) -> str:
     s = re.sub(r"[_\-]+", " ", str(text or ""))
     s = re.sub(r"\s+", " ", s).strip()
-    # NCED_EP04-05 → ED04-05 / NCOP_EP04-05 → OP04-05 (range, priority before simple NCOP/NCED)
+    # NCED_EP04-05 → ED04-05 / NCOP_EP04-05 → OP04-05（区间格式，优先于简单 NCOP/NCED）
     s = re.sub(
         r"\bNCED_EP\s*0*(\d{1,3})-(\d{1,3})\b",
         lambda m: f"ED{m.group(1).zfill(2)}-{m.group(2)}",
