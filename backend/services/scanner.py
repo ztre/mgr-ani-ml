@@ -31,11 +31,13 @@ from .parser import (
     ParseResult,
     SPECIAL_TYPE_MAP,
     classify_extra_from_text,
+    extract_bang_season,
     extract_strong_extra_fallback_label,
     get_tmdb_tv_details_sync,
     is_title_number_safe,
     parse_movie_filename,
     parse_tv_filename,
+    _is_nc_ver_skip_file,
 )
 from .recognition_flow import (
     LocalParseSnapshot,
@@ -527,6 +529,8 @@ def run_manual_organize(
     processed = 0
     try:
         for src_path in video_files:
+            if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
+                continue
             _process_file(
                 db=db,
                 src_path=src_path,
@@ -539,6 +543,8 @@ def run_manual_organize(
             processed += 1
 
         for src_path in attachment_files:
+            if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
+                continue
             _process_file(
                 db=db,
                 src_path=src_path,
@@ -651,6 +657,8 @@ def reidentify_by_target_dir(
     processed = 0
     try:
         for src_path in video_files:
+            if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
+                continue
             _process_file(
                 db=db,
                 src_path=src_path,
@@ -663,6 +671,8 @@ def reidentify_by_target_dir(
             processed += 1
 
         for src_path in attachment_files:
+            if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
+                continue
             _process_file(
                 db=db,
                 src_path=src_path,
@@ -911,6 +921,8 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             for src_path in video_files:
                 if _is_under_pending_dir(src_path, blocked_dirs):
                     continue
+                if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
+                    continue
                 _process_file(
                     db=db,
                     src_path=src_path,
@@ -923,6 +935,8 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
 
             for src_path in attachment_files:
                 if _is_under_pending_dir(src_path, blocked_dirs):
+                    continue
+                if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
                     continue
                 _process_file(
                     db=db,
@@ -966,6 +980,33 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         return
 
 
+def _rollback_dir_context(
+    conflict_dir: "Path",
+    reason: str,
+    seen_targets: "dict[Path, Path]",
+    dir_runtime: dict,
+) -> None:
+    """目录级回滚：清除该目录在本批次产生的所有 seen_targets 条目及 anchor 缓存。"""
+    rolled = dir_runtime.setdefault("rolled_back_dirs", set())
+    if conflict_dir in rolled:
+        return
+    rolled.add(conflict_dir)
+    parent_key = str(conflict_dir)
+    stale = [dst for dst, src in seen_targets.items() if src.parent == conflict_dir]
+    for dst in stale:
+        del seen_targets[dst]
+    for anchor_key in (
+        "video_anchor_by_parent",
+        "video_anchor_by_parent_episode",
+        "video_anchor_by_parent_stem",
+        "video_anchor_by_parent_special",
+        "video_anchor_by_parent_special_prefix",
+        "video_anchor_recent_by_parent",
+    ):
+        dir_runtime.get(anchor_key, {}).pop(parent_key, None)
+    append_log(f"INFO: 目录级回滚: {conflict_dir.name} | 原因: {reason}")
+
+
 def _process_file(
     db: Session,
     src_path: Path,
@@ -993,6 +1034,17 @@ def _process_file(
         _record_unhandled_item(
             original_path=src_path,
             reason="fractional episode skipped",
+            file_type="video" if ext in VIDEO_EXTS else "attachment",
+            sync_group_id=sync_group_id,
+            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+        )
+        return
+
+    if _is_nc_ver_skip_file(src_path.name):
+        append_log(f"INFO: NC Ver 文件已跳过: {src_path.name}")
+        _record_unhandled_item(
+            original_path=src_path,
+            reason="NC Ver skip",
             file_type="video" if ext in VIDEO_EXTS else "attachment",
             sync_group_id=sync_group_id,
             tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
@@ -1284,7 +1336,11 @@ def _process_file(
         elif not has_explicit and resolved_season:
             season = resolved_season
         else:
-            season = parse_result.season or resolved_season or 1
+            # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
+            if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season:
+                season = resolved_season
+            else:
+                season = parse_result.season or resolved_season or 1
         parse_result = parse_result._replace(season=season)
 
         offset = context.get("episode_offset")
@@ -1292,6 +1348,14 @@ def _process_file(
             adjusted = parse_result.episode - int(offset)
             parse_result = parse_result._replace(episode=max(1, adjusted))
         parse_result = resolver_apply_readable_suffix_for_unnumbered_extra(parse_result, src_path, dir_runtime)
+
+    # Phase 2: 特典继承目录已解析季号（仅当文件无显式季号标记时）
+    if media_type == "tv" and parse_result.extra_category is not None:
+        _resolved_season_for_extra = context.get("resolved_season")
+        if _resolved_season_for_extra and not _has_explicit_season_token(src_path.name):
+            if parse_result.season in (None, 0, 1):
+                parse_result = parse_result._replace(season=_resolved_season_for_extra)
+
     decision = resolve_final_target(
         src_path=src_path,
         parse_result=parse_result,
@@ -1307,7 +1371,13 @@ def _process_file(
     )
     if decision.status == "pending":
         if decision.reason == "main video target conflict unresolved":
-            append_log(f"WARNING: 主视频目标冲突已转待办: {src_path.name}")
+            _rollback_dir_context(
+                conflict_dir=src_path.parent,
+                reason=decision.reason,
+                seen_targets=seen_targets,
+                dir_runtime=dir_runtime or {},
+            )
+            append_log(f"WARNING: 主视频目标冲突已转待办: {src_path.name} | 原因: {decision.reason}")
         else:
             append_log(f"WARNING: Pending: {src_path.name} | reason: {decision.reason}")
         _record_unhandled_item(
@@ -2499,7 +2569,11 @@ def _build_allocation_items(
             elif not has_explicit and resolved_season:
                 season = resolved_season
             else:
-                season = parse_result.season or resolved_season or 1
+                # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
+                if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season:
+                    season = resolved_season
+                else:
+                    season = parse_result.season or resolved_season or 1
             parse_result = parse_result._replace(season=season)
         parse_result = _apply_parallel_variant_suffix(parse_result, src_path)
         prefix = _resolve_prefix_for_parse(parse_result)
@@ -3101,6 +3175,16 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
             f"INFO: chosen season {chosen} not found in TMDB seasons for candidate tmdbid {tmdb_id} - re-search attempted"
         )
         reliable_hint = season_from_path is not None or season_hint_confidence == "high"
+        # K-ON!! 类情形：季号仅来自标题 !! 符号，属于弱提示，不触发 re-search
+        if reliable_hint and season_from_path is None:
+            _bang_val = extract_bang_season(context.get("title") or "")
+            if _bang_val is not None and season_hint is not None and season_hint == _bang_val:
+                reliable_hint = False
+                context["bang_season_hint"] = True
+                context.setdefault("season_hint_source", "title_punctuation")
+                append_log(
+                    f"INFO: season_hint={season_hint} 来自标题 !! 轻提示，降为不可信，不触发 re-search"
+                )
         if not reliable_hint:
             append_log("INFO: season hint appears weak/title-number-like, skip re-search and fallback to default season")
             chosen = None

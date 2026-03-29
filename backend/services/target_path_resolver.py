@@ -272,7 +272,7 @@ def resolve_final_target(
     if parse_result.extra_category is None:
         attempts = 0
         used_conflict_enrichment = False
-        while attempts < 2:
+        while attempts < 3:
             conflict = dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path))
             if not conflict:
                 break
@@ -285,6 +285,15 @@ def resolve_final_target(
                     attempts += 1
                     continue
                 used_conflict_enrichment = True
+            # 第三次尝试：若有 version_tag 且尚未并入 extra_label，则以版本标签区分
+            if attempts == 2:
+                vtag = getattr(parse_result, "version_tag", None)
+                if vtag and (not parse_result.extra_label or vtag not in parse_result.extra_label):
+                    new_label = f"{parse_result.extra_label}.{vtag}" if parse_result.extra_label else vtag
+                    parse_result = parse_result._replace(extra_label=new_label)
+                    dst_path = _recalc_target()
+                    attempts += 1
+                    continue
             return TargetDecision(
                 parse_result=parse_result,
                 dst_path=dst_path,

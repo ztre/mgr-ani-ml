@@ -15,7 +15,7 @@ from ..config import settings
 from .search_name_builder import build_search_name
 
 PATTERNS = {
-    "bracket_ep": r"\[(\d{1,3})([a-zA-Zβ]*)?\]",
+    "bracket_ep": r"\[(\d{1,3})(v\d+|[a-zA-Zβ]*)?\]",
     "sxe": r"[sS](\d{1,2})[eE](\d{1,3})",
     "season_word": r"(?:season|s)\s*(\d{1,2})",
     "roman_end": r"\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\s*$",
@@ -88,6 +88,9 @@ class ParseResult(NamedTuple):
     subtitle_lang: str | None = None
     is_ambiguous: bool = False
     final_season_hint: bool = False
+    version_tag: str | None = None
+    season_hint_strength: str | None = None
+    title_punctuation_hint: bool = False
 
 
 def make_search_name(raw_name: str) -> str:
@@ -160,6 +163,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
         title = _cleanup_title(_remove_bracket_episode(raw_stem))
         if not title:
             title = _cleanup_title(clean)
+        version_tag = extract_bracket_version_tag(raw_stem)
         return ParseResult(
             title,
             year,
@@ -172,6 +176,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             subtitle_lang,
             has_special_episode_suffix,
             False,
+            version_tag,
         )
 
     # Pattern B: SxxEyy (strong TV)
@@ -244,7 +249,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             False,
         )
 
-    # Pattern E: bang season (anime)
+    # Pattern E: bang season (anime) — weak hint only; scanner resolves final season
     bang_season = _extract_bang_season(clean)
     if bang_season is not None:
         title = _cleanup_title(re.sub(r"!{2,4}\s*$", " ", clean))
@@ -262,6 +267,9 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             subtitle_lang,
             False,
             False,
+            None,
+            "bang",
+            True,
         )
 
     # Pattern F: word season
@@ -652,7 +660,12 @@ def _cleanup_title(text: str) -> str:
 
 
 def extract_bracket_episode(name: str) -> tuple[int | None, str | None]:
-    """Extract explicit bracket episode like [01], [01a], [01β]."""
+    """Extract explicit bracket episode like [01], [01a], [01β], [13v2].
+
+    Returns (episode, suffix) where suffix is the trailing non-digit tag (e.g. 'a', 'β').
+    Version tags like 'v2' are NOT returned as suffix — call extract_bracket_version_tag()
+    separately to retrieve them.
+    """
     text = str(name or "")
     for m in re.finditer(PATTERNS["bracket_ep"], text):
         raw_num = m.group(1)
@@ -662,10 +675,31 @@ def extract_bracket_episode(name: str) -> tuple[int | None, str | None]:
         ep = int(raw_num)
         if ep <= 0:
             return None, suffix or None
+        # v\d+ is a version tag, not an episode suffix
+        if suffix and re.match(r"^v\d+$", suffix, re.I):
+            return ep, None
         if suffix and not suffix.isdigit():
             return ep, suffix
         return ep, None
     return None, None
+
+
+def extract_bracket_version_tag(name: str) -> str | None:
+    """Return version tag like 'v2', 'v3' from bracket episode markers like [13v2]."""
+    text = str(name or "")
+    for m in re.finditer(PATTERNS["bracket_ep"], text):
+        raw_num = m.group(1)
+        suffix = (m.group(2) or "").strip()
+        if not raw_num.isdigit():
+            continue
+        if suffix and re.match(r"^v\d+$", suffix, re.I):
+            return suffix
+    return None
+
+
+def extract_bang_season(title: str) -> int | None:
+    """Public wrapper: return bang-season count for titles like K-ON!! (2) or Gintama!!! (3)."""
+    return _extract_bang_season(title)
 
 
 def _remove_bracket_episode(text: str) -> str:
@@ -766,6 +800,22 @@ def _extract_bang_season(title: str) -> int | None:
     if not m:
         return None
     return len(m.group())
+
+
+def _is_nc_ver_skip_file(name: str) -> bool:
+    """Return True for files that should be entirely skipped (not scanned).
+
+    Rules:
+    - ``NCOPED`` — combined NC OP+ED file, unsupported
+    - ``NC Ver`` when NOT part of NCOP / NCED prefix
+    """
+    s = str(name or "")
+    if re.search(r"\bNCOPED\b", s, re.I):
+        return True
+    # NC Ver present but NOT forming NCOP or NCED
+    if re.search(r"\bNC\s*Ver\b", s, re.I) and not re.search(r"\bNC(?:OP|ED)\b", s, re.I):
+        return True
+    return False
 
 
 def _extract_trailing_season_number(text: str, structure_hint: str | None = None) -> int | None:
@@ -1092,6 +1142,12 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
 
     # 2) OP / ED
     oped_patterns = [
+        # NCED_EP04-05 range format (must be before simple NCED)
+        r"\b(NCED)_EP\s*0?(\d{1,3})-(\d{1,3})\b",
+        r"\b(NCOP)_EP\s*0?(\d{1,3})-(\d{1,3})\b",
+        # NCED_EP04 single format
+        r"\b(NCED)_EP\s*0?(\d{1,3})\b",
+        r"\b(NCOP)_EP\s*0?(\d{1,3})\b",
         r"\b(NCOP)\s*0?(\d{0,3})\b",
         r"\b(NCED)\s*0?(\d{0,3})\b",
         r"\b(OP)\s*0?(\d{0,3})\b",
@@ -1106,10 +1162,18 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         m = re.search(p, s, re.I)
         if m:
             token = m.group(1)
+            upper = token.upper()
+            # Range format: NCED_EP04-05 → ED04-05
+            if upper in ("NCED", "NCOP") and m.lastindex and m.lastindex >= 3:
+                start_n = m.group(2)
+                end_n = m.group(3)
+                prefix = "ED" if upper == "NCED" else "OP"
+                label = f"{prefix}{start_n.zfill(2)}-{end_n}"
+                return "oped", _normalize_extra_label(label)
             idx = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
-            if token.upper().startswith("NCED"):
+            if upper.startswith("NCED"):
                 label = "ED" if not idx else _format_token_number("ED", idx)
-            elif token.upper().startswith("NCOP"):
+            elif upper.startswith("NCOP"):
                 label = "OP" if not idx else _format_token_number("OP", idx)
             else:
                 label = token if not idx else _format_token_number(token, idx)
@@ -1279,6 +1343,31 @@ def _extract_extra_label_fragment(source: str, match: re.Match) -> str | None:
 def _normalize_extra_label(text: str) -> str:
     s = re.sub(r"[_\-]+", " ", str(text or ""))
     s = re.sub(r"\s+", " ", s).strip()
+    # NCED_EP04-05 → ED04-05 / NCOP_EP04-05 → OP04-05 (range, priority before simple NCOP/NCED)
+    s = re.sub(
+        r"\bNCED_EP\s*0*(\d{1,3})-(\d{1,3})\b",
+        lambda m: f"ED{m.group(1).zfill(2)}-{m.group(2)}",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(
+        r"\bNCOP_EP\s*0*(\d{1,3})-(\d{1,3})\b",
+        lambda m: f"OP{m.group(1).zfill(2)}-{m.group(2)}",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(
+        r"\bNCED_EP\s*0*(\d{1,3})\b",
+        lambda m: _format_token_number("ED", m.group(1)),
+        s,
+        flags=re.I,
+    )
+    s = re.sub(
+        r"\bNCOP_EP\s*0*(\d{1,3})\b",
+        lambda m: _format_token_number("OP", m.group(1)),
+        s,
+        flags=re.I,
+    )
     s = re.sub(r"\bNCOP\s*(\d+)\b", lambda m: _format_token_number("OP", m.group(1)), s, flags=re.I)
     s = re.sub(r"\bNCED\s*(\d+)\b", lambda m: _format_token_number("ED", m.group(1)), s, flags=re.I)
     s = re.sub(r"\bNCOP\b", "OP", s, flags=re.I)
