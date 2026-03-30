@@ -3178,6 +3178,71 @@ def _is_final_season_title(name: str) -> bool:
     return re.search(r"\b(?:the\s+)?final\s+season(?:\s+part\s*\d+)?\b", text, re.I) is not None
 
 
+def _rederive_season_from_context(media_dir: Path, context: dict) -> int | None:
+    """
+    在 season_aware 失败后，从目录名/上下文中二次推导季号。
+    优先级：
+    1. 路径中的 Season 目录（最强，已由 _extract_season_from_path 处理但再确认一次）
+    2. 目录名中的标准季号模式（SxxEyy / Season xx / 第N季 / 序数词 / 罗马数字）
+    3. 序数词 season（second season / third season 等）
+    4. 罗马数字 season（Season II / III 等）
+    5. context 中的 season_hint（来自目录结构而非 bang 轻提示时）
+    """
+    dir_name = media_dir.name
+
+    # 1. 路径中的 Season 目录
+    from_path = _extract_season_from_path(media_dir)
+    if from_path is not None:
+        return from_path
+
+    # 2. 目录名中的标准季号模式
+    patterns = [
+        r"\bS(\d{1,2})\b",
+        r"\bSeason\s*(\d{1,2})\b",
+        r"\b(\d{1,2})(?:st|nd|rd|th)\s*Season\b",
+        r"第\s*(\d{1,2})\s*季",
+    ]
+    for p in patterns:
+        m = re.search(p, dir_name, re.I)
+        if m:
+            val = int(m.group(1))
+            if 1 <= val <= 20:
+                return val
+
+    # 3. 序数词 season（second season / third season 等）
+    ordinal_map = {
+        "first": 1, "second": 2, "third": 3, "fourth": 4,
+        "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8,
+        "ninth": 9, "tenth": 10,
+    }
+    m = re.search(
+        r"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+season\b",
+        dir_name, re.I,
+    )
+    if m:
+        return ordinal_map.get(m.group(1).lower())
+
+    # 4. 罗马数字 season（Season II / Season III 等）
+    roman_map = {
+        "I": 1, "II": 2, "III": 3, "IV": 4, "V": 5,
+        "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10,
+    }
+    m = re.search(r"\bSeason\s+(I|II|III|IV|V|VI|VII|VIII|IX|X)\b", dir_name, re.I)
+    if m:
+        token = m.group(1).upper()
+        val = roman_map.get(token)
+        if val:
+            return val
+
+    # 5. context 中的 season_hint（仅当不是 bang 轻提示时）
+    if not context.get("bang_season_hint"):
+        hint = context.get("season_hint")
+        if isinstance(hint, int) and hint > 0:
+            return hint
+
+    return None
+
+
 def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, str | None]:
     media_type = str(context.get("media_type") or "")
     tmdb_id = context.get("tmdb_id")
@@ -3243,7 +3308,41 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
             append_log("INFO: 季号提示较弱或疑似标题数字，跳过重新搜索并回退到默认季号")
             chosen = None
         elif season_aware_done and season_aware_had_candidates:
-            return False, f"季号不匹配 TMDB: season_hint={chosen}, already checked in recognition"
+            # 软二次校验：不立即硬失败，先尝试从目录名/上下文再次推导季号
+            rederived_season = _rederive_season_from_context(media_dir, context)
+            rederived_is_valid = False
+            if rederived_season is not None and rederived_season != chosen:
+                append_log(
+                    f"INFO: season_aware_had_candidates=True 但二次推导得到不同季号 {rederived_season}，"
+                    f"尝试以新季号继续（原 chosen={chosen}）"
+                )
+                chosen = rederived_season
+                if chosen in valid_seasons:
+                    # 新季号有效，跳过 re-search 直接进入后续解析
+                    rederived_is_valid = True
+                else:
+                    # 新季号仍无效，再尝试 season-aware 重搜
+                    append_log(f"INFO: 二次推导季号 {chosen} 仍不在 TMDB valid_seasons 中，尝试重新搜索")
+            elif rederived_season is not None and rederived_season == chosen:
+                # 二次推导和原来一致，说明来源可信但 TMDB 没有这一季
+                # 仍然尝试 season-aware re-search，不直接失败
+                append_log(
+                    f"INFO: season_aware_had_candidates=True, 二次推导季号一致 chosen={chosen}，尝试重新搜索"
+                )
+            else:
+                # 无法从上下文推导出有效季号，保守处理：回退到默认季号，不进入 re-search
+                append_log(
+                    f"INFO: season_aware_had_candidates=True 但无法二次推导季号，回退到默认季号（原 chosen={chosen}）"
+                )
+                chosen = None
+            if rederived_is_valid:
+                resolved = resolve_season_by_tmdb(None, int(tmdb_id), chosen, final_hint=is_final)
+                if resolved is None:
+                    return False, "Final Season 解析失败或 TMDB 不可用"
+                context["season_hint"] = chosen
+                context["resolved_season"] = resolved
+                context["final_resolved_season"] = resolved if is_final else None
+                return True, None
         elif season_aware_done and not season_aware_had_candidates:
             append_log("INFO: 识别阶段季号感知无候选结果，允许在稳定阶段再次搜索")
         if chosen is None:
