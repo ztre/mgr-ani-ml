@@ -726,6 +726,7 @@ def _extract_season_keyword(text: str) -> int | None:
         r"\bSeason\s*(\d{1,2})\b",
         r"\b(\d{1,2})(?:st|nd|rd|th)\s*Season\b",
         r"第\s*(\d{1,2})\s*季",
+        r"第\s*(\d{1,2})\s*期",
     ]
     for p in patterns:
         m = re.search(p, text, re.I)
@@ -740,6 +741,7 @@ def _remove_season_tokens(text: str) -> str:
     s = re.sub(r"\bSeason\s*\d{1,2}\b", " ", s, flags=re.I)
     s = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\s*Season\b", " ", s, flags=re.I)
     s = re.sub(r"第\s*\d{1,2}\s*季", " ", s)
+    s = re.sub(r"第\s*\d{1,2}\s*期", " ", s)
     s = re.sub(r"\b(?:the\s+)?final\s+season(?:\s+part\s*\d+)?\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:II|III|IV|V|VI|VII|VIII|IX|X)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(first|second|third|fourth|fifth|sixth)\s+season\b", " ", s, flags=re.I)
@@ -794,11 +796,21 @@ WORD_SEASON_MAP = {
     "fourth": 4,
     "fifth": 5,
     "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
 }
 
 
 def _extract_word_season(text: str) -> int | None:
-    m = re.search(r"\b(first|second|third|fourth|fifth|sixth)\s+season\b", text, re.I)
+    # Numeric ordinal + Season (e.g. "2nd Season", "3rd Season") — check first
+    m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)\s+season\b", text, re.I)
+    if m:
+        val = int(m.group(1))
+        if 1 <= val <= 20:
+            return val
+    m = re.search(r"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+season\b", text, re.I)
     if not m:
         return None
     return WORD_SEASON_MAP[m.group(1).lower()]

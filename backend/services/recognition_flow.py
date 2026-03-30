@@ -623,6 +623,14 @@ def _extract_explicit_season_hint(text: str) -> int | None:
         return None
     m = EXPLICIT_ROMAN_SEASON_PATTERN.search(raw)
     if not m:
+        # Part 2~10 as a season hint (Part 1 is the default, no hint needed)
+        m = re.search(r"\bPart\s+([2-9]|10)\b", raw, re.I)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"\bPart\s+(II|III|IV|V|VI|VII|VIII|IX|X)\b", raw, re.I)
+        if m:
+            roman_map_part = {"II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10}
+            return roman_map_part.get(m.group(1).upper())
         return None
     token = (m.group(1) or m.group(2) or "").upper()
     roman_map = {
