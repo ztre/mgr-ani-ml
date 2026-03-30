@@ -985,13 +985,41 @@ def _rollback_dir_context(
     reason: str,
     seen_targets: "dict[Path, Path]",
     dir_runtime: dict,
+    op_log: "OperationLog | None" = None,
 ) -> None:
-    """目录级回滚：清除该目录在本批次产生的所有 seen_targets 条目及 anchor 缓存。"""
+    """目录级回滚：清除该目录在本批次产生的所有 seen_targets 条目、anchor 缓存及物理硬链接。"""
     rolled = dir_runtime.setdefault("rolled_back_dirs", set())
     if conflict_dir in rolled:
         return
     rolled.add(conflict_dir)
     parent_key = str(conflict_dir)
+
+    # 物理文件回滚：删除该目录已创建的硬链接及空目录
+    if op_log is not None:
+        conflict_dst_paths = {dst for dst, src in seen_targets.items() if src.parent == conflict_dir}
+        links_to_remove = conflict_dst_paths & op_log.created_links
+        removed_count = 0
+        dirs_to_check: set[Path] = set()
+        for link in sorted(links_to_remove, key=lambda p: len(p.parts), reverse=True):
+            try:
+                if link.exists() and link.is_file():
+                    link.unlink()
+                    removed_count += 1
+                dirs_to_check.add(link.parent)
+            except OSError as _e:
+                append_log(f"WARNING: 无法删除硬链接残留: {link} ({_e})")
+            op_log.created_links.discard(link)
+        for d in sorted(dirs_to_check, key=lambda p: len(p.parts), reverse=True):
+            if d in op_log.created_dirs:
+                try:
+                    if d.exists() and d.is_dir() and not any(d.iterdir()):
+                        d.rmdir()
+                        op_log.created_dirs.discard(d)
+                except OSError:
+                    pass
+        if removed_count:
+            append_log(f"INFO: 目录级物理回滚: {removed_count} 个硬链接已删除 ({conflict_dir.name})")
+
     stale = [dst for dst, src in seen_targets.items() if src.parent == conflict_dir]
     for dst in stale:
         del seen_targets[dst]
@@ -1076,15 +1104,29 @@ def _process_file(
                     extra_category=None,
                     extra_label=None,
                 )
-            else:
+            elif is_attachment:
+                # 附件无法解析 → 跳过，不中断目录处理
                 _record_unhandled_item(
                     original_path=src_path,
                     reason="parse failed",
-                    file_type="attachment" if is_attachment else "video",
+                    file_type="attachment",
                     sync_group_id=sync_group_id,
                     tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
                 )
-                raise DirectoryProcessError(f"文件解析失败: {src_path.name}")
+                return
+            else:
+                # 视频文件解析失败 → 降级为 bdextra extra，不中断目录处理
+                append_log(f"WARNING: 文件解析失败，降级为 bdextra extra: {src_path.name}")
+                parse_result = ParseResult(
+                    title=str(context.get("title") or src_path.stem),
+                    year=context.get("year") if context.get("year") else None,
+                    season=1,
+                    episode=None,
+                    is_special=False,
+                    quality=None,
+                    extra_category="bdextra",
+                    extra_label=None,
+                )
         else:
             parse_result = fallback_parse
 
@@ -1316,17 +1358,13 @@ def _process_file(
             if ep is not None:
                 parse_result = parse_result._replace(episode=ep)
         if parse_result.extra_category is None and _is_missing_or_invalid_episode(parse_result.episode):
-            _record_unhandled_item(
-                original_path=src_path,
-                reason="main video missing episode signal",
-                file_type="video",
-                sync_group_id=sync_group_id,
-                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                season=parse_result.season,
-                episode=parse_result.episode,
-                extra_category=parse_result.extra_category,
+            # 无法提取集号 → 降级为 bdextra extra，继续处理目录中其余文件
+            append_log(f"WARNING: 主视频缺少稳定集号，降级为 bdextra extra: {src_path.name}")
+            parse_result = parse_result._replace(
+                extra_category="bdextra",
+                is_special=False,
+                episode=None,
             )
-            raise DirectoryProcessError(f"主视频缺少稳定集号: {src_path.name}")
 
         resolved_season = context.get("resolved_season")
         season_from_path = _extract_season_from_path(src_path)
@@ -1376,8 +1414,25 @@ def _process_file(
                 reason=decision.reason,
                 seen_targets=seen_targets,
                 dir_runtime=dir_runtime or {},
+                op_log=op_log,
             )
-            append_log(f"WARNING: 主视频目标冲突已转待办: {src_path.name} | 原因: {decision.reason}")
+            conflict_reason = (
+                f"main video target conflict: {decision.dst_path} | links_rolled_back=True"
+            )
+            append_log(f"WARNING: 主视频目标冲突已回滚并转待办: {src_path.name} | 目标: {decision.dst_path}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason=conflict_reason,
+                file_type=decision.file_type or "video",
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=decision.parse_result.season,
+                episode=decision.parse_result.episode,
+                extra_category=decision.parse_result.extra_category,
+                suggested_target=decision.dst_path,
+            )
+            context["_has_issues"] = True
+            raise DirectoryProcessError(f"主视频目标冲突: {src_path.name} -> {decision.dst_path}")
         else:
             append_log(f"WARNING: 转待办: {src_path.name} | 原因: {decision.reason}")
         _record_unhandled_item(
