@@ -41,6 +41,7 @@ from .parser import (
 )
 from .recognition_flow import (
     LocalParseSnapshot,
+    infer_season_from_tmdb_seasons,
     parse_structure_locally,
     recognize_directory_with_fallback,
     recognize_directory_with_season_hint_trace,
@@ -785,6 +786,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             signature=signature,
             state="LOW_CONFIDENCE",
             reason=reason,
+            emit_jsonl=False,
         )
         return
 
@@ -2111,14 +2113,16 @@ def _mark_dir_pending(
     reason: str,
     *,
     emit_log: bool = True,
+    emit_jsonl: bool = True,
 ) -> Path:
     pending_dir = _resolve_manual_scope(src_path, source_root)
-    _record_unhandled_item(
-        original_path=pending_dir,
-        reason=reason,
-        file_type="video",
-        sync_group_id=sync_group_id,
-    )
+    if emit_jsonl:
+        _record_unhandled_item(
+            original_path=pending_dir,
+            reason=reason,
+            file_type="video",
+            sync_group_id=sync_group_id,
+        )
     if emit_log:
         append_log(f"WARNING: 转待办目录: {pending_dir} | 原因: {reason}")
 
@@ -2155,6 +2159,7 @@ def _finalize_dir_to_pending(
     state: str,
     reason: str,
     op_log: OperationLog | None = None,
+    emit_jsonl: bool = True,
 ) -> None:
     if op_log is not None:
         _rollback_operations(op_log)
@@ -2166,6 +2171,7 @@ def _finalize_dir_to_pending(
         source_type,
         reason,
         emit_log=False,
+        emit_jsonl=emit_jsonl,
     )
     _upsert_dir_state(db, sync_group_id, media_dir, signature, state, reason)
     append_log(f"WARNING: 目录处理失败并转待办: {pending_dir} | 原因: {reason}")
@@ -3178,7 +3184,11 @@ def _is_final_season_title(name: str) -> bool:
     return re.search(r"\b(?:the\s+)?final\s+season(?:\s+part\s*\d+)?\b", text, re.I) is not None
 
 
-def _rederive_season_from_context(media_dir: Path, context: dict) -> int | None:
+def _rederive_season_from_context(
+    media_dir: Path,
+    context: dict,
+    tmdb_seasons: list[dict] | None = None,
+) -> int | None:
     """
     在 season_aware 失败后，从目录名/上下文中二次推导季号。
     优先级：
@@ -3187,6 +3197,7 @@ def _rederive_season_from_context(media_dir: Path, context: dict) -> int | None:
     3. 序数词 season（second season / third season 等）
     4. 罗马数字 season（Season II / III 等）
     5. context 中的 season_hint（来自目录结构而非 bang 轻提示时）
+    6. TMDB 季名称相似度匹配（调用 infer_season_from_tmdb_seasons）
     """
     dir_name = media_dir.name
 
@@ -3240,6 +3251,16 @@ def _rederive_season_from_context(media_dir: Path, context: dict) -> int | None:
         if isinstance(hint, int) and hint > 0:
             return hint
 
+    # 6. TMDB 季名称相似度匹配
+    if tmdb_seasons:
+        result = infer_season_from_tmdb_seasons(dir_name, tmdb_seasons)
+        if result is not None:
+            inferred_season, ratio = result
+            append_log(
+                f"INFO: TMDB季名匹配推导: season={inferred_season}, ratio={ratio:.2f}, dir={dir_name}"
+            )
+            return inferred_season
+
     return None
 
 
@@ -3272,7 +3293,15 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     except Exception:
         details = None
     if not details:
-        return False, "无法获取 TMDB 季信息"
+        # TMDB API 失败时优雅降级：利用已有 season_hint，而屏弃硬失败
+        fallback_chosen = season_from_path or season_hint or 1
+        append_log(
+            f"WARNING: 无法获取 TMDB 季信息 (tmdbid={tmdb_id})，降级使用 season={fallback_chosen}"
+        )
+        context["season_hint"] = fallback_chosen
+        context["resolved_season"] = fallback_chosen
+        context["final_resolved_season"] = None
+        return True, None
 
     valid_seasons = sorted(
         {
@@ -3285,14 +3314,40 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     chosen = season_from_path or season_hint
     is_final = _is_final_season_title(media_dir.name) or bool(context.get("final_hint"))
 
-    # 无稳定季号时：多季作品默认优先第一季（仅在显式季号存在时才做严格校验）
+    tmdb_season_list = details.get("seasons", []) if isinstance(details, dict) else []
+
+    # 无稳定季号时：先尝试 TMDB 季名称匹配推导，否则默认第一季
     if not chosen and len(valid_seasons) > 1 and not is_final:
-        append_log("INFO: 多季作品且无稳定季号信息，默认使用第一季")
-        chosen = 1
+        inferred = infer_season_from_tmdb_seasons(media_dir.name, tmdb_season_list)
+        if inferred is not None:
+            chosen = inferred[0]
+            append_log(
+                f"INFO: TMDB季名匹配推导季号: season={chosen}, ratio={inferred[1]:.2f}"
+            )
+        else:
+            append_log("INFO: 多季作品且无稳定季号信息，默认使用第一季")
+            chosen = 1
     if chosen and valid_seasons and chosen not in valid_seasons:
         append_log(
-            f"INFO: 季号 {chosen} 在 TMDB 候选 tmdbid={tmdb_id} 中不存在，尝试重新搜索"
+            f"INFO: 季号 {chosen} 在 TMDB 候选 tmdbid={tmdb_id} 中不存在，尝试 TMDB 季名匹配和重新搜索"
         )
+        # 先尝试通过 TMDB 季名匹配推导新季号
+        inferred_for_mismatch = infer_season_from_tmdb_seasons(media_dir.name, tmdb_season_list)
+        if inferred_for_mismatch is not None and inferred_for_mismatch[0] != chosen:
+            new_chosen = inferred_for_mismatch[0]
+            append_log(
+                f"INFO: TMDB季名匹配得到新季号 {new_chosen}（原 chosen={chosen}）, ratio={inferred_for_mismatch[1]:.2f}"
+            )
+            if new_chosen in valid_seasons:
+                chosen = new_chosen
+                append_log(f"INFO: 季名匹配有效，直接使用 season={chosen}")
+                resolved = resolve_season_by_tmdb(None, int(tmdb_id), chosen, final_hint=is_final)
+                if resolved is None:
+                    return False, "Final Season 解析失败或 TMDB 不可用"
+                context["season_hint"] = chosen
+                context["resolved_season"] = resolved
+                context["final_resolved_season"] = resolved if is_final else None
+                return True, None
         reliable_hint = season_from_path is not None or season_hint_confidence == "high"
         # K-ON!! 类情形：季号仅来自标题 !! 符号，属于弱提示，不触发 re-search
         if reliable_hint and season_from_path is None:
@@ -3309,7 +3364,7 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
             chosen = None
         elif season_aware_done and season_aware_had_candidates:
             # 软二次校验：不立即硬失败，先尝试从目录名/上下文再次推导季号
-            rederived_season = _rederive_season_from_context(media_dir, context)
+            rederived_season = _rederive_season_from_context(media_dir, context, tmdb_seasons=details.get("seasons", []))
             rederived_is_valid = False
             if rederived_season is not None and rederived_season != chosen:
                 append_log(

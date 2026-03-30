@@ -535,11 +535,27 @@ def _to_ranked_candidate(query_title: str, media_type: str, item: dict, year_hin
         + heat_weight * 0.1
     )
 
+    # 非动画类型惩罚：genre_ids 非空且不含 16（Animation）时降分
+    genre_ids = item.get("genre_ids") or []
+    genre_penalty = 0.0
+    if genre_ids and 16 not in genre_ids:
+        genre_penalty = -0.1
+        score += genre_penalty
+
+    score = max(0.0, min(1.0, score))
+
+    if genre_penalty != 0.0:
+        from ..api.logs import append_log as _alog
+        _alog(
+            f"INFO: genre_penalty={genre_penalty:+.1f} tmdbid={tmdb_id} "
+            f"genres={genre_ids} title=\"{title}\""
+        )
+
     return RankedCandidate(
         media_type=media_type,
         tmdb_id=int(tmdb_id),
         title=title,
-        score=max(0.0, min(1.0, score)),
+        score=score,
         popularity=popularity,
         vote_count=vote_count,
         tmdb_data=item,
@@ -565,6 +581,12 @@ def _strip_trailing_season_suffix(title: str, season_hint: int) -> str:
     s = str(title)
     s = re.sub(rf"(?:\bSeason\s*{season_hint}\b|\b{season_hint}(?:st|nd|rd|th)\s+Season\b)\s*$", "", s, flags=re.I)
     s = re.sub(rf"(?:^|[\s._-]){season_hint}\s*$", "", s)
+    # 同时剥离罗马数字形式的季号后缀（如 season_hint=4 时剥除结尾的 " IV"）
+    _roman_map_rev = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V",
+                      6: "VI", 7: "VII", 8: "VIII", 9: "IX", 10: "X"}
+    roman_str = _roman_map_rev.get(season_hint)
+    if roman_str:
+        s = re.sub(rf"(?:[\s._-]+){re.escape(roman_str)}\s*$", "", s)
     return s.strip() or title
 
 
@@ -576,6 +598,56 @@ def _push_candidate(out: list[str], value: str | None) -> None:
         return
     if normalized not in out:
         out.append(normalized)
+
+
+_GENERIC_SEASON_NAME_RE = re.compile(r"^\s*Season\s*\d{1,2}\s*$", re.I)
+
+
+def infer_season_from_tmdb_seasons(
+    dir_name: str,
+    seasons: list[dict],
+    threshold: float = 0.55,
+) -> tuple[int, float] | None:
+    """通过 TMDB season name 与目录名的相似度，推导最可能的季号。
+
+    返回 (season_number, ratio) 或 None。
+    通用名称（如 'Season 1'）的匹配上限降至 0.5，避免误匹配。
+    """
+    if not dir_name or not seasons:
+        return None
+    # 清理目录名：去除 bracket 标签和编码组标签
+    cleaned = re.sub(r"\[[^\]]*\]|\([^\)]*\)", " ", dir_name)
+    cleaned = re.sub(r"[._\-]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned_lower = cleaned.lower()
+
+    best_ratio: float = 0.0
+    best_season: int | None = None
+    best_name: str = ""
+
+    from difflib import SequenceMatcher
+
+    for s in seasons:
+        snum = s.get("season_number")
+        if snum is None or int(snum) <= 0:
+            continue
+        snum = int(snum)
+        sname = str(s.get("name") or "").strip()
+        if not sname:
+            continue
+        is_generic = bool(_GENERIC_SEASON_NAME_RE.match(sname))
+        ratio = SequenceMatcher(None, cleaned_lower, sname.lower()).ratio()
+        # 通用名称（"Season N"）匹配上限降权
+        if is_generic:
+            ratio = min(ratio, 0.5)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_season = snum
+            best_name = sname
+
+    if best_season is not None and best_ratio >= threshold:
+        return best_season, best_ratio
+    return None
 
 
 def _extract_year(text: str) -> int | None:

@@ -524,7 +524,29 @@ def delete_all_media(db: Session = Depends(get_db)):
     count = db.query(MediaRecord).delete()
     dir_state_count = db.query(DirectoryState).delete()
     db.commit()
-    return {"message": f"已删除 {count} 条媒体记录，清理 {dir_state_count} 条目录状态"}
+
+    # 重置时同时清空所有 pending / review JSONL 文件
+    _jsonl_paths = [
+        getattr(settings, "pending_jsonl_path", None),
+        getattr(settings, "unprocessed_items_jsonl_path", None),
+        getattr(settings, "review_jsonl_path", None),
+    ]
+    cleared: list[str] = []
+    for raw_path in _jsonl_paths:
+        if not raw_path:
+            continue
+        try:
+            p = Path(str(raw_path))
+            if p.exists():
+                p.write_text("", encoding="utf-8")
+                cleared.append(p.name)
+        except OSError:
+            pass
+
+    return {
+        "message": f"已删除 {count} 条媒体记录，清理 {dir_state_count} 条目录状态",
+        "cleared_logs": cleared,
+    }
 
 
 @router.post("/deduplicate")
