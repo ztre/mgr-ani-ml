@@ -29,6 +29,16 @@ class ConfigResponse(BaseModel):
     pending_jsonl_path: str
     unprocessed_items_jsonl_path: str
     review_jsonl_path: str
+    # AI 识别外挂功能
+    ai_enabled: bool
+    ai_provider: str
+    ai_api_key: str
+    ai_base_url: str
+    ai_model: str
+    ai_confidence_threshold: str
+    ai_gemini_api_key: str
+    ai_gemini_base_url: str
+    ai_gemini_model: str
 
 
 class ConfigUpdate(BaseModel):
@@ -48,6 +58,16 @@ class ConfigUpdate(BaseModel):
     pending_jsonl_path: str | None = None
     unprocessed_items_jsonl_path: str | None = None
     review_jsonl_path: str | None = None
+    # AI 识别外挂功能
+    ai_enabled: bool | None = None
+    ai_provider: str | None = None
+    ai_api_key: str | None = None
+    ai_base_url: str | None = None
+    ai_model: str | None = None
+    ai_confidence_threshold: str | None = None
+    ai_gemini_api_key: str | None = None
+    ai_gemini_base_url: str | None = None
+    ai_gemini_model: str | None = None
 
 
 class TestConnectionRequest(BaseModel):
@@ -82,6 +102,15 @@ def get_config():
         pending_jsonl_path=str(settings.pending_jsonl_path or ""),
         unprocessed_items_jsonl_path=str(settings.unprocessed_items_jsonl_path or ""),
         review_jsonl_path=str(settings.review_jsonl_path or ""),
+        ai_enabled=bool(settings.ai_enabled),
+        ai_provider=str(settings.ai_provider or "openai"),
+        ai_api_key=str(settings.ai_api_key or ""),
+        ai_base_url=str(settings.ai_base_url or ""),
+        ai_model=str(settings.ai_model or ""),
+        ai_confidence_threshold=str(settings.ai_confidence_threshold or "Medium"),
+        ai_gemini_api_key=str(settings.ai_gemini_api_key or ""),
+        ai_gemini_base_url=str(settings.ai_gemini_base_url or ""),
+        ai_gemini_model=str(settings.ai_gemini_model or "gemini-2.5-flash"),
     )
 
 
@@ -121,6 +150,27 @@ def update_config(data: ConfigUpdate):
         settings.unhandled_jsonl_path = settings.unprocessed_items_jsonl_path
     if data.review_jsonl_path is not None:
         settings.review_jsonl_path = data.review_jsonl_path.strip()
+    # AI 识别外挂功能
+    if data.ai_enabled is not None:
+        settings.ai_enabled = data.ai_enabled
+    if data.ai_provider is not None:
+        settings.ai_provider = data.ai_provider.strip()
+    if data.ai_api_key is not None:
+        settings.ai_api_key = data.ai_api_key.strip()
+    if data.ai_base_url is not None:
+        settings.ai_base_url = data.ai_base_url.strip()
+    if data.ai_model is not None:
+        settings.ai_model = data.ai_model.strip()
+    if data.ai_confidence_threshold is not None:
+        v = data.ai_confidence_threshold.strip()
+        if v in {"High", "Medium", "Low"}:
+            settings.ai_confidence_threshold = v
+    if data.ai_gemini_api_key is not None:
+        settings.ai_gemini_api_key = data.ai_gemini_api_key.strip()
+    if data.ai_gemini_base_url is not None:
+        settings.ai_gemini_base_url = data.ai_gemini_base_url.strip()
+    if data.ai_gemini_model is not None:
+        settings.ai_gemini_model = data.ai_gemini_model.strip()
 
     settings.save_to_env()
     return {"ok": True}

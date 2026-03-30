@@ -885,6 +885,17 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         f"(score={best.score:.3f}, fallback_round={fallback_round})"
     )
 
+    # AI 剧集映射（外挂功能，仅 tv 类型且 ai_enabled=True 时生效）
+    if target_type == "tv" and settings.ai_enabled:
+        try:
+            from .ai_service import analyze_episode_mapping as _ai_analyze
+            _series_details = context.get("_tmdb_series_details") or {}
+            _ai_mapping = _ai_analyze(_series_details, media_dir, video_files)
+            if _ai_mapping:
+                context["ai_episode_mapping"] = _ai_mapping
+        except Exception as _ai_err:
+            append_log(f"WARNING: [AI识别] 调用失败，跳过 AI 映射: {_ai_err}")
+
     op_log = OperationLog()
     seen_targets: dict[Path, Path] = {}
     dir_runtime: dict = {
@@ -1382,6 +1393,16 @@ def _process_file(
             else:
                 season = parse_result.season or resolved_season or 1
         parse_result = parse_result._replace(season=season)
+
+        # AI 剧集映射覆盖（外挂功能）：仅覆盖普通剧集（extra_category 为 None）
+        _ai_ep_mapping = context.get("ai_episode_mapping") or {}
+        if str(src_path) in _ai_ep_mapping and parse_result.extra_category is None:
+            _ai_season, _ai_episode = _ai_ep_mapping[str(src_path)]
+            append_log(
+                f"INFO: [AI识别] 覆盖集数映射: {src_path.name} "
+                f"→ S{_ai_season:02d}E{_ai_episode:02d}"
+            )
+            parse_result = parse_result._replace(season=_ai_season, episode=_ai_episode)
 
         offset = context.get("episode_offset")
         if offset is not None and parse_result.episode is not None and parse_result.extra_category is None:
@@ -3310,6 +3331,9 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
             if x.get("season_number") is not None and int(x.get("season_number")) > 0
         }
     )
+
+    # 存入 context，供后续 AI 映射调用使用
+    context["_tmdb_series_details"] = details
 
     chosen = season_from_path or season_hint
     is_final = _is_final_season_title(media_dir.name) or bool(context.get("final_hint"))

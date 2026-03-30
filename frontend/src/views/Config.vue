@@ -112,6 +112,68 @@
         <el-form-item label="人工修正日志路径">
           <el-input v-model="form.review_jsonl_path" placeholder="/app/pending/review.jsonl" />
         </el-form-item>
+
+        <el-divider content-position="left">AI 识别（实验性）</el-divider>
+        <div class="section-desc section-gap">
+          启用后，识别成功的 TV 目录将额外调用 AI 对集号映射进行校正，仅覆盖普通剧集（不影响特典/花絮），失败时自动回退原有结果。
+        </div>
+        <el-form-item label="启用 AI 识别">
+          <el-switch v-model="form.ai_enabled" />
+          <span class="section-desc" style="margin-left: 12px">关闭时不调用任何 AI 接口，不影响原有识别流程</span>
+        </el-form-item>
+        <template v-if="form.ai_enabled">
+          <el-form-item label="AI 提供商">
+            <el-select v-model="form.ai_provider" style="width: 200px">
+              <el-option label="OpenAI（兼容 API）" value="openai" />
+              <el-option label="Google Gemini" value="gemini" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="置信度阈值">
+            <el-select v-model="form.ai_confidence_threshold" style="width: 200px">
+              <el-option label="High（仅高置信度）" value="High" />
+              <el-option label="Medium（推荐）" value="Medium" />
+              <el-option label="Low（接受所有结果）" value="Low" />
+            </el-select>
+            <span class="section-desc" style="margin-left: 12px">低于阈值的 AI 结果将被忽略</span>
+          </el-form-item>
+
+          <template v-if="form.ai_provider === 'openai'">
+            <el-form-item label="OpenAI API Key">
+              <el-input v-model="form.ai_api_key" type="password" show-password placeholder="sk-..." />
+            </el-form-item>
+            <el-form-item label="API 地址">
+              <el-input
+                v-model="form.ai_base_url"
+                placeholder="留空使用官方地址，如 https://api.deepseek.com/v1"
+              />
+            </el-form-item>
+            <el-form-item label="模型">
+              <el-input
+                v-model="form.ai_model"
+                placeholder="留空默认 gpt-4o-mini，推荐 deepseek-reasoner"
+              />
+            </el-form-item>
+          </template>
+
+          <template v-if="form.ai_provider === 'gemini'">
+            <el-form-item label="Gemini API Key">
+              <el-input v-model="form.ai_gemini_api_key" type="password" show-password placeholder="AIza..." />
+            </el-form-item>
+            <el-form-item label="Gemini API 地址">
+              <el-input
+                v-model="form.ai_gemini_base_url"
+                placeholder="留空使用官方地址，或填写 Vertex / 代理地址"
+              />
+            </el-form-item>
+            <el-form-item label="Gemini 模型">
+              <el-input
+                v-model="form.ai_gemini_model"
+                placeholder="gemini-2.5-flash"
+              />
+            </el-form-item>
+          </template>
+        </template>
+
         <el-form-item>
           <el-button type="primary" :loading="saving" @click="save">保存</el-button>
           <el-button @click="load">重新加载</el-button>
@@ -187,6 +249,16 @@ const form = ref({
   pending_jsonl_path: '/app/pending/pending.jsonl',
   unprocessed_items_jsonl_path: '/app/pending/unprocessed_items.jsonl',
   review_jsonl_path: '/app/pending/review.jsonl',
+  // AI 识别
+  ai_enabled: false,
+  ai_provider: 'openai',
+  ai_api_key: '',
+  ai_base_url: '',
+  ai_model: '',
+  ai_confidence_threshold: 'Medium',
+  ai_gemini_api_key: '',
+  ai_gemini_base_url: '',
+  ai_gemini_model: 'gemini-2.5-flash',
 })
 const saving = ref(false)
 const restarting = ref(false)
