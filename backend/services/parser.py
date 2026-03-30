@@ -743,6 +743,16 @@ def _remove_season_tokens(text: str) -> str:
     s = re.sub(r"\b(?:the\s+)?final\s+season(?:\s+part\s*\d+)?\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:II|III|IV|V|VI|VII|VIII|IX|X)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(first|second|third|fourth|fifth|sixth)\s+season\b", " ", s, flags=re.I)
+    # TV Reproduction / TV Re-edit / TV Broadcast / Broadcast Version tokens.
+    # Keep in sync with the tv_repro_patterns block in _match_extra_info() (section 0.7).
+    s = re.sub(r"\bTV[\s\-]?Broadcast[\s\-]?Reproduction\b", " ", s, flags=re.I)
+    s = re.sub(r"\bTV[\s\-]?Broadcast[\s\-]?Version\b", " ", s, flags=re.I)
+    s = re.sub(r"\bTV[\s\-]?Reproduction\b", " ", s, flags=re.I)
+    s = re.sub(r"\bTV[\s\-]?Re[\-\s]?edit\b", " ", s, flags=re.I)
+    s = re.sub(r"\bTV[\s\-]?Special\b", " ", s, flags=re.I)
+    s = re.sub(r"\bTV[\s\-]?Version\b", " ", s, flags=re.I)
+    s = re.sub(r"\bBroadcast[\s\-]?Reproduction\b", " ", s, flags=re.I)
+    s = re.sub(r"\bBroadcast[\s\-]?Version\b", " ", s, flags=re.I)
     return s
 
 
@@ -1120,6 +1130,22 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         if m:
             return "making", _normalize_extra_label(m.group(1))
 
+    # 0.7) TV Reproduction / TV Re-edit / TV Broadcast / Broadcast Version -> special
+    # Order from most specific to least specific; bare "TV Version" is handled after oped.
+    tv_repro_patterns = [
+        r"\b(TV[\s\-]?Broadcast[\s\-]?Reproduction)\b",
+        r"\b(TV[\s\-]?Broadcast[\s\-]?Version)\b",
+        r"\b(TV[\s\-]?Reproduction)\b",
+        r"\b(TV[\s\-]?Re[\-\s]?edit)\b",
+        r"\b(TV[\s\-]?Special)\b",
+        r"\b(Broadcast[\s\-]?Reproduction)\b",
+        r"\b(Broadcast[\s\-]?Version)\b",
+    ]
+    for p in tv_repro_patterns:
+        m = re.search(p, s, re.I)
+        if m:
+            return "special", _normalize_extra_label(m.group(1))
+
     # 1) Special
     raw_special = _extract_raw_special_label(s)
     if raw_special:
@@ -1177,6 +1203,15 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
             else:
                 label = token if not idx else _format_token_number(token, idx)
             return "oped", _normalize_extra_label(label)
+
+    # 2.5) TV Version — checked here, after the oped block, so that files whose name
+    # contains both an OP/ED token and "TV Version" (e.g. TV-size OP/ED variants) are
+    # already returned as "oped" above and never reach this branch.  All other compound
+    # TV-reproduction phrases (TV Reproduction, TV Re-edit, …) are handled earlier in
+    # section 0.7 because they are unambiguous regardless of context.
+    m = re.search(r"\b(TV[\s\-]?Version)\b", s, re.I)
+    if m:
+        return "special", _normalize_extra_label(m.group(1))
 
     # 3) PV / Trailer / CM / Preview / Teaser
     trailer_patterns = [
