@@ -50,6 +50,8 @@ class LocalParseSnapshot:
     special_hint: bool
     final_hint: bool
     season_hint_confidence: str | None = None
+    season_hint_source: str | None = None   # explicit / bang / trailing / final
+    season_hint_raw: str | None = None      # raw token: "S02", "!!", "第2季" etc.
     season_aware_done: bool = False
     season_aware_had_candidates: bool = False
     season_aware_tried_queries: list[str] = field(default_factory=list)
@@ -82,6 +84,8 @@ def parse_structure_locally(media_dir: Path, structure_hint: str | None = None) 
     tv_parse = parse_tv_filename(raw_name, structure_hint=structure_hint or "tv")
     season_hint: int | None = None
     season_hint_confidence: str | None = None
+    season_hint_source: str | None = None
+    season_hint_raw: str | None = None
     episode_hint = tv_parse.episode if tv_parse else None
     special_hint = bool(tv_parse.is_special) if tv_parse else False
     final_hint = bool(tv_parse.final_season_hint) if tv_parse else False
@@ -90,11 +94,28 @@ def parse_structure_locally(media_dir: Path, structure_hint: str | None = None) 
     if explicit_hint:
         season_hint = explicit_hint
         season_hint_confidence = "high"
+        season_hint_source = "explicit"
+    elif tv_parse and tv_parse.season_hint_strength == "bang" and tv_parse.season:
+        # bang 弱提示（!! / !!! 等）：保留候选季号，标记低置信度，以便后续 TMDB 校验
+        season_hint = tv_parse.season
+        season_hint_confidence = "low"
+        season_hint_source = "bang"
+        season_hint_raw = "!" * tv_parse.season
+    elif tv_parse and tv_parse.season and tv_parse.season > 1 and not tv_parse.season_hint_strength:
+        # parser.py 通过序数词（fourth season）、尾标数字等识别出的季号（非 bang、非显式标记）
+        # 置信度 medium：比 bang 高但比 explicit 低，参与后续 TMDB 校验
+        season_hint = tv_parse.season
+        season_hint_confidence = "medium"
+        season_hint_source = "parser"
     elif structure_hint == "tv":
         trailing_hint = _extract_trailing_season_number(cleaned_name)
         if trailing_hint:
             season_hint = trailing_hint
             season_hint_confidence = "low"
+            season_hint_source = "trailing"
+
+    if final_hint and not season_hint_source:
+        season_hint_source = "final"
 
     # Explicitly avoid treating episode-only parse as season hint at directory level.
     if tv_parse and tv_parse.episode and (tv_parse.season == 1) and not tv_parse.is_special and season_hint_confidence != "high":
@@ -115,6 +136,8 @@ def parse_structure_locally(media_dir: Path, structure_hint: str | None = None) 
         special_hint=special_hint,
         final_hint=final_hint,
         season_hint_confidence=season_hint_confidence,
+        season_hint_source=season_hint_source,
+        season_hint_raw=season_hint_raw,
     )
 
 
@@ -154,7 +177,9 @@ def resolve_season(tmdb_client, tmdbid: int, season_hint: int | None, final_hint
         return int(season_hint)
 
     if season_hint and season_hint not in available:
-        append_log(f"WARNING: season_hint={season_hint} not in TMDB, fallback to 1")
+        append_log(
+            f"WARNING: season_hint={season_hint} not in TMDB valid_seasons={sorted(available)}, fallback=1"
+        )
 
     return 1
 
@@ -603,6 +628,53 @@ def _push_candidate(out: list[str], value: str | None) -> None:
 _GENERIC_SEASON_NAME_RE = re.compile(r"^\s*Season\s*\d{1,2}\s*$", re.I)
 
 
+def _clean_dir_name_for_match(dir_name: str) -> str:
+    """清理目录名用于季名相似度匹配：去除 bracket 标签、编码组标签和分隔符。"""
+    cleaned = re.sub(r"\[[^\]]*\]|\([^\)]*\)", " ", dir_name)
+    cleaned = re.sub(r"[._\-]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _season_name_match_ratio(cleaned_lower: str, sname: str) -> float:
+    """计算目录名与单个季名的匹配率，含 substring bonus。
+
+    策略：
+    1. SequenceMatcher 基础相似度
+    2. 若季名（去除通用前缀后）是目录名的子串，或目录名是季名的子串，给予 bonus
+    3. 通用名称（'Season N'）上限降至 0.5
+    """
+    from difflib import SequenceMatcher
+
+    is_generic = bool(_GENERIC_SEASON_NAME_RE.match(sname))
+    sname_lower = sname.lower()
+    ratio = SequenceMatcher(None, cleaned_lower, sname_lower).ratio()
+
+    # Substring bonus：若季名的核心部分（去除 "Season N" 等前缀）出现在目录名中
+    # 例：目录="Kakegurui××"，季名="Kakegurui××" → 直接包含
+    # 例：目录="Kobayashi-san Chi no Maid Dragon S"，季名="小林さんちのメイドラゴンS" → 无法匹配（语言不同，由 name_en 处理）
+    if not is_generic:
+        # 季名去除前导 "Series/Season N " 前缀
+        core = re.sub(r"^\s*(?:Season|Series)\s*\d+\s*[:\-–]?\s*", "", sname, flags=re.I).strip()
+        core_lower = core.lower()
+        if core_lower and len(core_lower) >= 3:
+            if core_lower in cleaned_lower or cleaned_lower in core_lower:
+                # 直接包含：给予较强 bonus，确保超过阈值
+                ratio = max(ratio, 0.72)
+            else:
+                # 部分重叠：计算包含率奖励
+                overlap = sum(1 for c in core_lower if c in cleaned_lower)
+                overlap_ratio = overlap / max(len(core_lower), 1)
+                if overlap_ratio >= 0.85:
+                    ratio = max(ratio, 0.60)
+
+    # 通用名称上限降权
+    if is_generic:
+        ratio = min(ratio, 0.5)
+
+    return ratio
+
+
 def infer_season_from_tmdb_seasons(
     dir_name: str,
     seasons: list[dict],
@@ -611,39 +683,43 @@ def infer_season_from_tmdb_seasons(
     """通过 TMDB season name 与目录名的相似度，推导最可能的季号。
 
     返回 (season_number, ratio) 或 None。
+    同时使用中文季名（name）和英文季名（name_en）进行匹配，取最优结果。
     通用名称（如 'Season 1'）的匹配上限降至 0.5，避免误匹配。
     """
     if not dir_name or not seasons:
         return None
-    # 清理目录名：去除 bracket 标签和编码组标签
-    cleaned = re.sub(r"\[[^\]]*\]|\([^\)]*\)", " ", dir_name)
-    cleaned = re.sub(r"[._\-]+", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = _clean_dir_name_for_match(dir_name)
     cleaned_lower = cleaned.lower()
 
     best_ratio: float = 0.0
     best_season: int | None = None
-    best_name: str = ""
-
-    from difflib import SequenceMatcher
 
     for s in seasons:
         snum = s.get("season_number")
         if snum is None or int(snum) <= 0:
             continue
         snum = int(snum)
-        sname = str(s.get("name") or "").strip()
-        if not sname:
+
+        # 同时比较中文季名和英文季名，取最高分
+        candidate_names = []
+        sname_zh = str(s.get("name") or "").strip()
+        if sname_zh:
+            candidate_names.append(sname_zh)
+        sname_en = str(s.get("name_en") or "").strip()
+        if sname_en and sname_en != sname_zh:
+            candidate_names.append(sname_en)
+
+        if not candidate_names:
             continue
-        is_generic = bool(_GENERIC_SEASON_NAME_RE.match(sname))
-        ratio = SequenceMatcher(None, cleaned_lower, sname.lower()).ratio()
-        # 通用名称（"Season N"）匹配上限降权
-        if is_generic:
-            ratio = min(ratio, 0.5)
-        if ratio > best_ratio:
-            best_ratio = ratio
+
+        season_best = max(
+            _season_name_match_ratio(cleaned_lower, sname)
+            for sname in candidate_names
+        )
+
+        if season_best > best_ratio:
+            best_ratio = season_best
             best_season = snum
-            best_name = sname
 
     if best_season is not None and best_ratio >= threshold:
         return best_season, best_ratio
@@ -691,6 +767,17 @@ def _extract_explicit_season_hint(text: str) -> int | None:
     m = re.search(r"第\s*(\d{1,2})\s*季", raw, re.I)
     if m:
         return int(m.group(1))
+    # 英文序数词季号（second season / third season 等）
+    _ordinal_map = {
+        "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+        "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
+    }
+    m = re.search(
+        r"\b(second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+season\b",
+        raw, re.I,
+    )
+    if m:
+        return _ordinal_map.get(m.group(1).lower())
     if re.search(r"\bi\s*\+\s*ii\b", raw, re.I):
         return None
     m = EXPLICIT_ROMAN_SEASON_PATTERN.search(raw)

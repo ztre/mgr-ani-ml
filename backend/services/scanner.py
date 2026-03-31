@@ -512,7 +512,7 @@ def run_manual_organize(
     if not media_files:
         raise DirectoryProcessError("待办目录中没有可处理媒体")
 
-    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
+    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=_video_sort_key)
     attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
     seen_targets: dict[Path, Path] = {}
     op_log = OperationLog()
@@ -640,7 +640,7 @@ def reidentify_by_target_dir(
     context["extra_context"] = bool(any(detect_special_dir_context(p)[0] for p in media_files))
     context["strong_extra_context"] = bool(any(detect_strong_special_dir_context(p)[0] for p in media_files))
 
-    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
+    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=_video_sort_key)
     attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
     seen_targets: dict[Path, Path] = {}
     op_log = OperationLog()
@@ -770,6 +770,16 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
     structure_hint = task.media_type or _detect_media_type_from_structure(media_dir)
     if dir_special_context:
         structure_hint = "tv"
+    # 多季合并目录检测：目录名含 "I+II" / "1+2" / "I&II" 等格式时强制 TV 类型
+    # 例：Chihayafuru I+II → 两季正片合并在一个目录中，不应被识别为电影
+    _multi_season_merge_re = re.compile(
+        r"\b(?:[IVX]{1,4}|[1-9])\s*[+&]\s*(?:[IVX]{1,4}|[1-9])\b", re.I
+    )
+    if structure_hint != "tv" and _multi_season_merge_re.search(media_dir.name):
+        append_log(
+            f"INFO: 目录名含多季合并格式（I+II/1+2等），强制 structure_hint=tv: {media_dir.name!r}"
+        )
+        structure_hint = "tv"
     best, snapshot, fallback_round = recognize_directory_with_fallback(
         media_dir,
         group.source_type,
@@ -790,6 +800,34 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         )
         return
 
+    # 多集特征否决电影类型：若识别结果为电影，但目录内存在 ≥2 个不同集数的视频文件，
+    # 强制改为 TV 识别并重试。这修复了 Kaguya-sama First Kiss wa Owaranai 被误判为电影的问题。
+    if best.media_type == "movie" and structure_hint != "movie":
+        _dir_video_files = [
+            p for p in media_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTS and not _is_ignored_name(p.name)
+        ]
+        _ep_nums: set[int] = set()
+        for _vf in _dir_video_files:
+            _ep = _extract_episode_from_filename_loose(_vf.name)
+            if _ep is not None and 1 <= _ep <= 999:
+                _ep_nums.add(_ep)
+        if len(_ep_nums) >= 2:
+            append_log(
+                f"INFO: 电影结论被多集特征否决: tmdbid={best.tmdb_id} 检测到 {len(_ep_nums)} 个不同集号 {sorted(_ep_nums)[:5]!r}，"
+                f"重试 TV-only 识别"
+            )
+            _tv_best, _tv_snapshot, _tv_fallback_round = recognize_directory_with_fallback(
+                media_dir,
+                group.source_type,
+                structure_hint="tv",
+            )
+            if _tv_best is not None and _tv_best.media_type == "tv":
+                best, snapshot, fallback_round = _tv_best, _tv_snapshot, _tv_fallback_round
+                append_log(
+                    f"INFO: TV 重识别成功: tmdbid={best.tmdb_id}, score={best.score:.3f}"
+                )
+
     recognized_type = best.media_type
     target_type = recognized_type
     if target_type == "movie" and movie_target_root is None:
@@ -809,7 +847,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
     _upsert_dir_state(db, group.id, media_dir, signature, "IDENTIFIED", None)
 
     media_files = _collect_media_files_under_dir(media_dir, include, exclude, source)
-    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=lambda p: p.as_posix())
+    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=_video_sort_key)
     attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
     extra_context, extra_context_token = detect_special_dir_context(media_dir)
     strong_extra_context, strong_extra_token = detect_strong_special_dir_context(media_dir)
@@ -852,6 +890,8 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         "fallback_round": fallback_round,
         "season_hint": snapshot.season_hint,
         "season_hint_confidence": snapshot.season_hint_confidence,
+        "season_hint_source": snapshot.season_hint_source,
+        "season_hint_raw": snapshot.season_hint_raw,
         "special_hint": snapshot.special_hint,
         "final_hint": snapshot.final_hint,
         "season_aware_done": snapshot.season_aware_done,
@@ -1214,6 +1254,23 @@ def _process_file(
         parse_result = parse_result._replace(episode=None)
     parse_result = _apply_parallel_variant_suffix(parse_result, src_path)
 
+    # 「括号 variant 降级」：正片解析结果无特典类别，但文件名括号内含有明确的特典变体关键词时，
+    # 强制将其降级为 special 类。这修复了 [Preview01_1] / [Mystery Camp] / [On Air Ver.] 等
+    # variant 文件先于正片占据主视频目标槽位的问题。
+    if ext in VIDEO_EXTS and parse_result.extra_category is None and parse_result.episode is not None:
+        _variant_category, _variant_label, _from_bracket = _detect_bracket_variant_as_special(src_path.name)
+        if _variant_category is not None:
+            append_log(
+                f"INFO: 括号variant检测: {src_path.name!r} 含 variant 括号 → "
+                f"降级为 {_variant_category} label={_variant_label!r}"
+            )
+            parse_result = parse_result._replace(
+                extra_category=_variant_category,
+                extra_label=_variant_label,
+                is_special=_variant_category in SPECIAL_CATEGORIES,
+                episode=None,
+            )
+
     menu_token = _extract_menu_token(src_path.name)
     if menu_token:
         append_log(f"INFO: Special 忽略: {menu_token}")
@@ -1389,6 +1446,10 @@ def _process_file(
         else:
             # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
             if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season:
+                append_log(
+                    f"INFO: [season] bang 候选覆盖: file={src_path.name!r}, "
+                    f"candidate={parse_result.season} → resolved={resolved_season} (source=resolved_season)"
+                )
                 season = resolved_season
             else:
                 season = parse_result.season or resolved_season or 1
@@ -1598,6 +1659,7 @@ def resolve_season(tmdb_id: int, season_hint: int | None, final_season: bool = F
 
 
 def _extract_season_from_path(src_path: Path) -> int | None:
+    _roman = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10}
     for part in src_path.parts:
         m1 = re.match(r"^season\s*(\d{1,2})$", part, re.I)
         if m1:
@@ -1608,6 +1670,12 @@ def _extract_season_from_path(src_path: Path) -> int | None:
         m3 = re.match(r"^第\s*(\d{1,2})\s*季$", part)
         if m3:
             return int(m3.group(1))
+        # 罗马数字 Season 目录：Season II, Season III 等
+        m4 = re.match(r"^season\s+(I{1,3}|IV|VI{0,3}|IX|X)$", part, re.I)
+        if m4:
+            val = _roman.get(m4.group(1).upper())
+            if val:
+                return val
     return None
 
 
@@ -2442,6 +2510,21 @@ def _is_ignored_name(name: str) -> bool:
     return any(token in lowered for token in IGNORED_TOKENS)
 
 
+# 括号内 variant 关键词模式：用于文件排序时将 variant 文件排在同集正片之后
+_VARIANT_BRACKET_SORT_RE = re.compile(
+    r"\([^)]*(?:On\s*Air\s*Ver|Staff\s+Credit\s+Ver|Credit\s+Ver|Mystery\s+Camp|Camp\b)[^)]*\)",
+    re.I,
+)
+
+
+def _video_sort_key(p: Path) -> tuple[int, str]:
+    """排序 key：先按路径正序，但含 variant 括号后缀的文件排在同名正片之后。
+    这保证干净的正片文件优先占据目标槽，variant 文件遇到冲突时才转为特典。
+    """
+    has_variant = bool(_VARIANT_BRACKET_SORT_RE.search(p.name))
+    return (1 if has_variant else 0, p.as_posix())
+
+
 def _normalize_media_stem(stem: str) -> str:
     s = str(stem or "")
     s = re.sub(r"[\[\]\(\)\{\}]", " ", s)
@@ -2652,6 +2735,10 @@ def _build_allocation_items(
             else:
                 # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
                 if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season:
+                    append_log(
+                        f"INFO: [season] bang 候选覆盖: file={src_path.name!r}, "
+                        f"candidate={parse_result.season} → resolved={resolved_season} (source=resolved_season)"
+                    )
                     season = resolved_season
                 else:
                     season = parse_result.season or resolved_season or 1
@@ -2829,6 +2916,52 @@ def _format_conflict_diff_suffix(merged_tags: list[str] | None = None, dropped_d
     if dropped:
         parts.append(f"dropped_diffs={','.join(dropped)}")
     return " | " + " | ".join(parts)
+
+
+def _detect_bracket_variant_as_special(filename: str) -> tuple[str | None, str | None, bool]:
+    """检测文件名括号中的 variant 关键词，若存在则返回 (category, label, True)。
+
+    用于将正片文件中含 variant 括号（如 [Preview01_1] / [Mystery Camp] / [On Air Ver.]）
+    的文件提前降级为特典，避免其先于正片占据主视频目标槽位。
+    仅在文件有集号（正片解析成功）且括号内含明确 variant 关键词时才触发。
+    """
+    bracket_tokens = re.findall(r"\[([^\]]+)\]|\(([^)]+)\)", filename or "")
+    for groups in bracket_tokens:
+        raw = next((g for g in groups if g), "")
+        if not raw:
+            continue
+        # 排除纯技术标签（编码、分辨率、音频格式等）
+        _noise_re = re.compile(
+            r"^(?:\d{3,4}p|x26[45]|h26[45]|hevc|av1|ma10p|hi10p|yuv\d+p?\d*|"
+            r"flac(?:x\d+)?|aac|ac3|dts|ddp\d?\.?\d?|raw|vcb(?:-?studio)?|mawen\d*|mysilu|"
+            r"jpsc|jptc|chs|cht|sc|tc|gb|big5|bd|dvd|webrip|web[-\s]?dl|bdrip|bluray|remux)+$",
+            re.I,
+        )
+        if _noise_re.match(raw.strip()):
+            continue
+
+        # Preview 类：Preview01_1 / Preview01 / Preview
+        m = re.search(r"\bPreview\s*0*(\d*)", raw, re.I)
+        if m:
+            idx = m.group(1)
+            label = _format_prefix_number("Preview", int(idx)) if idx else "Preview"
+            return "preview", label, True
+
+        # On Air Ver
+        if re.search(r"\bOn\s*Air\s*Ver\.?\b", raw, re.I):
+            return "special", "On Air Ver", True
+
+        # Staff Credit Ver / Musani Staff Credit Ver / Credit Ver
+        if re.search(r"\b(?:\w+\s+)*Staff\s+Credit\s+Ver\.?\b|\bCredit\s+Ver\.?\b", raw, re.I):
+            label = re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]|\([^)]*\)", "", raw)).strip()[:60] or "Credit Ver"
+            return "special", label, True
+
+        # Mystery Camp / 带「Camp」「Special」等词的括号内容（且不是纯数字/技术标签）
+        if re.search(r"\b(?:Mystery\s+Camp|Camp\b)", raw, re.I):
+            label = re.sub(r"\s+", " ", raw).strip()[:60]
+            return "special", label, True
+
+    return None, None, False
 
 
 def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) -> ParseResult:
@@ -3266,10 +3399,25 @@ def _rederive_season_from_context(
         if val:
             return val
 
-    # 5. context 中的 season_hint（仅当不是 bang 轻提示时）
-    if not context.get("bang_season_hint"):
-        hint = context.get("season_hint")
-        if isinstance(hint, int) and hint > 0:
+    # 5. context 中的 season_hint
+    # bang 候选需经 TMDB 有效季验证；其他来源直接采用
+    hint = context.get("season_hint")
+    if isinstance(hint, int) and hint > 0:
+        if context.get("bang_season_hint") or context.get("season_hint_source") == "bang":
+            # bang 候选：只有在 TMDB 有效季中才接受，否则继续到 TMDB 名称推导
+            _bang_in_tmdb = (
+                tmdb_seasons
+                and any(
+                    int(s.get("season_number", 0)) == hint
+                    for s in tmdb_seasons
+                    if s.get("season_number") is not None
+                )
+            )
+            if _bang_in_tmdb:
+                append_log(f"INFO: bang 候选 season={hint} 在 TMDB 有效季中，采用（来源=bang）")
+                return hint
+            append_log(f"INFO: bang 候选 season={hint} 不在 TMDB 有效季中，跳过（继续 TMDB 名称推导）")
+        else:
             return hint
 
     # 6. TMDB 季名称相似度匹配
@@ -3304,6 +3452,7 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     season_from_path = _extract_season_from_path(media_dir)
     season_hint = context.get("season_hint")
     season_hint_confidence = str(context.get("season_hint_confidence") or "").strip().lower() or None
+    season_hint_source = str(context.get("season_hint_source") or "").strip() or None
     season_aware_done = bool(context.get("season_aware_done"))
     season_aware_had_candidates = bool(context.get("season_aware_had_candidates"))
     if isinstance(season_hint, int) and season_hint <= 0:
@@ -3340,8 +3489,37 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
 
     tmdb_season_list = details.get("seasons", []) if isinstance(details, dict) else []
 
+    # OVA/-hen 目录早期检测：带 OVA/OAD/-hen 后缀的目录通常对应 Season 0
+    # 仅在无明确季号来源且 TMDB 存在 Season 0 时生效
+    _has_tmdb_season0 = any(
+        int(s.get("season_number", -1)) == 0
+        for s in tmdb_season_list
+        if s.get("season_number") is not None
+    )
+    _ova_dir_pattern = re.compile(
+        r"(?:\b(?:OVA|OAD)\b|[-_\s]hen\b)",
+        re.I,
+    )
+    if (
+        _has_tmdb_season0
+        and season_from_path is None
+        and season_hint_source not in ("explicit", "final")
+        and season_hint_confidence != "high"
+        and _ova_dir_pattern.search(media_dir.name)
+    ):
+        chosen = 0
+        append_log(
+            f"INFO: 目录名含 OVA/OAD/-hen 关键词且 TMDB 存在 Season 0，映射 season=0: dir={media_dir.name!r}"
+        )
+
+    append_log(
+        f"INFO: [season稳定] 开始: dir={media_dir.name!r}, "
+        f"candidate={chosen}, source={season_hint_source!r}, "
+        f"confidence={season_hint_confidence!r}, valid_seasons={valid_seasons}"
+    )
+
     # 无稳定季号时：先尝试 TMDB 季名称匹配推导，否则默认第一季
-    if not chosen and len(valid_seasons) > 1 and not is_final:
+    if chosen is None and len(valid_seasons) > 1 and not is_final:
         inferred = infer_season_from_tmdb_seasons(media_dir.name, tmdb_season_list)
         if inferred is not None:
             chosen = inferred[0]
@@ -3351,7 +3529,40 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         else:
             append_log("INFO: 多季作品且无稳定季号信息，默认使用第一季")
             chosen = 1
-    if chosen and valid_seasons and chosen not in valid_seasons:
+
+    # 「季名先行匹配」：无论是否有 chosen，若季号来源不可靠（非路径/显式指定/高置信度），
+    # 都先用 TMDB 季名相似度匹配一次，有更优答案时覆盖 chosen。
+    # 这解决了 Kakegurui×× / Tokyo Ghoul √A 等全部默认 Season 1 的问题。
+    # chosen=0（已被 OVA/-hen 检测设置）不参与季名匹配覆盖。
+    if chosen != 0 and not is_final and season_from_path is None and season_hint_source not in ("explicit", "final") and season_hint_confidence != "high":
+        inferred_early = infer_season_from_tmdb_seasons(media_dir.name, tmdb_season_list)
+        if inferred_early is not None:
+            inferred_num, inferred_ratio = inferred_early
+            # 只有当匹配到的季号与当前 chosen 不同，且置信度足够高时才覆盖
+            if inferred_num != chosen and inferred_ratio >= 0.62:
+                append_log(
+                    f"INFO: 季名先行匹配: season={inferred_num} ratio={inferred_ratio:.2f} "
+                    f"覆盖原 candidate={chosen}（来源={season_hint_source}）"
+                )
+                chosen = inferred_num
+
+    if chosen is not None and valid_seasons and chosen not in valid_seasons:
+        # Season 0（OVA/Specials）特判：valid_seasons 排除了 season_number<=0，
+        # 但若 chosen=0 且 TMDB 确实存在 season 0，直接采用而不进入冲突流程。
+        if chosen == 0 and _has_tmdb_season0:
+            append_log(
+                f"INFO: OVA 目录 season=0 在 TMDB 中存在，直接采用（跳过冲突流程）"
+            )
+            resolved = resolve_season_by_tmdb(None, int(tmdb_id), 0, final_hint=False)
+            if resolved is None:
+                resolved = 0
+            context["season_hint"] = 0
+            context["resolved_season"] = resolved
+            context["final_resolved_season"] = None
+            append_log(
+                f"INFO: [season稳定] 完成: dir={media_dir.name!r}, candidate={season_hint} → resolved_season=0, source=ova_dir_detect"
+            )
+            return True, None
         append_log(
             f"INFO: 季号 {chosen} 在 TMDB 候选 tmdbid={tmdb_id} 中不存在，尝试 TMDB 季名匹配和重新搜索"
         )
@@ -3372,7 +3583,11 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
                 context["resolved_season"] = resolved
                 context["final_resolved_season"] = resolved if is_final else None
                 return True, None
-        reliable_hint = season_from_path is not None or season_hint_confidence == "high"
+        reliable_hint = (
+            season_from_path is not None
+            or season_hint_source in ("explicit", "final")
+            or season_hint_confidence == "high"
+        )
         # K-ON!! 类情形：季号仅来自标题 !! 符号，属于弱提示，不触发 re-search
         if reliable_hint and season_from_path is None:
             _bang_val = extract_bang_season(context.get("title") or "")
@@ -3384,8 +3599,20 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
                     f"INFO: season_hint={season_hint} 来自标题 !! 轻提示，降为不可信，不触发 re-search"
                 )
         if not reliable_hint:
-            append_log("INFO: 季号提示较弱或疑似标题数字，跳过重新搜索并回退到默认季号")
-            chosen = None
+            # bang 候选：若目标 TMDB 确实存在该季，可直接采用，不能无条件丢弃
+            if (
+                context.get("bang_season_hint") or season_hint_source == "bang"
+            ) and chosen is not None and valid_seasons and chosen in valid_seasons:
+                append_log(
+                    f"INFO: bang 候选 season={chosen} 在 TMDB 有效季 {valid_seasons} 中，直接采用"
+                )
+                # chosen 保持不变，跳过 re-search 直接进入 resolve
+            else:
+                append_log(
+                    f"INFO: 季号提示较弱或疑似标题数字，season={chosen} 不在 TMDB 有效季 {valid_seasons} 中，"
+                    f"跳过重新搜索并回退到默认季号"
+                )
+                chosen = None
         elif season_aware_done and season_aware_had_candidates:
             # 软二次校验：不立即硬失败，先尝试从目录名/上下文再次推导季号
             rederived_season = _rederive_season_from_context(media_dir, context, tmdb_seasons=details.get("seasons", []))
@@ -3495,4 +3722,8 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     context["season_hint"] = chosen
     context["resolved_season"] = resolved
     context["final_resolved_season"] = resolved if is_final else None
+    append_log(
+        f"INFO: [season稳定] 完成: dir={media_dir.name!r}, "
+        f"candidate={chosen} → resolved_season={resolved}, source={context.get('season_hint_source')!r}"
+    )
     return True, None

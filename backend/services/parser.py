@@ -457,7 +457,7 @@ async def search_tmdb_movie_candidates(title: str, year: int | None = None) -> l
 
 
 async def get_tmdb_tv_details(tv_id: int) -> dict | None:
-    """获取 TMDB TV 详情（季信息等）。"""
+    """获取 TMDB TV 详情（季信息等）。同时附加英文季名以支持目录名匹配。"""
     if not settings.tmdb_api_key:
         return None
 
@@ -480,10 +480,34 @@ async def get_tmdb_tv_details(tv_id: int) -> dict | None:
         return None
 
     data = r.json()
-    if isinstance(data, dict) and data:
-        _cache_set(cache_key, data)
-        return data
-    return None
+    if not isinstance(data, dict) or not data:
+        return None
+
+    # 同时获取英文版本，将英文季名附加到各 season 条目中，供季名相似度匹配使用
+    try:
+        await _rate_limit_tmdb()
+        params_en = {"api_key": settings.tmdb_api_key, "language": "en-US"}
+        async with httpx.AsyncClient(timeout=20) as client:
+            r_en = await client.get(url, params=params_en)
+        if r_en.status_code == 200:
+            data_en = r_en.json()
+            if isinstance(data_en, dict):
+                en_season_names: dict[int, str] = {}
+                for s in data_en.get("seasons", []) or []:
+                    snum = s.get("season_number")
+                    sname = str(s.get("name") or "").strip()
+                    if snum is not None and sname:
+                        en_season_names[int(snum)] = sname
+                # 将英文季名写入 season 条目的 name_en 字段
+                for s in data.get("seasons", []) or []:
+                    snum = s.get("season_number")
+                    if snum is not None and int(snum) in en_season_names:
+                        s["name_en"] = en_season_names[int(snum)]
+    except Exception:
+        pass  # 英文版获取失败不影响主流程
+
+    _cache_set(cache_key, data)
+    return data
 
 
 def search_tmdb_tv_candidates_sync(title: str, year: int | None = None) -> list[dict]:
