@@ -322,6 +322,15 @@ class TestInferSeasonFromTmdbSeasons(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 2)
 
+    def test_durarara_x2_shou_prefers_second_season(self):
+        seasons = [
+            self._s(1, "无头骑士异闻录", "Durarara!!"),
+            self._s(2, "无头骑士异闻录×2", "Durarara!! x2"),
+        ]
+        result = self.infer("[VCB-Studio] Durarara!!×2 Shou [Ma10p_1080p]", seasons)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 2)
+
     def test_exact_match_en_name(self):
         """英文季名通过 name_en 字段匹配"""
         seasons = [
@@ -331,6 +340,44 @@ class TestInferSeasonFromTmdbSeasons(unittest.TestCase):
         result = self.infer("Kobayashi-san Chi no Maid Dragon S", seasons)
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 2)
+
+    def test_k_on_bang_prefers_second_season(self):
+        seasons = [
+            self._s(1, "轻音少女", "K-ON!"),
+            self._s(2, "轻音少女!!", "K-ON!!"),
+        ]
+        result = self.infer("K-ON!!", seasons)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 2)
+
+    def test_k_on_single_bang_stays_first_season(self):
+        seasons = [
+            self._s(1, "轻音少女", "K-ON!"),
+            self._s(2, "轻音少女!!", "K-ON!!"),
+        ]
+        result = self.infer("K-ON!", seasons)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 1)
+
+    def test_kakegurui_xx_name_en_prefers_second_season(self):
+        seasons = [
+            self._s(1, "狂赌之渊", "Season 1"),
+            self._s(2, "狂赌之渊××", "Kakegurui xx"),
+        ]
+        result = self.infer("Kakegurui××", seasons)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 2)
+
+    def test_to_love_ru_darkness_prefers_third_season(self):
+        seasons = [
+            self._s(1, "出包王女", "To Love-Ru"),
+            self._s(2, "更多 出包王女", "Motto"),
+            self._s(3, "出包王女Darkness", "Darkness"),
+            self._s(4, "出包王女Darkness 2nd", "To Love Ru Darkness 2Nd"),
+        ]
+        result = self.infer("To LOVE-Ru Darkness", seasons)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 3)
 
     def test_psycho_pass_ii(self):
         """PSYCHO-PASS II 应匹配 S2"""
@@ -536,6 +583,18 @@ class TestDetectBracketVariantAsSpecial(unittest.TestCase):
         cat, label, from_b = self.detect("Yuru Camp Season 2 [Mystery Camp][Ma10p_1080p][x265_flac].mkv")
         self.assertIsNotNone(cat)
 
+    def test_tabisuru_shima_rin(self):
+        """[Tabisuru Shima Rin] 应被检测为 variant"""
+        cat, label, from_b = self.detect("Yuru Camp Season 2 [Tabisuru Shima Rin][Ma10p_1080p][x265_flac].mkv")
+        self.assertEqual(cat, "special")
+        self.assertEqual(label, "Tabisuru Shima Rin")
+        self.assertTrue(from_b)
+
+    def test_release_group_not_detected(self):
+        """字幕组/压制组括号不应被当作 variant"""
+        cat, label, from_b = self.detect("[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Season 2 [Ma10p_1080p].mkv")
+        self.assertIsNone(cat)
+
     def test_clean_episode_not_detected(self):
         """干净集号文件 [09] 不应被检测为 variant"""
         cat, label, from_b = self.detect("kiss×sis [09][Ma10p_1080p][x265_flac].mkv")
@@ -572,6 +631,51 @@ class TestVideoSortKey(unittest.TestCase):
         a = Path("/fake/dir/show [01][1080p].mkv")
         b = Path("/fake/dir/show [02][1080p].mkv")
         self.assertLess(self.sort_key(a), self.sort_key(b))
+
+
+# ===========================================================================
+# 十二、descriptive special label 保留
+# ===========================================================================
+
+class TestDescriptiveSpecialLabel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from backend.services.scanner import _needs_readable_suffix
+        from backend.services.parser import ParseResult
+        cls.needs_suffix = staticmethod(_needs_readable_suffix)
+        cls.ParseResult = ParseResult
+
+    def test_mystery_camp_label_not_overridden(self):
+        parse_result = self.ParseResult(
+            "Yuru Camp Season 2",
+            None,
+            2,
+            1,
+            True,
+            None,
+            "special",
+            "Mystery Camp",
+            None,
+            False,
+            False,
+        )
+        self.assertFalse(self.needs_suffix(parse_result))
+
+    def test_generic_sp_label_still_needs_suffix(self):
+        parse_result = self.ParseResult(
+            "Yuru Camp Season 2",
+            None,
+            2,
+            1,
+            True,
+            None,
+            "special",
+            "SP",
+            None,
+            False,
+            False,
+        )
+        self.assertTrue(self.needs_suffix(parse_result))
 
 
 # ===========================================================================

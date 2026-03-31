@@ -2670,18 +2670,11 @@ def _is_ignored_name(name: str) -> bool:
     return any(token in lowered for token in IGNORED_TOKENS)
 
 
-# 括号内 variant 关键词模式：用于文件排序时将 variant 文件排在同集正片之后
-_VARIANT_BRACKET_SORT_RE = re.compile(
-    r"\([^)]*(?:On\s*Air\s*Ver|Staff\s+Credit\s+Ver|Credit\s+Ver|Mystery\s+Camp|Camp\b)[^)]*\)",
-    re.I,
-)
-
-
 def _video_sort_key(p: Path) -> tuple[int, str]:
     """排序 key：先按路径正序，但含 variant 括号后缀的文件排在同名正片之后。
     这保证干净的正片文件优先占据目标槽，variant 文件遇到冲突时才转为特典。
     """
-    has_variant = bool(_VARIANT_BRACKET_SORT_RE.search(p.name))
+    has_variant = _detect_bracket_variant_as_special(p.name)[0] is not None
     return (1 if has_variant else 0, p.as_posix())
 
 
@@ -3086,18 +3079,12 @@ def _detect_bracket_variant_as_special(filename: str) -> tuple[str | None, str |
     仅在文件有集号（正片解析成功）且括号内含明确 variant 关键词时才触发。
     """
     bracket_tokens = re.findall(r"\[([^\]]+)\]|\(([^)]+)\)", filename or "")
+    token_count = len(bracket_tokens)
     for groups in bracket_tokens:
         raw = next((g for g in groups if g), "")
         if not raw:
             continue
-        # 排除纯技术标签（编码、分辨率、音频格式等）
-        _noise_re = re.compile(
-            r"^(?:\d{3,4}p|x26[45]|h26[45]|hevc|av1|ma10p|hi10p|yuv\d+p?\d*|"
-            r"flac(?:x\d+)?|aac|ac3|dts|ddp\d?\.?\d?|raw|vcb(?:-?studio)?|mawen\d*|mysilu|"
-            r"jpsc|jptc|chs|cht|sc|tc|gb|big5|bd|dvd|webrip|web[-\s]?dl|bdrip|bluray|remux)+$",
-            re.I,
-        )
-        if _noise_re.match(raw.strip()):
+        if _is_noise_or_group_bracket_token(raw):
             continue
 
         # Preview 类：Preview01_1 / Preview01 / Preview
@@ -3116,12 +3103,111 @@ def _detect_bracket_variant_as_special(filename: str) -> tuple[str | None, str |
             label = re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]|\([^)]*\)", "", raw)).strip()[:60] or "Credit Ver"
             return "special", label, True
 
-        # Mystery Camp / 带「Camp」「Special」等词的括号内容（且不是纯数字/技术标签）
-        if re.search(r"\b(?:Mystery\s+Camp|Camp\b)", raw, re.I):
-            label = re.sub(r"\s+", " ", raw).strip()[:60]
+        label = _normalize_generic_variant_bracket_label(raw)
+        if _is_generic_variant_bracket_label(label, token_count):
             return "special", label, True
 
     return None, None, False
+
+
+def _is_noise_or_group_bracket_token(raw: str) -> bool:
+    token = re.sub(r"\s+", " ", str(raw or "")).strip()
+    if not token:
+        return True
+    compact = re.sub(r"[\s._\-]+", " ", token).strip().lower()
+    noise_patterns = [
+        r"\d{3,4}p",
+        r"x26[45]",
+        r"h26[45]",
+        r"hevc",
+        r"av1",
+        r"ma10p",
+        r"hi10p",
+        r"yuv\d+p?\d*",
+        r"flac(?:x\d+)?",
+        r"aac",
+        r"ac3",
+        r"dts",
+        r"ddp\d?\.?\d?",
+        r"raw",
+        r"jpsc",
+        r"jptc",
+        r"chs",
+        r"cht",
+        r"sc",
+        r"tc",
+        r"gb",
+        r"big5",
+        r"bd",
+        r"dvd",
+        r"webrip",
+        r"web(?:dl)?",
+        r"bdrip",
+        r"bluray",
+        r"remux",
+    ]
+    parts = [part for part in re.split(r"[\s&+/|]+", compact) if part]
+    if parts and all(any(re.fullmatch(pattern, part, flags=re.I) for pattern in noise_patterns) for part in parts):
+        return True
+    if _is_release_group_phrase(token):
+        return True
+    if re.fullmatch(r"(?:\d{1,3}(?:v\d+)?|s\d{1,2}e\d{1,3}|ep?\s*\d{1,3}|第\s*\d{1,3}\s*[集话話])", token, re.I):
+        return True
+    return False
+
+
+def _normalize_generic_variant_bracket_label(raw: str) -> str:
+    label = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", str(raw or ""))
+    label = re.sub(r"^(?:\d{1,3}(?:v\d+)?|s\d{1,2}e\d{1,3}|ep?\s*\d{1,3})\s*[-_ ]*", "", label, flags=re.I)
+    label = re.sub(r"\s+", " ", label).strip(" -_")
+    return label[:60]
+
+
+def _is_generic_variant_bracket_label(label: str, token_count: int) -> bool:
+    normalized = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not normalized:
+        return False
+    if token_count < 2:
+        return False
+    if not re.search(r"[A-Za-z\u4e00-\u9fff]", normalized):
+        return False
+    if re.fullmatch(r"(?:season\s*\d{1,2}|第\s*\d{1,2}\s*季|special|specials|ova|oad|oav|sp)", normalized, re.I):
+        return False
+    tokenized = [tok for tok in re.split(r"[\s._\-]+", normalized) if tok]
+    if len(tokenized) == 1 and len(normalized) < 6 and not re.search(r"[\u4e00-\u9fff]", normalized):
+        return False
+    if _is_release_group_phrase(normalized):
+        return False
+    return True
+
+
+def _is_release_group_phrase(text: str) -> bool:
+    s = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not s:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", s):
+        return bool(re.search(r"(字幕组|字幕社|压制组|搬运组)$", s))
+    tokens = [tok for tok in re.split(r"[\s\-_.&+/]+", s) if tok]
+    if not tokens:
+        return False
+    noise_patterns = [
+        r"vcb(?:studio)?",
+        r"mawen\d*",
+        r"mysilu",
+        r"nekomoe",
+        r"kissaten",
+        r"airota",
+        r"dmhy",
+        r"sub",
+        r"fansub",
+        r"raws?",
+        r"studio",
+    ]
+    matched = 0
+    for tok in tokens:
+        if any(re.fullmatch(p, tok, flags=re.I) for p in noise_patterns):
+            matched += 1
+    return matched == len(tokens)
 
 
 def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) -> ParseResult:
@@ -3144,9 +3230,52 @@ def _needs_readable_suffix(parse_result: ParseResult) -> bool:
     stable_idx = _extract_stable_label_index(parse_result.extra_label)
     if stable_idx is not None:
         return False
+    if _has_descriptive_extra_label(parse_result.extra_label, parse_result.extra_category):
+        return False
     if parse_result.episode is None:
         return True
     return int(parse_result.episode) == 1
+
+
+def _has_descriptive_extra_label(label: str | None, category: str | None) -> bool:
+    s = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not s:
+        return False
+    generic_by_category = {
+        "special": {
+            "sp",
+            "special",
+            "specials",
+            "ova",
+            "oad",
+            "oav",
+            "bonus",
+            "extra episode",
+        },
+        "preview": {"preview", "webpreview"},
+        "trailer": {"trailer", "promo", "promotion video", "promotion clip", "tvspot"},
+        "pv": {"pv", "characterpv"},
+        "cm": {"cm"},
+        "making": {"making", "scene"},
+        "interview": {"interview"},
+        "bdextra": {"bdextra", "bd extra"},
+        "teaser": {"teaser"},
+        "iv": {"iv"},
+        "mv": {"mv"},
+        "oped": {"op", "ed"},
+    }
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", s.lower(), flags=re.U)
+    if not normalized:
+        return False
+    category_key = str(category or "").lower()
+    generic_set = generic_by_category.get(category_key, set())
+    normalized_generics = {
+        re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", item.lower(), flags=re.U)
+        for item in generic_set
+    }
+    if normalized in normalized_generics:
+        return False
+    return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", s))
 
 
 def _normalize_suffix_text(text: str) -> str:

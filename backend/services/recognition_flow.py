@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from .parser import (
+    extract_bang_season,
     get_tmdb_tv_details_sync,
     is_title_number_safe,
     parse_tv_filename,
@@ -643,7 +644,60 @@ def _clean_dir_name_for_match(dir_name: str) -> str:
     return cleaned
 
 
-def _season_name_match_ratio(cleaned_lower: str, sname: str) -> float:
+def _normalize_season_match_text(text: str) -> str:
+    normalized = str(text or "")
+    normalized = re.sub(r"([A-Za-z0-9])([×xX]{2,4})(?=$|[\s._\-:!/])", r"\1 \2", normalized)
+    normalized = re.sub(r"([A-Za-z0-9])[×xX]\s*([2-9]|10)\b", r"\1 x\2", normalized)
+    normalized = normalized.replace("×", "x")
+    normalized = re.sub(r"[’'`]+", "", normalized)
+    normalized = re.sub(r"[._\-:/]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip().lower()
+
+
+def _extract_season_match_markers(text: str) -> set[str]:
+    raw = str(text or "")
+    normalized = _normalize_season_match_text(raw)
+    markers: set[str] = set()
+
+    explicit = _extract_explicit_season_hint(raw) or _extract_explicit_season_hint(normalized)
+    if isinstance(explicit, int) and explicit > 1:
+        markers.add(f"season:{explicit}")
+
+    bang = extract_bang_season(raw)
+    if isinstance(bang, int) and bang > 1:
+        markers.add(f"season:{bang}")
+
+    for match in re.finditer(r"\bx\s*([2-9]|10)\b", normalized, re.I):
+        markers.add(f"season:{int(match.group(1))}")
+
+    for match in re.finditer(r"\b(x{2,4})\b", normalized, re.I):
+        markers.add(f"season:{len(match.group(1))}")
+
+    for match in re.finditer(r"\b([2-9]|10)(st|nd|rd|th)\b", normalized, re.I):
+        markers.add(f"ordinal:{int(match.group(1))}")
+
+    if re.search(r"\bs\s*$", normalized, re.I):
+        markers.add("suffix:s")
+
+    return markers
+
+
+def _extract_significant_match_tokens(text: str) -> set[str]:
+    normalized = _normalize_season_match_text(text)
+    if not normalized:
+        return set()
+    stopwords = {"season", "series", "the", "part", "final"}
+    tokens: set[str] = set()
+    for token in re.findall(r"[0-9a-z\u4e00-\u9fff]+", normalized, re.I):
+        if token in stopwords:
+            continue
+        if len(token) >= 3 or re.search(r"[\u4e00-\u9fff]", token):
+            tokens.add(token)
+    return tokens
+
+
+def _season_name_match_ratio(cleaned_lower: str, sname: str, dir_markers: set[str] | None = None) -> float:
     """计算目录名与单个季名的匹配率，含 substring bonus。
 
     策略：
@@ -653,9 +707,11 @@ def _season_name_match_ratio(cleaned_lower: str, sname: str) -> float:
     """
     from difflib import SequenceMatcher
 
+    dir_markers = dir_markers or set()
     is_generic = bool(_GENERIC_SEASON_NAME_RE.match(sname))
-    sname_lower = sname.lower()
+    sname_lower = _normalize_season_match_text(sname)
     ratio = SequenceMatcher(None, cleaned_lower, sname_lower).ratio()
+    name_markers = _extract_season_match_markers(sname)
 
     # Substring bonus：若季名的核心部分（去除 "Season N" 等前缀）出现在目录名中
     # 例：目录="Kakegurui××"，季名="Kakegurui××" → 直接包含
@@ -663,7 +719,7 @@ def _season_name_match_ratio(cleaned_lower: str, sname: str) -> float:
     if not is_generic:
         # 季名去除前导 "Series/Season N " 前缀
         core = re.sub(r"^\s*(?:Season|Series)\s*\d+\s*[:\-–]?\s*", "", sname, flags=re.I).strip()
-        core_lower = core.lower()
+        core_lower = _normalize_season_match_text(core)
         if core_lower and len(core_lower) >= 3:
             if core_lower in cleaned_lower or cleaned_lower in core_lower:
                 # 直接包含：给予较强 bonus，确保超过阈值
@@ -675,11 +731,39 @@ def _season_name_match_ratio(cleaned_lower: str, sname: str) -> float:
                 if overlap_ratio >= 0.85:
                     ratio = max(ratio, 0.60)
 
+    dir_numeric = {marker for marker in dir_markers if marker.startswith("season:")}
+    name_numeric = {marker for marker in name_markers if marker.startswith("season:")}
+    if dir_numeric:
+        if dir_numeric & name_numeric:
+            ratio = max(ratio, 0.79)
+        elif name_numeric and not (dir_numeric & name_numeric):
+            ratio -= 0.18
+        elif not is_generic:
+            ratio -= 0.08
+
+    dir_has_suffix_s = "suffix:s" in dir_markers
+    name_has_suffix_s = "suffix:s" in name_markers
+    if dir_has_suffix_s:
+        if name_has_suffix_s:
+            ratio = max(ratio, 0.76)
+        elif not name_numeric:
+            ratio -= 0.12
+
+    dir_ordinal = {marker for marker in dir_markers if marker.startswith("ordinal:")}
+    name_ordinal = {marker for marker in name_markers if marker.startswith("ordinal:")}
+    if dir_ordinal:
+        if dir_ordinal & name_ordinal:
+            ratio = max(ratio, 0.77)
+        elif name_ordinal and not (dir_ordinal & name_ordinal):
+            ratio -= 0.24
+    elif name_ordinal:
+        ratio -= 0.40
+
     # 通用名称上限降权
     if is_generic:
         ratio = min(ratio, 0.5)
 
-    return ratio
+    return max(0.0, min(ratio, 1.0))
 
 
 def infer_season_from_tmdb_seasons(
@@ -696,7 +780,33 @@ def infer_season_from_tmdb_seasons(
     if not dir_name or not seasons:
         return None
     cleaned = _clean_dir_name_for_match(dir_name)
-    cleaned_lower = cleaned.lower()
+    cleaned_lower = _normalize_season_match_text(cleaned)
+    dir_markers = _extract_season_match_markers(cleaned)
+    dir_tokens = _extract_significant_match_tokens(cleaned)
+
+    candidate_token_freq: dict[str, int] = {}
+    season_names: dict[int, list[str]] = {}
+
+    valid_season_count = 0
+
+    for s in seasons:
+        snum = s.get("season_number")
+        if snum is None or int(snum) <= 0:
+            continue
+        valid_season_count += 1
+        names: list[str] = []
+        sname_zh = str(s.get("name") or "").strip()
+        if sname_zh:
+            names.append(sname_zh)
+        sname_en = str(s.get("name_en") or "").strip()
+        if sname_en and sname_en != sname_zh:
+            names.append(sname_en)
+        season_names[int(snum)] = names
+        tokens = set()
+        for name in names:
+            tokens.update(_extract_significant_match_tokens(name))
+        for token in tokens:
+            candidate_token_freq[token] = candidate_token_freq.get(token, 0) + 1
 
     best_ratio: float = 0.0
     best_season: int | None = None
@@ -708,21 +818,35 @@ def infer_season_from_tmdb_seasons(
         snum = int(snum)
 
         # 同时比较中文季名和英文季名，取最高分
-        candidate_names = []
-        sname_zh = str(s.get("name") or "").strip()
-        if sname_zh:
-            candidate_names.append(sname_zh)
-        sname_en = str(s.get("name_en") or "").strip()
-        if sname_en and sname_en != sname_zh:
-            candidate_names.append(sname_en)
+        candidate_names = season_names.get(snum, [])
 
         if not candidate_names:
             continue
 
         season_best = max(
-            _season_name_match_ratio(cleaned_lower, sname)
+            _season_name_match_ratio(cleaned_lower, sname, dir_markers=dir_markers)
             for sname in candidate_names
         )
+
+        season_tokens = set()
+        for name in candidate_names:
+            season_tokens.update(_extract_significant_match_tokens(name))
+
+        if dir_tokens and valid_season_count > 1:
+            discriminative_dir_tokens = {
+                token
+                for token in dir_tokens
+                if 0 < candidate_token_freq.get(token, 0) < valid_season_count
+            }
+            matched_discriminative = discriminative_dir_tokens & season_tokens
+            missing_discriminative = discriminative_dir_tokens - season_tokens
+            if matched_discriminative:
+                matched_bonus = sum(0.02 * min(max(len(token), 2), 6) for token in matched_discriminative)
+                season_best += min(0.18, matched_bonus)
+            if missing_discriminative:
+                missing_penalty = sum(0.02 * min(max(len(token), 2), 6) for token in missing_discriminative)
+                season_best -= min(0.18, missing_penalty)
+            season_best = max(0.0, min(season_best, 1.0))
 
         if season_best > best_ratio:
             best_ratio = season_best
