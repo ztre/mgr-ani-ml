@@ -20,7 +20,15 @@ from ..services.group_routing import resolve_movie_target_root
 from ..services.linker import get_inode
 from ..services.parser import parse_movie_filename, parse_tv_filename
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
-from ..services.scanner import DirectoryProcessError, reidentify_by_target_dir, run_manual_organize, tag_task_type_with_issue
+from ..services.scanner import (
+    DirectoryProcessError,
+    TaskCancelledError,
+    init_scan_cancel_flag,
+    pop_scan_cancel_flag,
+    reidentify_by_target_dir,
+    run_manual_organize,
+    tag_task_type_with_issue,
+)
 
 router = APIRouter()
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
@@ -362,7 +370,7 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
     row.tmdb_id = data.tmdb_id
     row.target_path = str(dst)
     row.status = "manual_fixed"
-    row.updated_at = datetime.utcnow()
+    row.updated_at = datetime.now(timezone.utc)
 
     ino = get_inode(src)
     if ino:
@@ -400,6 +408,7 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
     db.add(task)
     db.commit()
     db.refresh(task)
+    init_scan_cancel_flag(task.id)
     token = current_task_id.set(task.id)
 
     try:
@@ -422,7 +431,7 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
         if has_issues:
             task.type = tag_task_type_with_issue(task.type)
             append_log("手动整理完成但存在问题项（Special 冲突已跳过）")
-        task.finished_at = datetime.utcnow()
+        task.finished_at = datetime.now(timezone.utc)
         append_log(f"手动整理完成: 成功 {processed}，失败 {failed}")
         db.commit()
 
@@ -431,13 +440,20 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
             "processed": processed,
             "failed": failed,
         }
+    except TaskCancelledError as e:
+        task.status = "cancelled"
+        task.finished_at = datetime.now(timezone.utc)
+        append_log(f"手动整理已取消: {e}")
+        db.commit()
+        raise HTTPException(status_code=409, detail=str(e))
     except DirectoryProcessError as e:
         task.status = "failed"
-        task.finished_at = datetime.utcnow()
+        task.finished_at = datetime.now(timezone.utc)
         append_log(f"手动整理失败: {e}")
         db.commit()
         raise HTTPException(status_code=400, detail=str(e))
     finally:
+        pop_scan_cancel_flag(task.id)
         task.log_file = f"task_{task.id}.log"
         try:
             db.commit()

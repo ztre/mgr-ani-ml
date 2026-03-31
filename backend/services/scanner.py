@@ -66,10 +66,14 @@ VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv", ".ts", ".m2ts"}
 ATTACHMENT_EXTS = {".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub"}
 MEDIA_EXTS = VIDEO_EXTS | ATTACHMENT_EXTS
 SCAN_LOCK = Lock()
+SCAN_ISSUE_LOCK = Lock()
+SCAN_CANCEL_LOCK = Lock()
 MEDIA_TASK_QUEUE: queue.Queue = queue.Queue()
 _WORKER_THREAD = None
 _WORKER_LOCK = Lock()
 _WORKER_LOCK_FD = None
+SCAN_ISSUE_FLAGS: dict[int, bool] = {}
+SCAN_CANCEL_FLAGS: dict[int, bool] = {}
 
 IGNORED_TOKENS = {"bdmv", "menu", "sample", "scan", "disc", "iso", "font"}
 EXTRAS_CATEGORIES = set(EXTRA_CATEGORIES)
@@ -117,6 +121,81 @@ class MediaTask:
 
 class DirectoryProcessError(Exception):
     pass
+
+
+class TaskCancelledError(Exception):
+    pass
+
+
+def _init_scan_issue_flag(scan_task_id: int | None) -> None:
+    if not scan_task_id:
+        return
+    with SCAN_ISSUE_LOCK:
+        SCAN_ISSUE_FLAGS[int(scan_task_id)] = False
+
+
+def _mark_scan_issue_flag(scan_task_id: int | None) -> None:
+    if not scan_task_id:
+        return
+    with SCAN_ISSUE_LOCK:
+        SCAN_ISSUE_FLAGS[int(scan_task_id)] = True
+
+
+def _pop_scan_issue_flag(scan_task_id: int | None) -> bool:
+    if not scan_task_id:
+        return False
+    with SCAN_ISSUE_LOCK:
+        return bool(SCAN_ISSUE_FLAGS.pop(int(scan_task_id), False))
+
+
+def init_scan_cancel_flag(scan_task_id: int | None) -> None:
+    if not scan_task_id:
+        return
+    with SCAN_CANCEL_LOCK:
+        SCAN_CANCEL_FLAGS[int(scan_task_id)] = False
+
+
+def request_scan_cancel(scan_task_id: int | None) -> bool:
+    if not scan_task_id:
+        return False
+    with SCAN_CANCEL_LOCK:
+        task_id = int(scan_task_id)
+        if task_id not in SCAN_CANCEL_FLAGS:
+            return False
+        SCAN_CANCEL_FLAGS[task_id] = True
+        return True
+
+
+def is_scan_cancel_requested(scan_task_id: int | None) -> bool:
+    if not scan_task_id:
+        return False
+    with SCAN_CANCEL_LOCK:
+        return bool(SCAN_CANCEL_FLAGS.get(int(scan_task_id), False))
+
+
+def pop_scan_cancel_flag(scan_task_id: int | None) -> bool:
+    if not scan_task_id:
+        return False
+    with SCAN_CANCEL_LOCK:
+        return bool(SCAN_CANCEL_FLAGS.pop(int(scan_task_id), False))
+
+
+def _sleep_with_cancel(scan_task_id: int | None, seconds: float) -> bool:
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        if is_scan_cancel_requested(scan_task_id):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.2, remaining))
+
+
+def _log_cancel_phase(phase: str, detail: str | None = None) -> None:
+    message = f"取消请求已命中 phase={phase}"
+    if detail:
+        message = f"{message}: {detail}"
+    append_log(message)
 
 
 def _classify_media_task_error(exc: Exception) -> Literal["deterministic_conflict", "transient", "other"]:
@@ -272,13 +351,20 @@ def _media_task_worker() -> None:
         token = None
         if task.task_id:
             token = current_task_id.set(task.task_id)
+        if is_scan_cancel_requested(task.task_id):
+            _log_cancel_phase("worker-dequeue", f"skip_dir={task.path}")
+            if token is not None:
+                current_task_id.reset(token)
+            MEDIA_TASK_QUEUE.task_done()
+            continue
         append_log(f"INFO: 媒体任务开始: {task.path}")
         retries = 0
         recompute_retry_used = False
+        task_has_issues = False
         while True:
             local_db = SessionLocal()
             try:
-                _handle_media_task(local_db, task, force_recompute_names=recompute_retry_used)
+                task_has_issues = _handle_media_task(local_db, task, force_recompute_names=recompute_retry_used)
                 local_db.commit()
                 append_log(f"INFO: 媒体任务完成: {task.path}")
                 break
@@ -306,10 +392,12 @@ def _media_task_worker() -> None:
                         append_log(
                             f"WARNING: MediaTask 确定性冲突未解决，已移至 pending_manual: {task.path}"
                         )
+                        task_has_issues = True
                     else:
                         append_log(
                             f"WARNING: MediaTask 确定性冲突未解决 (组缺失): {task.path} | {e}"
                         )
+                        task_has_issues = True
                     break
                 if error_kind == "transient" and retries < 3:
                     retries += 1
@@ -317,14 +405,19 @@ def _media_task_worker() -> None:
                     append_log(
                         f"WARNING: MediaTask 暂时性失败 ({retries}/3): {task.path} | {e} | backoff={backoff}s"
                     )
-                    time.sleep(backoff)
+                    if _sleep_with_cancel(task.task_id, backoff):
+                        _log_cancel_phase("retry-wait", f"dir={task.path}")
+                        break
                     continue
                 append_log(
                     f"WARNING: MediaTask 暂时性失败 ({error_kind}): {task.path} | {e}"
                 )
+                task_has_issues = True
                 break
             finally:
                 local_db.close()
+        if task_has_issues:
+            _mark_scan_issue_flag(task.task_id)
         if token is not None:
             current_task_id.reset(token)
         MEDIA_TASK_QUEUE.task_done()
@@ -359,6 +452,8 @@ def run_scan(
     db.add(task)
     db.commit()
     db.refresh(task)
+    _init_scan_issue_flag(task.id)
+    init_scan_cancel_flag(task.id)
 
     from ..api.logs import LOG_DIR
 
@@ -375,7 +470,7 @@ def run_scan(
         if not acquired:
             append_log("已有扫描任务在运行，本次任务被拒绝以避免并发冲突")
             task.status = "failed"
-            task.finished_at = datetime.utcnow()
+            task.finished_at = datetime.now(timezone.utc)
             db.commit()
             return
 
@@ -384,7 +479,7 @@ def run_scan(
         if not settings.tmdb_api_key:
             append_log("错误: 未配置 TMDB API Key，无法进行识别与刮削。")
             task.status = "failed"
-            task.finished_at = datetime.utcnow()
+            task.finished_at = datetime.now(timezone.utc)
             db.commit()
             return
 
@@ -399,6 +494,9 @@ def run_scan(
         try:
             _start_media_worker()
             for group in groups:
+                if is_scan_cancel_requested(task.id):
+                    _log_cancel_phase("group-loop", f"stop_before_group={group.name}")
+                    break
                 append_log(f"处理同步组: {group.name}")
                 group_first_dir, group_has_issues = _process_sync_group(
                     db,
@@ -411,6 +509,12 @@ def run_scan(
                     has_issues = True
 
             MEDIA_TASK_QUEUE.join()
+            has_issues = has_issues or _pop_scan_issue_flag(task.id)
+
+            if is_scan_cancel_requested(task.id):
+                _log_cancel_phase("scan-finish", "skip_emby_refresh")
+                task.status = "cancelled"
+                return
 
             if first_scanned_dir_name and not target_name_override and task.type in {"group", "full"}:
                 task.target_name = first_scanned_dir_name
@@ -429,7 +533,9 @@ def run_scan(
             db.rollback()
             task.status = "failed"
     finally:
-        task.finished_at = datetime.utcnow()
+        _pop_scan_issue_flag(task.id)
+        pop_scan_cancel_flag(task.id)
+        task.finished_at = datetime.now(timezone.utc)
         task.log_file = f"task_{task.id}.log"
         try:
             db.commit()
@@ -452,6 +558,8 @@ def run_manual_organize(
     season_override: int | None = None,
     episode_offset: int | None = None,
 ) -> tuple[int, int, bool]:
+    task_id = current_task_id.get()
+
     root_dir = Path(pending.original_path or "")
     if not root_dir.exists() or not root_dir.is_dir():
         raise DirectoryProcessError("待办目录不存在或不是目录")
@@ -528,8 +636,20 @@ def run_manual_organize(
     )
 
     processed = 0
+
+    def _cancel_manual_task(phase: str, detail: str | None = None) -> None:
+        _log_cancel_phase(phase, detail or f"dir={root_dir}")
+        db.rollback()
+        _rollback_operations(op_log)
+        raise TaskCancelledError("手动整理任务已取消")
+
     try:
+        if is_scan_cancel_requested(task_id):
+            _cancel_manual_task("manual-preflight")
+
         for src_path in video_files:
+            if is_scan_cancel_requested(task_id):
+                _cancel_manual_task("manual-video-loop", f"file={src_path.name}")
             if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
                 continue
             _process_file(
@@ -544,6 +664,8 @@ def run_manual_organize(
             processed += 1
 
         for src_path in attachment_files:
+            if is_scan_cancel_requested(task_id):
+                _cancel_manual_task("manual-attachment-loop", f"file={src_path.name}")
             if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
                 continue
             _process_file(
@@ -557,9 +679,14 @@ def run_manual_organize(
             )
             processed += 1
 
+        if is_scan_cancel_requested(task_id):
+            _cancel_manual_task("manual-finalize")
+
         db.delete(pending)
         db.commit()
         return processed, 0, bool(context.get("_has_issues"))
+    except TaskCancelledError:
+        raise
     except DirectoryProcessError:
         db.rollback()
         _rollback_operations(op_log)
@@ -616,6 +743,10 @@ def reidentify_by_target_dir(
         "score": 1.0,
         "fallback_round": 0,
         "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
+        "season_hint_confidence": "high" if (season_override is not None and season_override > 0) else None,
+        "season_hint_source": "manual_override" if (season_override is not None and season_override > 0) else None,
+        "resolved_season": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
+        "final_resolved_season": None,
         "special_hint": False,
         "record_status": "manual_fixed",
         "extra_context": False,
@@ -723,6 +854,9 @@ def _process_sync_group(
 
     task_id = current_task_id.get()
     for media_dir in media_dirs:
+        if is_scan_cancel_requested(task_id):
+            _log_cancel_phase("enqueue", f"stop_before_dir={media_dir}")
+            break
         structure_hint = _detect_media_type_from_structure(media_dir)
         parsed = parse_structure_locally(media_dir, structure_hint=structure_hint)
         # 入队：扫描线程只负责构建任务，不直接写 DB / 落地文件
@@ -730,7 +864,7 @@ def _process_sync_group(
             path=media_dir,
             media_type=structure_hint,
             parsed=parsed,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             sync_group_id=group.id,
             task_id=task_id,
         )
@@ -740,10 +874,13 @@ def _process_sync_group(
     return first_dir_name, False
 
 
-def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool = False) -> None:
+def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool = False) -> bool:
     group = db.query(SyncGroup).filter(SyncGroup.id == task.sync_group_id).first()
     if not group:
-        return
+        return False
+    if is_scan_cancel_requested(task.task_id):
+        _log_cancel_phase("directory-start", f"dir={task.path}")
+        return False
     source = Path(group.source)
     tv_target_root = Path(group.target)
     movie_target_root, movie_route_reason = resolve_movie_target_root(db, group)
@@ -757,12 +894,12 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
     blocked_dirs: set[Path] = _load_existing_recorded_dirs(db, group.id, source)
     if _is_under_pending_dir(media_dir, blocked_dirs):
         append_log(f"INFO: 跳过已在媒体记录/待办中的目录: {media_dir}")
-        return
+        return False
 
     signature = _build_dir_signature(media_dir, source, include, exclude)
     if _can_skip_dir_by_signature(db, group.id, media_dir, signature):
         append_log(f"INFO: 跳过未变化成功目录: {media_dir}")
-        return
+        return False
 
     _upsert_dir_state(db, group.id, media_dir, signature, "SCANNED", None)
 
@@ -780,6 +917,17 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             f"INFO: 目录名含多季合并格式（I+II/1+2等），强制 structure_hint=tv: {media_dir.name!r}"
         )
         structure_hint = "tv"
+    # 劇場版/Gekijouban 检测：目录名含明确电影版关键词时强制 movie 类型
+    # 例：Gekijouban SHIROBAKO → 剧场版应识别为电影，而非TV剧集
+    _gekijouban_re = re.compile(
+        r"(?:\b(?:Gekijouban|Gekijō-ban|Eiga\b|Theatrical\s+(?:Version|Film))\b|劇場版|剧场版)",
+        re.I,
+    )
+    if structure_hint != "movie" and _gekijouban_re.search(media_dir.name):
+        append_log(
+            f"INFO: 目录名含劇場版关键词，强制 structure_hint=movie: {media_dir.name!r}"
+        )
+        structure_hint = "movie"
     best, snapshot, fallback_round = recognize_directory_with_fallback(
         media_dir,
         group.source_type,
@@ -798,7 +946,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             reason=reason,
             emit_jsonl=False,
         )
-        return
+        return True
 
     # 多集特征否决电影类型：若识别结果为电影，但目录内存在 ≥2 个不同集数的视频文件，
     # 强制改为 TV 识别并重试。这修复了 Kaguya-sama First Kiss wa Owaranai 被误判为电影的问题。
@@ -842,7 +990,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             state="FAILED",
             reason=reason,
         )
-        return
+        return True
 
     _upsert_dir_state(db, group.id, media_dir, signature, "IDENTIFIED", None)
 
@@ -876,7 +1024,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             state="LOW_CONFIDENCE",
             reason=reason,
         )
-        return
+        return True
 
     context = {
         "media_type": target_type,
@@ -905,6 +1053,13 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         "_has_issues": False,
     }
 
+    def _cancel_current_directory(phase: str) -> bool:
+        _log_cancel_phase(phase, f"dir={media_dir}")
+        db.rollback()
+        _rollback_operations(op_log)
+        _upsert_dir_state(db, group.id, media_dir, signature, "CANCELLED", "任务已取消")
+        return False
+
     stable_ok, stable_reason = _stabilize_directory_context(media_dir, context)
     if not stable_ok:
         reason = f"目录稳定决策失败: {stable_reason}"
@@ -918,7 +1073,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             state="LOW_CONFIDENCE",
             reason=reason,
         )
-        return
+        return True
 
     append_log(
         f"INFO: 目录识别成功: {media_dir.name} -> {target_type}:{context['title']} "
@@ -972,6 +1127,8 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             context["allocator_items"] = item_map
 
             for src_path in video_files:
+                if is_scan_cancel_requested(task.task_id):
+                    return _cancel_current_directory("directory-video-loop")
                 if _is_under_pending_dir(src_path, blocked_dirs):
                     continue
                 if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
@@ -987,6 +1144,8 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
                 )
 
             for src_path in attachment_files:
+                if is_scan_cancel_requested(task.task_id):
+                    return _cancel_current_directory("directory-attachment-loop")
                 if _is_under_pending_dir(src_path, blocked_dirs):
                     continue
                 if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
@@ -1006,6 +1165,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             % (len(context.get("allocator_assignments") or {}), dir_runtime.get("pending_count", 0), dir_runtime.get("skipped_count", 0))
         )
         _upsert_dir_state(db, group.id, media_dir, signature, "SUCCESS", None)
+        return bool(context.get("_has_issues"))
     except DirectoryProcessError as e:
         reason = str(e)
         error_kind = _classify_media_task_error(e)
@@ -1029,8 +1189,8 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
             op_log=op_log,
         )
         if error_kind == "deterministic_conflict" and force_recompute_names:
-            return
-        return
+            return True
+        return True
 
 
 def _rollback_dir_context(
@@ -2331,7 +2491,7 @@ def _upsert_dir_state(
 
     bind = db.get_bind()
     if bind is not None and bind.dialect.name == "sqlite":
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         stmt = sqlite_insert(DirectoryState).values(
             sync_group_id=sync_group_id,
             dir_path=dir_path,

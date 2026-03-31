@@ -17,7 +17,6 @@ env/
 # Runtime data
 data/
 logs/
-tests/
 *.log
 *.db
 *.sqlite
@@ -31,6 +30,8 @@ tests/
 # Frontend build / deps
 frontend/node_modules/
 frontend/dist/
+node_modules/
+package-lock.json
 
 # IDE / OS
 .DS_Store

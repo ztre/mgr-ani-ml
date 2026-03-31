@@ -1,7 +1,7 @@
 """Sync group CRUD APIs."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -78,7 +78,7 @@ def update_sync_group(group_id: int, data: SyncGroupIn, db: Session = Depends(ge
         row.exclude = data.exclude
     if data.enabled is not None:
         row.enabled = bool(data.enabled)
-    row.updated_at = datetime.utcnow()
+    row.updated_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(row)

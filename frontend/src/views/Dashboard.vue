@@ -180,8 +180,19 @@
             {{ formatTime(row.finished_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right">
+        <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
+            <el-button
+              v-if="isInterruptibleScanTask(row)"
+              size="small"
+              type="danger"
+              plain
+              :loading="interruptingTaskId === row.id"
+              :disabled="row.status === 'cancelling'"
+              @click="cancelTask(row)"
+            >
+              {{ row.status === 'cancelling' ? '中断中' : '中断' }}
+            </el-button>
             <el-button size="small" @click="viewLogs(row)">查看日志</el-button>
           </template>
         </el-table-column>
@@ -213,7 +224,7 @@
 
 <script setup>
 import { ref, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { MoonNight, Sunny } from '@element-plus/icons-vue'
 import { syncGroupsApi, scanApi, embyApi, tasksApi, mediaApi } from '../api/client'
 import dayjs from 'dayjs'
@@ -225,6 +236,7 @@ const refreshing = ref(false)
 const scanningGroup = ref(null)
 const toggling = ref(null)
 const themeDark = ref(false)
+const interruptingTaskId = ref(null)
 
 
 const stats = reactive({
@@ -244,6 +256,7 @@ const currentLogTaskId = ref(null)
 const logAutoRefresh = ref(true)
 const lastLogRefreshedAt = ref('')
 let logTimer = null
+let tasksTimer = null
 
 async function loadStats() {
   try {
@@ -277,7 +290,24 @@ async function loadTasks() {
     tasks.value = data
   } catch {
     ElMessage.error('加载任务历史失败')
+  } finally {
+    restartTasksAutoRefresh()
   }
+}
+
+function clearTasksTimer() {
+  if (tasksTimer) {
+    clearTimeout(tasksTimer)
+    tasksTimer = null
+  }
+}
+
+function restartTasksAutoRefresh() {
+  clearTasksTimer()
+  if (!tasks.value.some((task) => ['running', 'cancelling'].includes(String(task?.status || '')))) return
+  tasksTimer = setTimeout(async () => {
+    await loadTasks()
+  }, 2000)
 }
 
 async function toggleGroup(group, val) {
@@ -316,6 +346,50 @@ async function runGroupScan(groupId) {
     ElMessage.error('启动失败')
   } finally {
     scanningGroup.value = null
+  }
+}
+
+function normalizedTaskType(row) {
+  const rawType = String(row?.type || '')
+  return rawType.startsWith('issue_sp:') ? rawType.slice('issue_sp:'.length) : rawType
+}
+
+function isInterruptibleScanTask(row) {
+  const type = normalizedTaskType(row)
+  return ['running', 'cancelling'].includes(String(row?.status || ''))
+    && (type === 'full' || type === 'group' || type.startsWith('webhook_scan:') || type.startsWith('manual:'))
+}
+
+async function cancelTask(row) {
+  if (!row?.id || interruptingTaskId.value === row.id || row.status === 'cancelling') return
+  try {
+    await ElMessageBox.confirm(
+      `确认中断任务 #${row.id} 吗？当前正在处理的文件会在当前处理单元结束后停止。`,
+      '中断扫描任务',
+      {
+        type: 'warning',
+        confirmButtonText: '确认中断',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+
+  interruptingTaskId.value = row.id
+  try {
+    const { data } = await tasksApi.cancel(row.id)
+    row.status = 'cancelling'
+    ElMessage.success(data?.message || '已发送中断请求')
+    await loadTasks()
+    if (currentLogTaskId.value === row.id) {
+      await fetchLogs(row.id, { silent: true })
+    }
+  } catch (error) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(detail || '中断失败')
+  } finally {
+    interruptingTaskId.value = null
   }
 }
 
@@ -378,7 +452,7 @@ async function manualRefreshLogs() {
 }
 
 function statusType(status) {
-  const map = { running: 'primary', completed: 'success', failed: 'danger' }
+  const map = { running: 'primary', cancelling: 'warning', cancelled: 'info', completed: 'success', failed: 'danger' }
   return map[status] || 'info'
 }
 
@@ -477,6 +551,7 @@ watch(drawerVisible, (visible) => {
 
 onBeforeUnmount(() => {
   clearLogTimer()
+  clearTasksTimer()
 })
 </script>
 

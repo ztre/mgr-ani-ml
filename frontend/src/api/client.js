@@ -88,5 +88,6 @@ export const authApi = {
 export const tasksApi = {
   list: (params) => client.get('/tasks', { params }),
   getLogs: (id) => client.get(`/tasks/${id}/logs`),
+  cancel: (id) => client.post(`/tasks/${id}/cancel`),
   deleteAll: () => client.delete('/tasks/all'),
 }

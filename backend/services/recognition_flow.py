@@ -278,7 +278,14 @@ def recognize_directory_with_fallback(
         if best and (best_global is None or best.score > best_global.score):
             best_global = best
             best_round = round_idx
-        if best and best.score >= _pass_score():
+        # 当 structure_hint 明确指定类型时，只有匹配该类型的结果才允许提前退出循环。
+        # 这修复了 Chihayafuru I+II 类目录被误判为电影的问题：
+        # 若第一轮搜索到高置信度电影，但 structure_hint="tv"，应继续尝试后续查询词
+        # 以寻找 TV 结果，而非提前以电影结果退出。
+        _early_ok = best and best.score >= _pass_score()
+        if _early_ok and structure_hint in {"tv", "movie"} and best.media_type != structure_hint:
+            _early_ok = False  # 当前轮次结果与 hint 不符，继续尝试后续查询词
+        if _early_ok:
             append_log(
                 f"INFO: final candidate: tmdbid={best.tmdb_id}, media={best.media_type}, score={best.score:.3f}"
             )
