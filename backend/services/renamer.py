@@ -104,6 +104,8 @@ def compute_movie_target_path(target_root: Path, parse_result: ParseResult, tmdb
         return movie_dir / "extras" / f"{name}{ext}"
 
     name = f"{title}{year_part} - {quality}"
+    if parse_result.episode is not None:
+        name = f"{title}{year_part} - Part {parse_result.episode:02d} - {quality}"
     if parse_result.subtitle_lang:
         name += parse_result.subtitle_lang
     return movie_dir / f"{name}{ext}"

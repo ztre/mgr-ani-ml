@@ -1601,11 +1601,11 @@ def _process_file(
         has_explicit = _has_explicit_season_token(src_path.name)
         if season_from_path is not None:
             season = season_from_path
-        elif not has_explicit and resolved_season:
+        elif not has_explicit and resolved_season is not None:
             season = resolved_season
         else:
             # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
-            if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season:
+            if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season is not None:
                 append_log(
                     f"INFO: [season] bang 候选覆盖: file={src_path.name!r}, "
                     f"candidate={parse_result.season} → resolved={resolved_season} (source=resolved_season)"
@@ -1634,7 +1634,7 @@ def _process_file(
     # Phase 2: 特典继承目录已解析季号（仅当文件无显式季号标记时）
     if media_type == "tv" and parse_result.extra_category is not None:
         _resolved_season_for_extra = context.get("resolved_season")
-        if _resolved_season_for_extra and not _has_explicit_season_token(src_path.name):
+        if _resolved_season_for_extra is not None and not _has_explicit_season_token(src_path.name):
             if parse_result.season in (None, 0, 1):
                 parse_result = parse_result._replace(season=_resolved_season_for_extra)
 
@@ -2883,11 +2883,11 @@ def _build_allocation_items(
             resolved_season = context.get("resolved_season")
             if season_from_path is not None:
                 season = season_from_path
-            elif not has_explicit and resolved_season:
+            elif not has_explicit and resolved_season is not None:
                 season = resolved_season
             else:
                 # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
-                if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season:
+                if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season is not None:
                     append_log(
                         f"INFO: [season] bang 候选覆盖: file={src_path.name!r}, "
                         f"candidate={parse_result.season} → resolved={resolved_season} (source=resolved_season)"

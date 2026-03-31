@@ -911,7 +911,14 @@ def _extract_explicit_season_hint(text: str) -> int | None:
         return _ordinal_map.get(m.group(1).lower())
     if re.search(r"\bi\s*\+\s*ii\b", raw, re.I):
         return None
-    m = EXPLICIT_ROMAN_SEASON_PATTERN.search(raw)
+    # 剥离末尾括号标签（如 [Hi10p_1080p]）后再匹配罗马数字季号
+    raw_stripped = raw
+    while True:
+        _m = re.search(r"\s*\[[^\]]+\]\s*$", raw_stripped)
+        if not _m:
+            break
+        raw_stripped = raw_stripped[: _m.start()].strip()
+    m = EXPLICIT_ROMAN_SEASON_PATTERN.search(raw_stripped)
     if not m:
         # Part 2~10 as a season hint (Part 1 is the default, no hint needed)
         m = re.search(r"\bPart\s+([2-9]|10)\b", raw, re.I)

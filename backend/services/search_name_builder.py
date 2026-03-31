@@ -44,9 +44,18 @@ def build_search_name_profile(raw_name: str, season_hint: int | None = None) -> 
     version_tags = _extract_version_tags(raw_name)
     fallback = re.sub(r"\s+", " ", text).strip()
     if not text:
+        # All content was in [...] brackets; try to recover title from last non-group bracket
+        for grp in reversed(re.findall(r'\[([^\]]+)\]', raw_name or "")):
+            candidate = re.sub(r"\s+", " ", grp).strip()
+            if candidate and "&" not in candidate and not SEARCH_NOISE_PATTERN.search(candidate):
+                text = candidate
+                break
+    if not text:
         return SearchNameProfile("", fallback, source_tags, version_tags, ())
     text = _strip_leading_date_prefix(text)
     text = _strip_trailing_release_group(text)
+    # Strip leading disc/volume number prefix like "1 - " or "8 - " (box set numbering)
+    text = re.sub(r"^\d{1,2}\s*-\s*", "", text)
     main, subtitle = _split_main_subtitle(text)
     if subtitle:
         text = f"{main} {subtitle}".strip()
@@ -61,6 +70,8 @@ def build_search_name_profile(raw_name: str, season_hint: int | None = None) -> 
     text = re.sub(r"\bWEB\s+Preview", "Preview", text, flags=re.I)
     text = _VERSION_NOISE_PATTERN.sub(" ", text)
     text = re.sub(r"\b(?:season\s*\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s+season)\b", " ", text, flags=re.I)
+    # Strip standalone Sx season tags (e.g. "S2", "S3") that weren't caught above
+    text = re.sub(r"\bS\d{1,2}\b", " ", text, flags=re.I)
     if season_hint:
         text = re.sub(r"\b(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\b\s*$", " ", text, flags=re.I)
     text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", " ", text)
