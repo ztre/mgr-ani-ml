@@ -415,7 +415,7 @@ def _media_task_worker() -> None:
             try:
                 task_has_issues = _handle_media_task(local_db, task, force_recompute_names=recompute_retry_used)
                 local_db.commit()
-                append_log(f"INFO: 媒体任务完成: {task.path}")
+                append_log(f"INFO: 媒体任务完成: {task.path}\n")
                 break
             except Exception as e:
                 local_db.rollback()

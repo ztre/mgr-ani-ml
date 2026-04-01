@@ -1145,10 +1145,46 @@ def classify_extra_from_text(text: str) -> tuple[str | None, str | None, bool]:
     return None, None, False
 
 
+def _score_fallback_bracket_candidate(raw: str) -> int:
+    """Score a bracket candidate for fallback label selection.
+
+    Lower score = better candidate (content label).
+    Higher score = worse candidate (release group / tag).
+    """
+    s = str(raw or "").strip()
+    score = 0
+    # Release-group pattern: multi-name joined by '&' (e.g. CASO&Airota&VCB-Studio)
+    if "&" in s:
+        score += 100
+    # All-uppercase short word with no space — bare group tag (e.g. CASO, BDMV)
+    if re.fullmatch(r"[A-Z0-9]{1,8}", s):
+        score += 50
+    # All-letters no space — generic tag token
+    elif re.fullmatch(r"[A-Za-z]+", s):
+        score += 30
+    # Content-label signals (rewards)
+    if re.search(r"\d+\s*$", s):          # trailing number → episode/index
+        score -= 20
+    if " " in s:                           # multi-word phrase → descriptive label
+        score -= 15
+    if "'s" in s or "\u2019s" in s:       # possessive → proper noun
+        score -= 10
+    return score
+
+
 def extract_strong_extra_fallback_label(text: str) -> str | None:
-    """Best-effort readable label for strong special-dir context only."""
-    candidates = re.findall(r"\[([^\]]+)\]", str(text or ""))
-    if not candidates:
+    """Best-effort readable label for strong special-dir context only.
+
+    When multiple brackets survive noise-filtering, the one with the lowest
+    _score_fallback_bracket_candidate() score is returned — but ONLY if that
+    score is below -29 (i.e. the bracket has clear content-label characteristics
+    such as a multi-word phrase with a trailing number, or a possessive noun).
+
+    If no bracket beats the threshold, the original first-valid bracket is
+    returned to preserve backward-compatible behaviour.
+    """
+    raw_candidates = re.findall(r"\[([^\]]+)\]", str(text or ""))
+    if not raw_candidates:
         return None
     noise_only = re.compile(
         r"^(?:\d{1,4}p|x26[45]|h26[45]|hevc|av1|ma10p|hi10p|yuv\d+p?\d*|"
@@ -1156,7 +1192,10 @@ def extract_strong_extra_fallback_label(text: str) -> str | None:
         r"jpsc|jptc|chs|cht|sc|tc|gb|big5|bd|dvd|webrip|web[-\s]?dl|bdrip|bluray|remux)+$",
         re.I,
     )
-    for raw in candidates:
+    _CONTENT_SCORE_THRESHOLD = -29  # below this → clear content label; use it over first-valid
+    first_valid: str | None = None
+    scored: list[tuple[int, str]] = []
+    for raw in raw_candidates:
         cleaned = re.sub(r"\s+", " ", str(raw or "")).strip()
         if not cleaned:
             continue
@@ -1168,8 +1207,15 @@ def extract_strong_extra_fallback_label(text: str) -> str | None:
             continue
         normalized = _normalize_extra_label(cleaned)
         if normalized:
-            return normalized
-    return None
+            if first_valid is None:
+                first_valid = normalized
+            scored.append((_score_fallback_bracket_candidate(cleaned), normalized))
+    if not scored:
+        return None
+    best_score, best_label = min(scored, key=lambda x: x[0])
+    if best_score < _CONTENT_SCORE_THRESHOLD:
+        return best_label
+    return first_valid
 
 
 def _special_priority_from_raw(raw: str, category: str, label: str) -> int:

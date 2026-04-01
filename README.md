@@ -1,24 +1,19 @@
 # Anime Media Manager
 
-番剧/剧场版自动识别与硬链接整理系统（FastAPI + Vue3 + Element Plus）。
+番剧/剧场版自动识别与硬链接整理系统（FastAPI + Vue3 + Element Plus）
 
-## 主要特性
+## 核心功能
 
-- 识别与整理：TV / Movie 自动分流，硬链接输出
-- 媒体记录：按资源聚合展示，右侧抽屉查看明细
-- Inode 管理：支持筛选、清理、批量删除
-- 配置中心：TMDB/Emby 与整理策略统一由网页填写与保存
-- 人工修正日志：`pending / unprocessed / review` 三类 JSONL 可在前端查看与登记处理结果
-- 扫描任务控制：支持在前端任务历史中手动中断运行中的扫描任务和手动整理任务，无需重启服务
+- **自动识别整理** — TV / Movie 自动分流，硬链接输出
+- **媒体记录** — 按资源聚合展示，支持详细信息抽屉查看
+- **Inode 管理** — 筛选、清理、批量删除功能
+- **配置中心** — TMDB/Emby 与整理策略一体化配置
+- **人工修正** — pending / unprocessed / review 日志前端查看与处理
+- **任务控制** — 扫描任务实时中断管理
 
-### TV 集号识别与冲突规避（2026-03 更新）
+## 快速开始
 
-- TV 集号优先识别显式模式：`SxxEyy` / `xxyy` / `EPxx` / `Exx` / `Episode xx` / `第xx集`
-- 弱数字规则已收紧：编码参数中的数字（如 `yuv420p10`、`10bit`、`x264/x265`、`flacx2`）不再当作集号
-- 当 TV 文件无法识别到可信集号，且也不属于已识别的 Special/OPED 时，会自动按 `making` 分类落入 `extras`
-- `extras` 命名采用可读标签；同目录同类同标签会自动追加序号（如 `#02`）避免“多个源文件映射到同一目标”
-
-## 本地开发
+### 本地开发
 
 ```bash
 # 后端
@@ -31,84 +26,35 @@ npm install
 npm run dev
 ```
 
-- 前端默认 `http://localhost:5173`
-- 后端默认 `http://localhost:8000`
+前端访问：`http://localhost:5173` | 后端：`http://localhost:8000`
 
-## Docker 部署
-
-### 1) 准备环境变量（仅用户映射）
+### Docker 部署
 
 ```bash
+# 复制环境变量文件
 cp .env.example .env
-# 默认：
-# PUID=1000, PGID=100
-# AMM_ROOT_DIR=/app/amm-state
-# AMM_PENDING_JSONL_PATH=/app/pending/pending.jsonl
-# AMM_UNPROCESSED_ITEMS_JSONL_PATH=/app/pending/unprocessed_items.jsonl
-# AMM_REVIEW_JSONL_PATH=/app/pending/review.jsonl
-```
 
-### 2) 构建并启动
-
-```bash
+# 启动服务
 docker compose up -d --build
 ```
 
-### 3) 打开页面
+访问：`http://localhost:8000`
 
-```text
-http://localhost:8000
+> 首次启动后进入 **配置** 页面填写 TMDB API Key 等必要信息
+
+## 配置说明
+
+**环境变量** (`.env`)
+
+```
+PUID=1000                                    # 用户 ID
+PGID=100                                     # 组 ID
+AMM_ROOT_DIR=/app/amm-state                  # 数据存储路径
+AMM_PENDING_JSONL_PATH=/app/pending/pending.jsonl
+AMM_UNPROCESSED_ITEMS_JSONL_PATH=/app/pending/unprocessed_items.jsonl
+AMM_REVIEW_JSONL_PATH=/app/pending/review.jsonl
 ```
 
-首次启动后请进入 **配置** 页面填写：
+**数据库** — SQLite 默认位置：`${AMM_ROOT_DIR}/data/anime_media.db`，首次启动自动创建
 
-- TMDB API Key（必填）
-- Emby 地址 / API Key（如使用 Emby 刷新）
-- 其他策略项（按需）
-- 如需自定义人工修正日志位置，可直接在前端 **配置** 页面修改 `pending / unprocessed / review` 三个路径
-
-## SQLite 初始化逻辑
-
-后端启动会执行：
-
-1. 解析 `database_url`
-2. 若为 SQLite 且本地 DB 文件不存在：自动创建目录并创建空文件
-3. 自动建表（`Base.metadata.create_all`）
-
-默认 Docker 路径为：`/app/data/anime_media.db`（映射到宿主机 `${AMM_ROOT_DIR}/data`）
-
-配置文件默认路径为：`/app/data/.env`（首次启动自动生成，位于 `${AMM_ROOT_DIR}/data`）
-
-人工修正日志默认路径为：
-
-- `/app/pending/pending.jsonl`
-- `/app/pending/unprocessed_items.jsonl`
-- `/app/pending/review.jsonl`
-
-对应宿主机目录为：`${AMM_ROOT_DIR}/pending`
-
-## 前端说明
-
-- `媒体记录` 和 `Inode 管理` 都按资源级聚合展示，TV 多季会合并到同一行
-- `媒体记录` 抽屉中，TV 资源提供 `Season` 选择器；抽屉不再显示类型选择器
-- `媒体记录 / Inode 管理` 的封面与 TMDB 标题使用浏览器本地缓存，减少重复请求
-- 左侧工具栏新增 `人工修正日志` 页面，可查看 `pending / unprocessed / review` 并追加人工处理登记
-- `仪表盘 -> 扫描历史` 对运行中的全量扫描、单组扫描、webhook 扫描和手动整理任务提供 `中断` 按钮；中断为协作式停止，会在当前处理单元完成后安全结束任务，日志会标注取消命中的阶段
-
-## Docker 镜像打包
-
-```bash
-docker build -t yourname/anime-media-manager:latest .
-docker push yourname/anime-media-manager:latest
-```
-
-## 目录结构
-
-```text
-backend/
-  api/
-  services/
-frontend/
-Dockerfile
-docker-compose.yml
-```
+**配置文件** — 位置：`${AMM_ROOT_DIR}/data/.env`，前端可直接修改
