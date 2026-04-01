@@ -740,6 +740,11 @@ def _season_name_match_ratio(cleaned_lower: str, sname: str, dir_markers: set[st
             ratio -= 0.18
         elif not is_generic:
             ratio -= 0.08
+    elif name_numeric and not is_generic:
+        # 目录本身没有季号标记时，不要让带明显季号后缀的续作标题
+        # （如 Kakegurui×× / Durarara!!×2）反向吞掉基础作的 Season 1。
+        # 这里直接压低到阈值以下，避免后续共享标题 token 奖励再次把它抬回去。
+        ratio = min(ratio, 0.36)
 
     dir_has_suffix_s = "suffix:s" in dir_markers
     name_has_suffix_s = "suffix:s" in name_markers
@@ -882,6 +887,31 @@ def _extract_trailing_season_number(text: str) -> int | None:
     return val
 
 
+def _extract_title_embedded_season_hint(text: str) -> int | None:
+    normalized = _normalize_season_match_text(_clean_name(str(text or "")))
+    if not normalized:
+        return None
+    stop_tokens = {
+        "season", "episode", "ep", "part", "movie", "ova", "oad",
+        "sp", "special", "specials", "final",
+    }
+    for match in re.finditer(r"\bx\s*([2-9]|10)\b", normalized, re.I):
+        prefix_tokens = re.findall(r"[0-9a-z\u4e00-\u9fff]+", normalized[: match.start()], re.I)
+        suffix_tokens = re.findall(r"[0-9a-z\u4e00-\u9fff]+", normalized[match.end():], re.I)
+        if not prefix_tokens or not suffix_tokens:
+            continue
+        prefix_tail = prefix_tokens[-1]
+        suffix_head = suffix_tokens[0]
+        if len(prefix_tail) < 2 and not re.search(r"[\u4e00-\u9fff]", prefix_tail):
+            continue
+        if suffix_head in stop_tokens:
+            continue
+        if len(suffix_head) < 2 and not re.search(r"[\u4e00-\u9fff]", suffix_head):
+            continue
+        return int(match.group(1))
+    return None
+
+
 def _extract_explicit_season_hint(text: str) -> int | None:
     raw = re.sub(r"\s+", " ", str(text or "")).strip()
     if not raw:
@@ -898,6 +928,9 @@ def _extract_explicit_season_hint(text: str) -> int | None:
     m = re.search(r"第\s*(\d{1,2})\s*季", raw, re.I)
     if m:
         return int(m.group(1))
+    embedded_hint = _extract_title_embedded_season_hint(raw)
+    if embedded_hint:
+        return embedded_hint
     # 英文序数词季号（second season / third season 等）
     _ordinal_map = {
         "second": 2, "third": 3, "fourth": 4, "fifth": 5,

@@ -1000,7 +1000,8 @@ def _is_release_group_phrase(text: str) -> bool:
         return False
     if re.search(r"[\u4e00-\u9fff]", s):
         return bool(re.search(r"(字幕组|字幕社|压制组|搬运组)$", s))
-    tokens = [tok for tok in re.split(r"[\s\-_.&+/]+", s) if tok]
+    normalized = re.sub(r"\b(?:[a-z]\.){2,}[a-z]?\b", lambda m: m.group(0).replace(".", ""), s)
+    tokens = [tok for tok in re.split(r"[\s\-_.&+/]+", normalized) if tok]
     if not tokens:
         return False
     noise_patterns = [
@@ -1020,4 +1021,20 @@ def _is_release_group_phrase(text: str) -> bool:
     for tok in tokens:
         if any(re.fullmatch(p, tok, flags=re.I) for p in noise_patterns):
             matched += 1
-    return matched == len(tokens)
+    if matched == len(tokens):
+        return True
+
+    raw_text = str(text or "")
+    if re.search(r"[&+/]", raw_text):
+        indicator_count = 0
+        groupish_count = 0
+        for tok in tokens:
+            if re.fullmatch(r"(?:\d{3,4}p|\d{3,4}x\d{3,4}|\d+(?:\.\d+)?fps)", tok, flags=re.I):
+                continue
+            if re.search(r"(?:sub|studio|raws?|fansub)$", tok, flags=re.I):
+                indicator_count += 1
+            if re.fullmatch(r"[a-z][a-z0-9]{1,19}|[a-z]{2,20}(?:sub|studio)|[a-z]{2,10}\d*", tok, flags=re.I):
+                groupish_count += 1
+        if indicator_count >= 1 and groupish_count == len(tokens):
+            return True
+    return False

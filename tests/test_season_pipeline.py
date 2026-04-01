@@ -125,6 +125,17 @@ class TestParseStructureLocallyExplicit(unittest.TestCase):
         self.assertEqual(snap.season_hint, 4)
         self.assertEqual(snap.season_hint_source, "explicit")
 
+    def test_title_embedded_x2_season(self):
+        snap = self.psl(_dir("Durarara!!×2 Ketsu [Ma10p_1080p]"), structure_hint="tv")
+        self.assertEqual(snap.season_hint, 2)
+        self.assertEqual(snap.season_hint_source, "explicit")
+        self.assertEqual(snap.season_hint_confidence, "high")
+
+    def test_inline_x2_not_matched_as_standalone_multiplier(self):
+        snap = self.psl(_dir("Example x2 [Ma10p_1080p]"), structure_hint="tv")
+        self.assertNotEqual(snap.season_hint_source, "explicit")
+        self.assertIsNone(snap.season_hint)
+
 
 # ===========================================================================
 # 四、parse_structure_locally() — Final Season
@@ -272,6 +283,18 @@ class TestStabilizeBang(unittest.TestCase):
         self.assertTrue(ok, f"稳定化失败: {reason}")
         self.assertEqual(ctx.get("resolved_season"), 2)
 
+    def test_durarara_x2_explicit_not_overridden(self):
+        import backend.services.scanner as sc
+        ctx = self._ctx(2, "explicit", "high")
+        ctx["season_hint_raw"] = "×2"
+        with patch.object(sc, "get_tmdb_tv_details_sync", return_value=self._tmdb(1, 2)), \
+             patch.object(sc, "resolve_season_by_tmdb", return_value=2), \
+             patch.object(sc, "_is_final_season_title", return_value=False), \
+             patch.object(sc, "infer_season_from_tmdb_seasons", return_value=(1, 0.79)):
+            ok, reason = sc._stabilize_directory_context(Path("/fake/Durarara!!×2 Ketsu"), ctx)
+        self.assertTrue(ok, f"稳定化失败: {reason}")
+        self.assertEqual(ctx.get("resolved_season"), 2)
+
 
 # ===========================================================================
 # 八、_rederive_season_from_context() bang × TMDB
@@ -367,6 +390,14 @@ class TestInferSeasonFromTmdbSeasons(unittest.TestCase):
         result = self.infer("Kakegurui××", seasons)
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 2)
+
+    def test_plain_kakegurui_not_misread_as_second_season(self):
+        seasons = [
+            self._s(1, "Season 1", "Season 1"),
+            self._s(2, "狂赌之渊××", "Kakegurui xx"),
+        ]
+        result = self.infer("Kakegurui", seasons)
+        self.assertIsNone(result, "基础作不应仅因第二季标题更具体而被推成 S2")
 
     def test_to_love_ru_darkness_prefers_third_season(self):
         seasons = [
@@ -577,6 +608,15 @@ class TestDetectBracketVariantAsSpecial(unittest.TestCase):
         cat, label, from_b = self.detect("Exodus! [01(Musani Staff Credit Ver.)][Ma10p_1080p][x265_flac_aac].mkv")
         self.assertIsNotNone(cat)
         self.assertEqual(cat, "special")
+        self.assertEqual(label, "Musani Staff Credit Ver")
+
+    def test_original_staff_credit_ver_label(self):
+        """嵌套 Staff Credit variant 应保留描述标签而不是退化成集号"""
+        cat, label, from_b = self.detect(
+            "[VCB-Studio] Exodus! [01(Original Staff Credit Ver.)][Ma10p_1080p][x265_flac_aac].mkv"
+        )
+        self.assertEqual(cat, "special")
+        self.assertEqual(label, "Original Staff Credit Ver")
 
     def test_mystery_camp(self):
         """[Mystery Camp] 应被检测为 variant"""
@@ -595,6 +635,27 @@ class TestDetectBracketVariantAsSpecial(unittest.TestCase):
         cat, label, from_b = self.detect("[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Season 2 [Ma10p_1080p].mkv")
         self.assertIsNone(cat)
 
+    def test_mixed_release_group_not_detected(self):
+        """未知组名混合已知组名的发布组括号不应被当作 variant"""
+        cat, label, from_b = self.detect(
+            "[BeanSub&FZSD&VCB-Studio] Yakusoku no Neverland [02][Ma10p_1080p][x265_flac_aac].mkv"
+        )
+        self.assertIsNone(cat)
+
+    def test_release_group_with_single_indicator_not_detected(self):
+        """仅包含一个明显组标识词的联合发布组括号也不应被当作 variant"""
+        cat, label, from_b = self.detect(
+            "[DMG&VCB-Studio] Aquatope of White Sand [01][1080p][x264_aac][sc].mp4"
+        )
+        self.assertIsNone(cat)
+
+    def test_dotted_release_group_not_detected(self):
+        """点分缩写发布组名不应因被拆成单字母而误判为 variant"""
+        cat, label, from_b = self.detect(
+            "[T.H.X&VCB-Studio] Hyouka [01][Ma10p_1080p][x265_flac_aac].mkv"
+        )
+        self.assertIsNone(cat)
+
     def test_clean_episode_not_detected(self):
         """干净集号文件 [09] 不应被检测为 variant"""
         cat, label, from_b = self.detect("kiss×sis [09][Ma10p_1080p][x265_flac].mkv")
@@ -604,6 +665,35 @@ class TestDetectBracketVariantAsSpecial(unittest.TestCase):
         """纯技术标签 [Ma10p_1080p] 不应被检测为 variant"""
         cat, label, from_b = self.detect("SomeShow [01][Ma10p_1080p][x265_flac].mkv")
         self.assertIsNone(cat)
+
+    def test_codec_bundle_not_detected(self):
+        """编码/音轨计数括号 [x265_flac_2aac] 不应被检测为 variant"""
+        cat, label, from_b = self.detect(
+            "[Airota&VCB-Studio] Hibike! Euphonium 3 [01][Ma10p_1080p][x265_flac_2aac].mkv"
+        )
+        self.assertIsNone(cat)
+
+    def test_codec_bundle_three_audio_not_detected(self):
+        """编码/多音轨计数括号 [x265_flac_3aac] 不应被检测为 variant"""
+        cat, label, from_b = self.detect(
+            "[VCB-Studio] K-ON! [08][Ma10p_1080p][x265_flac_3aac].mkv"
+        )
+        self.assertIsNone(cat)
+
+    def test_parenthesized_tech_bundle_not_detected(self):
+        """纯技术圆括号不应被检测为 variant"""
+        cat, label, from_b = self.detect(
+            "[EggPain-Raws&VCB-Studio] School Days 01 (BDrip 1920x1080 AVC-YUV420P10 FLAC).mkv"
+        )
+        self.assertIsNone(cat)
+
+    def test_ex_season_variant_still_detected(self):
+        """描述性 EX Season 标签仍应保留为真 variant"""
+        cat, label, from_b = self.detect(
+            "[VCB-Studio] Carnival Phantasm [EX Season 01][Ma10p_1080p][x265_flac].mkv"
+        )
+        self.assertEqual(cat, "special")
+        self.assertEqual(label, "EX Season 01")
 
 
 # ===========================================================================
@@ -634,7 +724,50 @@ class TestVideoSortKey(unittest.TestCase):
 
 
 # ===========================================================================
-# 十二、descriptive special label 保留
+# 十二、_is_release_group_phrase() — 发布组样式识别
+# ===========================================================================
+
+class TestReleaseGroupPhrase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from backend.services.scanner import _is_release_group_phrase as scanner_is_release_group_phrase
+        from backend.services.target_path_resolver import _is_release_group_phrase as resolver_is_release_group_phrase
+        cls.scanner_detect = staticmethod(scanner_is_release_group_phrase)
+        cls.resolver_detect = staticmethod(resolver_is_release_group_phrase)
+
+    def test_known_mixed_group_detected(self):
+        """已知/未知混合发布组名应识别为发布组短语"""
+        text = "BeanSub&FZSD&VCB-Studio"
+        self.assertTrue(self.scanner_detect(text))
+        self.assertTrue(self.resolver_detect(text))
+
+    def test_dotted_initialism_group_detected(self):
+        """点分首字母缩写发布组应识别为发布组短语"""
+        text = "T.H.X&VCB-Studio"
+        self.assertTrue(self.scanner_detect(text))
+        self.assertTrue(self.resolver_detect(text))
+
+    def test_raws_style_group_detected(self):
+        """带 Raws / Studio 指示词的联合发布组应识别为发布组短语"""
+        text = "EggPain-Raws&VCB-Studio"
+        self.assertTrue(self.scanner_detect(text))
+        self.assertTrue(self.resolver_detect(text))
+
+    def test_plain_descriptive_variant_not_group(self):
+        """描述性 variant 标签不应误识别成发布组短语"""
+        text = "Mystery Camp"
+        self.assertFalse(self.scanner_detect(text))
+        self.assertFalse(self.resolver_detect(text))
+
+    def test_ex_season_not_group(self):
+        """EX Season 这类特典标签不应误识别成发布组短语"""
+        text = "EX Season 01"
+        self.assertFalse(self.scanner_detect(text))
+        self.assertFalse(self.resolver_detect(text))
+
+
+# ===========================================================================
+# 十三、descriptive special label 保留
 # ===========================================================================
 
 class TestDescriptiveSpecialLabel(unittest.TestCase):
@@ -679,7 +812,7 @@ class TestDescriptiveSpecialLabel(unittest.TestCase):
 
 
 # ===========================================================================
-# 十三、recognize_directory_with_fallback() — structure_hint 不提前退出
+# 十四、recognize_directory_with_fallback() — structure_hint 不提前退出
 # ===========================================================================
 
 class TestRecognizeDirectoryWithFallbackStructureHint(unittest.TestCase):

@@ -3099,8 +3099,9 @@ def _detect_bracket_variant_as_special(filename: str) -> tuple[str | None, str |
             return "special", "On Air Ver", True
 
         # Staff Credit Ver / Musani Staff Credit Ver / Credit Ver
-        if re.search(r"\b(?:\w+\s+)*Staff\s+Credit\s+Ver\.?\b|\bCredit\s+Ver\.?\b", raw, re.I):
-            label = re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]|\([^)]*\)", "", raw)).strip()[:60] or "Credit Ver"
+        credit_match = re.search(r"((?:\w+\s+)*Staff\s+Credit\s+Ver\.?|Credit\s+Ver\.?)", raw, re.I)
+        if credit_match:
+            label = re.sub(r"\s+", " ", str(credit_match.group(1) or "")).strip().rstrip(".")[:60] or "Credit Ver"
             return "special", label, True
 
         label = _normalize_generic_variant_bracket_label(raw)
@@ -3117,17 +3118,24 @@ def _is_noise_or_group_bracket_token(raw: str) -> bool:
     compact = re.sub(r"[\s._\-]+", " ", token).strip().lower()
     noise_patterns = [
         r"\d{3,4}p",
+        r"\d{3,4}x\d{3,4}",
+        r"\d+(?:\.\d+)?fps",
+        r"avc",
         r"x26[45]",
         r"h26[45]",
         r"hevc",
+        r"mpeg\d?",
+        r"divx",
+        r"xvid",
         r"av1",
         r"ma10p",
         r"hi10p",
+        r"vfr",
         r"yuv\d+p?\d*",
-        r"flac(?:x\d+)?",
-        r"aac",
-        r"ac3",
-        r"dts",
+        r"(?:flac|aac|ac3|dts|eac3|pcm|opus)(?:x\d+)?",
+        r"\d+(?:flac|aac|ac3|dts|eac3|pcm|opus)",
+        r"(?:ass|pgs|sub|sup)(?:x\d+)?",
+        r"\d+(?:ass|pgs|sub|sup)",
         r"ddp\d?\.?\d?",
         r"raw",
         r"jpsc",
@@ -3145,6 +3153,7 @@ def _is_noise_or_group_bracket_token(raw: str) -> bool:
         r"bdrip",
         r"bluray",
         r"remux",
+        r"chap(?:ters?)?",
     ]
     parts = [part for part in re.split(r"[\s&+/|]+", compact) if part]
     if parts and all(any(re.fullmatch(pattern, part, flags=re.I) for pattern in noise_patterns) for part in parts):
@@ -3187,7 +3196,8 @@ def _is_release_group_phrase(text: str) -> bool:
         return False
     if re.search(r"[\u4e00-\u9fff]", s):
         return bool(re.search(r"(字幕组|字幕社|压制组|搬运组)$", s))
-    tokens = [tok for tok in re.split(r"[\s\-_.&+/]+", s) if tok]
+    normalized = re.sub(r"\b(?:[a-z]\.){2,}[a-z]?\b", lambda m: m.group(0).replace(".", ""), s)
+    tokens = [tok for tok in re.split(r"[\s\-_.&+/]+", normalized) if tok]
     if not tokens:
         return False
     noise_patterns = [
@@ -3207,7 +3217,23 @@ def _is_release_group_phrase(text: str) -> bool:
     for tok in tokens:
         if any(re.fullmatch(p, tok, flags=re.I) for p in noise_patterns):
             matched += 1
-    return matched == len(tokens)
+    if matched == len(tokens):
+        return True
+
+    raw_text = str(text or "")
+    if re.search(r"[&+/]", raw_text):
+        indicator_count = 0
+        groupish_count = 0
+        for tok in tokens:
+            if re.fullmatch(r"(?:\d{3,4}p|\d{3,4}x\d{3,4}|\d+(?:\.\d+)?fps)", tok, flags=re.I):
+                continue
+            if re.search(r"(?:sub|studio|raws?|fansub)$", tok, flags=re.I):
+                indicator_count += 1
+            if re.fullmatch(r"[a-z][a-z0-9]{1,19}|[a-z]{2,20}(?:sub|studio)|[a-z]{2,10}\d*", tok, flags=re.I):
+                groupish_count += 1
+        if indicator_count >= 1 and groupish_count == len(tokens):
+            return True
+    return False
 
 
 def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) -> ParseResult:
