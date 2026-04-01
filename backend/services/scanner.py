@@ -102,6 +102,14 @@ STRONG_SPECIAL_DIR_TOKENS = {
 }
 
 
+def _build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseResult, ext: str, src_path: Path | None = None) -> Path:
+    return resolver_build_attachment_target_from_anchor(anchor_dst, parse_result, ext, src_path=src_path)
+
+
+def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> Path | None:
+    return resolver_resolve_attachment_follow_target(src_path, parse_result, dir_runtime)
+
+
 @dataclass
 class OperationLog:
     created_dirs: set[Path] = field(default_factory=set)

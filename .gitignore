@@ -13,6 +13,7 @@ env/
 # Local config / secrets
 .env
 .env.local
+.venv-test/
 
 # Runtime data
 data/
