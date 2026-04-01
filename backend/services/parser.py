@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 import httpx
 
+from ..api.logs import append_log
 from ..config import settings
 from .search_name_builder import build_search_name
 
@@ -104,14 +105,63 @@ _TMDB_CACHE_TTL_SECONDS = 86400
 _TMDB_CALLS: deque[float] = deque(maxlen=16)
 _TMDB_LOCK = Lock()
 _TMDB_CACHE: OrderedDict[tuple, tuple[float, object]] = OrderedDict()
+_NAME_EN_REFRESHED: set[int] = set()  # 防止同一 tv_id 在本进程内无限重拉 name_en 缓存
+
+_BRACKET_TECH_TOKEN_RE = re.compile(
+    r"^(?:"
+    r"\d{3,4}[xX]\d{3,4}|"
+    r"\d{3,4}p|"
+    r"(?:hi|ma)\d{2,3}p|"
+    r"x26[45]|h26[45]|hevc|av1|"
+    r"\d{1,3}(?:\.\d+)?fps|"
+    r"flac|aac|ac3|dts|ddp\d?\.?\d?|"
+    r"bdrip|bluray|bdmv|webrip|web-?dl|remux|"
+    r"chs|cht|jptsc?|raw"
+    r")$",
+    re.I,
+)
+
+
+def _extract_title_from_all_bracket_format(raw_stem: str) -> str | None:
+    """从全括号格式中提取标题。
+
+    这类文件在旧逻辑里会因为 `_preprocess()` 清掉全部方括号后得到空串，
+    进而被 parser 直接判定失败。像 `[ANK&VCB-Studio][Code Geass][01][Hi10P]`
+    这样的主视频正是这条路径触发的典型回归。
+
+    这里只做非常保守的提取：
+    1. 跳过第一个 token，因为它大概率是发布组。
+    2. 跳过纯集号/版本号 token。
+    3. 跳过分辨率、编码、音轨、字幕等技术 token。
+    4. 在剩余 token 中选择最像标题的一项。
+    """
+    tokens = re.findall(r"\[([^\]]+)\]", raw_stem)
+    if len(tokens) < 2:
+        return None
+    candidates: list[str] = []
+    for i, token in enumerate(tokens):
+        token = token.strip()
+        if i == 0:
+            continue
+        if re.fullmatch(r"\d+v?\d*", token):
+            continue
+        if _BRACKET_TECH_TOKEN_RE.match(token):
+            continue
+        if re.search(r"[A-Za-z\u4e00-\u9fff\u3040-\u30ff]", token):
+            candidates.append(token)
+    return max(candidates, key=len) if candidates else None
 
 
 def parse_tv_filename(filename: str, structure_hint: str | None = None) -> ParseResult | None:
     """分层动漫正则解析器，面向 TV 集号/季号提取。"""
     raw_stem = _stem(filename)
     clean = _preprocess(raw_stem)
+    _all_bracket_format = False
     if not clean:
-        return None
+        clean = _extract_title_from_all_bracket_format(raw_stem) or ""
+        if not clean:
+            return None
+        _all_bracket_format = True
     episode_text = _preprocess_for_episode(raw_stem)
 
     quality = _extract_quality(raw_stem)
@@ -160,9 +210,14 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
     # 模式 A：方括号显式集号（最高优先）
     if bracket_episode is not None and bracket_episode > 0:
         season_hint = _extract_season_hint(episode_text)
-        title = _cleanup_title(_remove_bracket_episode(raw_stem))
-        if not title:
-            title = _cleanup_title(clean)
+        roman_hint = _extract_roman_season(episode_text)
+        pattern_a_hint_strength = "roman" if (roman_hint is not None and roman_hint == season_hint) else None
+        if _all_bracket_format:
+            title = clean
+        else:
+            title = _cleanup_title(_remove_bracket_episode(raw_stem))
+            if not title:
+                title = _cleanup_title(clean)
         version_tag = extract_bracket_version_tag(raw_stem)
         return ParseResult(
             title,
@@ -177,6 +232,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             has_special_episode_suffix,
             False,
             version_tag,
+            pattern_a_hint_strength,
         )
 
     # 模式 B：SxxEyy 格式（强 TV 信号）
@@ -464,7 +520,12 @@ async def get_tmdb_tv_details(tv_id: int) -> dict | None:
     cache_key = ("detail", "tv", int(tv_id))
     cached = _cache_get(cache_key)
     if cached is not None:
-        return cached
+        valid_seasons = [s for s in (cached.get("seasons") or []) if (s.get("season_number") or 0) >= 1]
+        if valid_seasons and not any(s.get("name_en") for s in valid_seasons) and tv_id not in _NAME_EN_REFRESHED:
+            _NAME_EN_REFRESHED.add(tv_id)
+            cached = None
+        if cached is not None:
+            return cached
 
     await _rate_limit_tmdb()
     url = f"https://api.themoviedb.org/3/tv/{tv_id}"
@@ -503,8 +564,8 @@ async def get_tmdb_tv_details(tv_id: int) -> dict | None:
                     snum = s.get("season_number")
                     if snum is not None and int(snum) in en_season_names:
                         s["name_en"] = en_season_names[int(snum)]
-    except Exception:
-        pass  # 英文版获取失败不影响主流程
+    except Exception as exc:
+        append_log(f"WARNING: en-US season names fetch failed for tv_id={tv_id}: {type(exc).__name__}: {exc}")
 
     _cache_set(cache_key, data)
     return data
@@ -803,7 +864,7 @@ def _extract_roman_season(text: str) -> int | None:
             break
         s = s[:m.start()].strip()
     m = re.search(
-        r"(?:\b(?:Season|S)\s*(I|II|III|IV|V|VI|VII|VIII|IX|X)\b|\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b)\s*$",
+        r"(?:\b(?:Season|S)\s+(I|II|III|IV|V|VI|VII|VIII|IX|X)\b|\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b)\s*$",
         s,
         re.I,
     )

@@ -30,6 +30,7 @@ from .metadata import scrape_movie_metadata, scrape_tv_metadata
 from .parser import (
     ParseResult,
     SPECIAL_TYPE_MAP,
+    _extract_title_from_all_bracket_format,
     classify_extra_from_text,
     extract_bang_season,
     extract_strong_extra_fallback_label,
@@ -59,6 +60,7 @@ from .target_path_resolver import (
     build_attachment_target_from_anchor as resolver_build_attachment_target_from_anchor,
     deduplicate_target_or_raise as resolver_deduplicate_target_or_raise,
     resolve_attachment_follow_target as resolver_resolve_attachment_follow_target,
+    resolve_attachment_follow_target_details as resolver_resolve_attachment_follow_target_details,
     resolve_final_target,
 )
 
@@ -110,11 +112,50 @@ def _resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult,
     return resolver_resolve_attachment_follow_target(src_path, parse_result, dir_runtime)
 
 
+def _deduplicate_target_or_raise(seen_targets: dict[Path, Path], src_path: Path, dst_path: Path) -> None:
+    """对 scanner 暴露可替换的去重入口。
+
+    这里保留一个薄包装，原因不是重复实现，而是让 `_process_file()` 侧的
+    目标冲突处理仍然可以被测试用例 monkeypatch。附件分配器这次做了中等范围
+    重构，但测试仍需要在 scanner 层观察“第一次命名”和“冲突后 enrich 命名”
+    的结果，所以这里保留稳定钩子，避免把所有测试都绑死到 resolver 内部实现。
+    """
+    resolver_deduplicate_target_or_raise(seen_targets, src_path, dst_path)
+
+
+def _resolve_attachment_follow_target_details(
+    src_path: Path,
+    parse_result: ParseResult,
+    dir_runtime: dict | None,
+    follow_mode: str | None = None,
+):
+    return resolver_resolve_attachment_follow_target_details(
+        src_path,
+        parse_result,
+        dir_runtime,
+        follow_mode=follow_mode,
+    )
+
+
 @dataclass
 class OperationLog:
     created_dirs: set[Path] = field(default_factory=set)
     created_links: set[Path] = field(default_factory=set)
     created_files: set[Path] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class AttachmentRoutePlan:
+    """附件入口分流结果。
+
+    这次重构故意把“附件怎么分类”放在 scanner 侧先做完，再把结果交给
+    resolver 去找锚点。这样能避免旧逻辑那种“先把附件硬改成 special，
+    再让 resolver 在错误语义上继续工作”的连锁回归。
+    """
+
+    parse_result: ParseResult
+    follow_mode: str
+    reason: str
 
 
 @dataclass
@@ -1256,6 +1297,29 @@ def _rollback_dir_context(
     append_log(f"INFO: 目录级回滚: {conflict_dir.name} | 原因: {reason}")
 
 
+def _classify_attachment_route(src_path: Path, parse_result: ParseResult) -> AttachmentRoutePlan:
+    """为附件选择跟随策略，但不在这里直接做锚点查找。
+
+    历史问题并不是“resolver 不会找锚点”，而是附件在进入 resolver 之前，
+    就被主视频那套 bracket-variant 规则改写成了错误的 special 语义。
+
+    这里刻意采用保守策略：
+    1. 已经有明确 extra/special 分类的附件，按现有语义进入对应链路。
+    2. 没有明确分类的附件，默认视为普通主视频附件，不再因为泛化括号内容
+       （发布组、技术标签、通用 variant 文案）强行降级。
+
+    这样可以同时保住两类能力：
+    - 主视频仍可使用 variant 降级避免占坑；
+    - 附件优先走逐集 / 同 stem 的精确命中，不再被“最近 SPxx 锚点”吞掉。
+    """
+    category = parse_result.extra_category
+    if category in SPECIAL_ANCHOR_CATEGORIES:
+        return AttachmentRoutePlan(parse_result=parse_result, follow_mode="special-follow", reason="explicit-special-category")
+    if category in ALL_EXTRA_LIKE_CATEGORIES:
+        return AttachmentRoutePlan(parse_result=parse_result, follow_mode="extra-follow", reason="explicit-extra-category")
+    return AttachmentRoutePlan(parse_result=parse_result, follow_mode="mainline-follow", reason="default-mainline-follow")
+
+
 def _process_file(
     db: Session,
     src_path: Path,
@@ -1426,7 +1490,21 @@ def _process_file(
     # 强制将其降级为 special 类。这修复了 [Preview01_1] / [Mystery Camp] / [On Air Ver.] 等
     # variant 文件先于正片占据主视频目标槽位的问题。
     if ext in VIDEO_EXTS and parse_result.extra_category is None and parse_result.episode is not None:
-        _variant_category, _variant_label, _from_bracket = _detect_bracket_variant_as_special(src_path.name)
+        # 中文说明：
+        # 对主视频保留括号 variant 降级，是为了避免“看起来像正片、其实是 Preview/SP 变体”
+        # 的文件抢占真正的主视频目标。
+        #
+        # 但全括号格式 `[Group][Title][EP][Codec]...` 本身就是主视频常见写法，
+        # 如果继续套用这套规则，会把标题 token 当成 variant 文案，重新把主视频打回特典。
+        # Code Geass 那类样本正是这个问题，所以这里先做全括号格式豁免。
+        is_all_bracket_format = _extract_title_from_all_bracket_format(src_path.stem) is not None and not re.search(
+            r"[^\[\]]+",
+            re.sub(r"\[[^\]]*\]", "", src_path.stem),
+        )
+        _variant_category, _variant_label, _from_bracket = (
+            (None, None, False) if is_all_bracket_format
+            else _detect_bracket_variant_as_special(src_path.name)
+        )
         if _variant_category is not None:
             append_log(
                 f"INFO: 括号variant检测: {src_path.name!r} 含 variant 括号 → "
@@ -1455,7 +1533,20 @@ def _process_file(
         return
 
     if is_attachment:
-        anchor_dst = resolver_resolve_attachment_follow_target(src_path, parse_result, dir_runtime)
+        attachment_plan = _classify_attachment_route(src_path, parse_result)
+        parse_result = attachment_plan.parse_result
+
+        # 中文说明：
+        # 附件现在先完成“语义分流”，再进入 resolver 查锚点。
+        # 这样日志能直接反映当前附件是按主视频、extra 还是 special 逻辑在找目标，
+        # 也避免了旧实现里“附件先被错误降级，再在错误语义上继续查找”的连锁问题。
+        anchor_result = _resolve_attachment_follow_target_details(
+            src_path,
+            parse_result,
+            dir_runtime,
+            follow_mode=attachment_plan.follow_mode,
+        )
+        anchor_dst = anchor_result.anchor_dst
         if anchor_dst is not None:
             dst_path = resolver_build_attachment_target_from_anchor(anchor_dst, parse_result, ext, src_path=src_path)
             if dst_path in seen_targets or (dst_path.exists() and not is_same_inode(src_path, dst_path)):
@@ -1481,7 +1572,7 @@ def _process_file(
                 )
                 return
             try:
-                resolver_deduplicate_target_or_raise(seen_targets, src_path, dst_path)
+                _deduplicate_target_or_raise(seen_targets, src_path, dst_path)
             except ValueError:
                 context["_has_issues"] = True
                 append_log(f"WARNING: 附件跟随目标冲突已跳过: {src_path.name} -> {dst_path}")
@@ -1509,7 +1600,10 @@ def _process_file(
             )
             _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
             _upsert_inode_record(db, sync_group_id, src_path, dst_path)
-            append_log(f"INFO: 附件跟随正片: {src_path.name} -> {dst_path}")
+            append_log(
+                f"INFO: 附件跟随正片: {src_path.name} -> {dst_path} "
+                f"(mode={anchor_result.follow_mode}, layer={anchor_result.layer})"
+            )
             return
         if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
             append_log(f"WARNING: 特典附件未能匹配任何视频，已跳过: {src_path.name}")
@@ -1610,7 +1704,14 @@ def _process_file(
         if season_from_path is not None:
             season = season_from_path
         elif not has_explicit and resolved_season is not None:
-            season = resolved_season
+            # 中文说明：
+            # resolved_season 代表目录级稳定化后的默认季号，通常比 parser 的弱提示更可信。
+            # 但若 parser 已明确从罗马季名推导出季号（如 `PSYCHO-PASS II`），
+            # 再强行覆盖成目录默认季就会把续作打回 S01。
+            if getattr(parse_result, "season_hint_strength", None) == "roman":
+                season = parse_result.season
+            else:
+                season = resolved_season
         else:
             # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
             if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season is not None:
@@ -1658,6 +1759,7 @@ def _process_file(
         assignments=assignments,
         item_map=item_map,
         is_attachment=is_attachment,
+        deduplicate_func=_deduplicate_target_or_raise,
     )
     if decision.status == "pending":
         if decision.reason == "main video target conflict unresolved":
@@ -1917,6 +2019,19 @@ def _register_video_anchor(
     dir_runtime: dict | None,
     raw_label: str | None = None,
 ) -> None:
+    """把当前视频注册到目录级锚点索引。
+
+    这套索引既服务主视频，也服务附件跟随，但两类索引承担的职责不同：
+    - `video_anchor_by_parent_episode` / `video_anchor_by_parent_stem`
+      是附件优先命中的“精确索引”；
+    - `video_anchor_recent_by_parent` / `video_anchor_by_parent`
+      只是普通主视频附件的弱兜底；
+    - `special_target_by_raw_label` / `special_target_by_fine_label`
+      只记录“明确标签命中”的特典/extra 目标，不再承担模糊回退职责。
+
+    这次附件重构的关键点之一，就是把“索引记录得足够细”与“resolver 是否允许回退”
+    明确拆开。索引可以多记，但 extra/special 附件不允许再随意退回 recent 锚点。
+    """
     if dir_runtime is None:
         return
     by_parent = dir_runtime.setdefault("video_anchor_by_parent", {})
@@ -1939,13 +2054,25 @@ def _register_video_anchor(
     if parse_result.extra_category in SPECIAL_CATEGORIES:
         prefix = _special_label_prefix(parse_result.extra_category, parse_result.extra_label or raw_label)
         if prefix:
-            by_parent_special_prefix[(parent_key, parse_result.extra_category, prefix.upper())] = dst_path
+            prefix_key = (parent_key, parse_result.extra_category, prefix.upper())
+            existing_prefix = by_parent_special_prefix.get(prefix_key)
+            # 中文说明：
+            # prefix 键只是一层很粗的快速命中，比如 `OVA`、`SP`、`NCOP`。
+            # 如果同目录下同前缀出现多个视频，就必须把这个索引标记成冲突，
+            # 后续 resolver 才会停止回退，而不是误把“最后注册的视频”当成唯一目标。
+            if existing_prefix is None:
+                by_parent_special_prefix[prefix_key] = dst_path
+            elif existing_prefix != dst_path:
+                by_parent_special_prefix[prefix_key] = None
     ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
     if ep_key is not None:
         by_parent_ep[(parent_key, int(ep_key))] = dst_path
     stem_key = _normalize_media_stem(src_path.stem)
     if stem_key:
         by_parent_stem[(parent_key, stem_key)] = dst_path
+    # raw label 用于“同一目录下明确同名特典/extra”的直接命中。
+    # 一旦同一个 raw label 映射到多个目标，就显式写成 None，让后续流程知道
+    # 这里存在歧义，必须继续细分，而不是默默随便挑一个。
     raw_key = _build_special_raw_label_key(parent_key, raw_label)
     if raw_key is not None:
         multi_bucket = special_by_raw_multi.setdefault(raw_key, [])
@@ -1956,6 +2083,8 @@ def _register_video_anchor(
             special_by_raw[raw_key] = dst_path
         elif existing != dst_path:
             special_by_raw[raw_key] = None
+    # fine label 会把 raw label 再和源文件的差异 token 绑定，解决：
+    # 同一个 raw label 下出现多个相近视频时，附件究竟该跟哪一个的问题。
     fine_key = _build_special_fine_label_key(
         parent_key,
         raw_label=raw_label or parse_result.extra_label,

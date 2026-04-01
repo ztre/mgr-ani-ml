@@ -40,6 +40,24 @@ class TargetDecision:
     used_conflict_enrichment: bool = False
 
 
+@dataclass
+class AttachmentAnchorResult:
+    """附件锚点解析结果。
+
+    follow_mode 表示 scanner 选择的附件分流策略：
+    - mainline-follow: 普通主视频附件，允许逐集 / 同 stem / 弱兜底。
+    - extra-follow: 明确 extra 附件，只允许精确命中 extra 相关锚点。
+    - special-follow: 明确 special/OPED 附件，只允许精确命中特典锚点。
+
+    layer 用来记录最终命中的层级，方便日志直接判断是“精确命中”
+    还是“弱兜底命中”。
+    """
+
+    anchor_dst: Path | None
+    follow_mode: str
+    layer: str | None = None
+
+
 def build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseResult, ext: str, src_path: Path | None = None) -> Path:
     base = _strip_attachment_base_noise(anchor_dst.stem)
     if src_path is not None:
@@ -60,89 +78,169 @@ def deduplicate_target_or_raise(seen_targets: dict[Path, Path], src_path: Path, 
 
 
 def resolve_attachment_follow_target(src_path: Path, parse_result: ParseResult, dir_runtime: dict | None) -> Path | None:
+    return resolve_attachment_follow_target_details(src_path, parse_result, dir_runtime).anchor_dst
+
+
+def resolve_attachment_follow_target_details(
+    src_path: Path,
+    parse_result: ParseResult,
+    dir_runtime: dict | None,
+    follow_mode: str | None = None,
+) -> AttachmentAnchorResult:
+    """分层为附件寻找锚点。
+
+    设计重点：
+    - 把“精确索引命中”和“弱兜底回退”拆开。
+    - 只有普通主视频附件允许走最近锚点/目录默认锚点。
+    - extra/special 附件一旦没有命中精确索引，直接返回 None，
+      避免再次出现 task41x2 那种“不同附件被兜底绑到同一个 SPxx”的回归。
+    """
+    mode = follow_mode or _infer_attachment_follow_mode(parse_result)
     if dir_runtime is None:
-        return None
-    by_parent = dir_runtime.get("video_anchor_by_parent", {})
+        return AttachmentAnchorResult(None, mode)
+
+    # 精确索引：用于“有明确信号就必须命中正确视频”的路径。
     by_parent_ep = dir_runtime.get("video_anchor_by_parent_episode", {})
     by_parent_stem = dir_runtime.get("video_anchor_by_parent_stem", {})
     by_parent_special = dir_runtime.get("video_anchor_by_parent_special", {})
     by_parent_special_prefix = dir_runtime.get("video_anchor_by_parent_special_prefix", {})
-    by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
     special_by_raw = dir_runtime.get("special_target_by_raw_label", {})
     special_by_raw_multi = dir_runtime.get("special_targets_by_raw_label_multi", {})
     special_by_fine = dir_runtime.get("special_target_by_fine_label", {})
+
+    # 弱回退索引：只给普通主视频附件使用，extra/special 严禁走到这里。
+    by_parent_recent = dir_runtime.get("video_anchor_recent_by_parent", {})
+    by_parent = dir_runtime.get("video_anchor_by_parent", {})
     parent_key = str(src_path.parent)
 
-    raw_key = _build_special_raw_label_key(parent_key, parse_result.extra_label)
-    if raw_key is not None:
-        raw_target = special_by_raw.get(raw_key, "__missing__")
-        if raw_target is None:
-            candidates = list(special_by_raw_multi.get(raw_key) or [])
-            best = _pick_best_anchor_candidate(candidates, src_path, parse_result)
-            if best is not None:
-                return best
-            fine_key = _build_special_fine_label_key(
-                parent_key,
-                raw_label=parse_result.extra_label,
-                source_text=src_path.stem,
-                category=parse_result.extra_category,
-            )
-            if fine_key is not None:
-                fine_target = special_by_fine.get(fine_key, "__missing__")
-                if fine_target not in {"__missing__", None}:
-                    return fine_target
-            return None
-        if raw_target != "__missing__":
-            return raw_target
-    fine_key = _build_special_fine_label_key(
-        parent_key,
-        raw_label=parse_result.extra_label,
-        source_text=src_path.stem,
-        category=parse_result.extra_category,
-    )
-    if fine_key is not None:
-        fine_target = special_by_fine.get(fine_key, "__missing__")
-        if fine_target is None:
-            candidates = list(special_by_raw_multi.get(_build_special_raw_label_key(parent_key, parse_result.extra_label)) or [])
-            best = _pick_best_anchor_candidate(candidates, src_path, parse_result)
-            if best is not None:
-                return best
-        elif fine_target not in {"__missing__", None}:
-            return fine_target
-    if parse_result.extra_category in SPECIAL_CATEGORIES:
-        prefix = _special_label_prefix(parse_result.extra_category, parse_result.extra_label)
-        if prefix:
-            candidate = by_parent_special_prefix.get((parent_key, parse_result.extra_category, prefix.upper()))
-            if candidate:
-                return candidate
-    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+    def _result(anchor: Path | None, layer: str | None = None) -> AttachmentAnchorResult:
+        return AttachmentAnchorResult(anchor, mode, layer)
+
+    def _lookup_label_anchor(layer_prefix: str) -> AttachmentAnchorResult | None:
+        raw_key = _build_special_raw_label_key(parent_key, parse_result.extra_label)
+        if raw_key is not None:
+            raw_target = special_by_raw.get(raw_key, "__missing__")
+            if raw_target is None:
+                candidates = list(special_by_raw_multi.get(raw_key) or [])
+                best = _pick_best_anchor_candidate(candidates, src_path, parse_result)
+                if best is not None:
+                    return _result(best, f"{layer_prefix}:raw-multi")
+                fine_key = _build_special_fine_label_key(
+                    parent_key,
+                    raw_label=parse_result.extra_label,
+                    source_text=src_path.stem,
+                    category=parse_result.extra_category,
+                )
+                if fine_key is not None:
+                    fine_target = special_by_fine.get(fine_key, "__missing__")
+                    if fine_target not in {"__missing__", None}:
+                        return _result(fine_target, f"{layer_prefix}:fine")
+                return None
+            if raw_target != "__missing__":
+                return _result(raw_target, f"{layer_prefix}:raw")
+
+        fine_key = _build_special_fine_label_key(
+            parent_key,
+            raw_label=parse_result.extra_label,
+            source_text=src_path.stem,
+            category=parse_result.extra_category,
+        )
+        if fine_key is not None:
+            fine_target = special_by_fine.get(fine_key, "__missing__")
+            if fine_target is None:
+                raw_key = _build_special_raw_label_key(parent_key, parse_result.extra_label)
+                candidates = list(special_by_raw_multi.get(raw_key) or [])
+                best = _pick_best_anchor_candidate(candidates, src_path, parse_result)
+                if best is not None:
+                    return _result(best, f"{layer_prefix}:fine-multi")
+                return None
+            if fine_target not in {"__missing__", None}:
+                return _result(fine_target, f"{layer_prefix}:fine")
         return None
-    special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
-    if special_key is not None:
-        candidates = list(by_parent_special.get(special_key) or [])
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            append_log(f"WARNING: 特典附件锨点冲突: {src_path.name} -> {len(candidates)} 个候选")
+
+    def _lookup_special_anchor(layer_prefix: str) -> AttachmentAnchorResult | None:
+        if parse_result.extra_category in SPECIAL_CATEGORIES:
+            prefix = _special_label_prefix(parse_result.extra_category, parse_result.extra_label)
+            if prefix:
+                prefix_value = by_parent_special_prefix.get(
+                    (parent_key, parse_result.extra_category, prefix.upper()),
+                    "__missing__",
+                )
+                if prefix_value is None:
+                    return _result(None, f"{layer_prefix}:prefix-ambiguous")
+                if prefix_value != "__missing__":
+                    return _result(prefix_value, f"{layer_prefix}:prefix")
+        special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
+        if special_key is not None:
+            candidates = list(by_parent_special.get(special_key) or [])
+            if len(candidates) == 1:
+                return _result(candidates[0], f"{layer_prefix}:token")
+            if len(candidates) > 1:
+                append_log(f"WARNING: 特典附件锚点冲突: {src_path.name} -> {len(candidates)} 个候选")
+                return _result(None, f"{layer_prefix}:ambiguous")
+        return None
+
+    def _lookup_episode_anchor(layer_prefix: str) -> AttachmentAnchorResult | None:
+        ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
+        if ep_key is None:
             return None
-    ep_key = _normalized_episode_key(parse_result, src_path, src_path.name)
-    if ep_key is not None:
         candidate = by_parent_ep.get((parent_key, int(ep_key)))
         if candidate:
-            return candidate
-    stem_candidates = [_normalize_media_stem(src_path.stem), _normalize_attachment_stem(src_path.stem)]
-    for stem_key in stem_candidates:
-        if not stem_key:
-            continue
-        candidate = by_parent_stem.get((parent_key, stem_key))
-        if candidate:
-            return candidate
-    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+            return _result(candidate, f"{layer_prefix}:episode")
         return None
-    recent = by_parent_recent.get(parent_key)
-    if recent:
-        return recent
-    return by_parent.get(parent_key)
+
+    def _lookup_stem_anchor(layer_prefix: str) -> AttachmentAnchorResult | None:
+        stem_candidates = [_normalize_media_stem(src_path.stem), _normalize_attachment_stem(src_path.stem)]
+        for stem_key in stem_candidates:
+            if not stem_key:
+                continue
+            candidate = by_parent_stem.get((parent_key, stem_key))
+            if candidate:
+                return _result(candidate, f"{layer_prefix}:stem")
+        return None
+
+    def _lookup_weak_fallback(layer_prefix: str) -> AttachmentAnchorResult | None:
+        recent = by_parent_recent.get(parent_key)
+        if recent:
+            return _result(recent, f"{layer_prefix}:recent")
+        candidate = by_parent.get(parent_key)
+        if candidate:
+            return _result(candidate, f"{layer_prefix}:parent")
+        return None
+
+    if mode == "special-follow":
+        # 中文说明：
+        # special-follow 只允许走“明确可解释”的精确索引：
+        # 1. raw/fine label 命中；
+        # 2. special token 命中。
+        #
+        # 这里故意不再允许 stem 回退。因为 task41x2 的核心回归之一，就是
+        # 字幕/音轨附件在 raw label 或特典 token 已经出现歧义时，仍然被 stem
+        # 或 recent 锚点“猜中”，最后错误绑到某一个 SPxx 上。对于特典附件，
+        # 宁可返回 unmatched，也不能把含糊匹配伪装成成功。
+        for lookup in (_lookup_label_anchor("special"), _lookup_special_anchor("special")):
+            if lookup is not None and lookup.anchor_dst is not None:
+                return lookup
+        return _result(None)
+
+    if mode == "extra-follow":
+        for lookup in (_lookup_stem_anchor("extra"), _lookup_label_anchor("extra"), _lookup_episode_anchor("extra")):
+            if lookup is not None and lookup.anchor_dst is not None:
+                return lookup
+        return _result(None)
+
+    for lookup in (_lookup_episode_anchor("mainline"), _lookup_stem_anchor("mainline"), _lookup_weak_fallback("mainline")):
+        if lookup is not None and lookup.anchor_dst is not None:
+            return lookup
+    return _result(None)
+
+
+def _infer_attachment_follow_mode(parse_result: ParseResult) -> str:
+    if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
+        return "special-follow"
+    if parse_result.extra_category in EXTRA_CATEGORIES:
+        return "extra-follow"
+    return "mainline-follow"
 
 
 def apply_readable_suffix_for_unnumbered_extra(parse_result: ParseResult, src_path: Path, dir_runtime: dict | None) -> ParseResult:
@@ -214,6 +312,7 @@ def resolve_final_target(
     assignments: dict,
     item_map: dict,
     is_attachment: bool = False,
+    deduplicate_func=deduplicate_target_or_raise,
 ) -> TargetDecision:
     original_special_label = parse_result.extra_label
     source_diff_tags = _extract_distinguish_source_tags(src_path.stem)
@@ -390,7 +489,7 @@ def resolve_final_target(
             used_conflict_enrichment=used_conflict_enrichment,
         )
     try:
-        deduplicate_target_or_raise(seen_targets, src_path, dst_path)
+        deduplicate_func(seen_targets, src_path, dst_path)
     except ValueError:
         if is_attachment:
             return TargetDecision(
@@ -452,6 +551,11 @@ def resolve_final_target(
 
 
 def _build_special_raw_label_key(parent_key: str, raw_label: str | None) -> tuple[str, str] | None:
+    """构造目录级 raw label 键。
+
+    raw label 只表达“附件/视频表面上属于哪个标签”，适合作为第一层精确索引，
+    但一旦同名目标超过一个，就必须继续细分，不能把它当作最终兜底条件。
+    """
     label = re.sub(r"\s+", " ", str(raw_label or "")).strip()
     if not label:
         return None
@@ -459,6 +563,11 @@ def _build_special_raw_label_key(parent_key: str, raw_label: str | None) -> tupl
 
 
 def _build_special_fine_label_key(parent_key: str, raw_label: str | None, source_text: str, category: str | None) -> tuple[str, str, str] | None:
+    """构造更细粒度的标签键。
+
+    fine label = raw label + 源文件差异 token。
+    它的职责不是扩大匹配范围，而是在 raw label 已经发生歧义时继续收敛。
+    """
     coarse = _build_special_raw_label_key(parent_key, raw_label)
     if coarse is None:
         return None
@@ -846,8 +955,6 @@ def _extract_distinguish_source_tags(text: str) -> list[str]:
                 continue
             key = tag.lower()
             if key in seen:
-                continue
-            if key in {"nc ver", "on air ver"}:
                 continue
             seen.add(key)
             out.append(tag)

@@ -27,6 +27,7 @@ logs/
 *.db-shm
 *.db-wal
 .trae/
+tests/
 
 # Frontend build / deps
 frontend/node_modules/
@@ -42,6 +43,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+.codex
 
 # Windows ADS artifact
 *:Zone.Identifier
