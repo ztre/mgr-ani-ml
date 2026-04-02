@@ -28,6 +28,7 @@ logs/
 *.db-wal
 .trae/
 tests/
+tdocs/
 
 # Frontend build / deps
 frontend/node_modules/
