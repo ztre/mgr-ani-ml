@@ -3034,6 +3034,10 @@ def _build_allocation_items(
                     season = parse_result.season or resolved_season or 1
             parse_result = parse_result._replace(season=season)
         parse_result = _apply_parallel_variant_suffix(parse_result, src_path)
+        if ext in ATTACHMENT_EXTS and parse_result.extra_category in ALL_EXTRA_LIKE_CATEGORIES:
+            # 附件始终通过 follow-anchor 绑定到已落定的视频目标，不应参与特典编号分配。
+            # 否则同一 raw label 的字幕/音轨会先占掉 preferred index，导致视频本体被顺延重排。
+            continue
         prefix = _resolve_prefix_for_parse(parse_result)
         if not prefix:
             continue
