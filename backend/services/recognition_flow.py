@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from .anilist import search_anilist_english_title_sync
 from .parser import (
     extract_bang_season,
     get_tmdb_tv_details_sync,
@@ -23,6 +24,7 @@ MAX_RESULTS_PER_QUERY = 10
 FALLBACK_MAX_ROUNDS = 2
 DEFAULT_PASS_SCORE = 0.7
 DEFAULT_FAIL_SCORE = 0.6
+ANILIST_FALLBACK_ROUND = FALLBACK_MAX_ROUNDS + 1
 ROMAN_PATTERN = re.compile(r"\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b", re.I)
 SEASON_PATTERN = re.compile(r"\b(S\d+|Season\s*\d+|\d+(st|nd|rd|th)\s+Season)\b", re.I)
 EXPLICIT_SEASON_PATTERN = re.compile(
@@ -303,8 +305,101 @@ def recognize_directory_with_fallback(
             f"INFO: final candidate: tmdbid={best_global.tmdb_id}, media={best_global.media_type}, score={best_global.score:.3f}"
         )
         return best_global, snapshot, best_round
+
+    anilist_best = _try_anilist_low_confidence_fallback(
+        snapshot,
+        scan_context_type,
+        structure_hint=structure_hint,
+    )
+    if anilist_best and (best_global is None or anilist_best.score > best_global.score):
+        best_global = anilist_best
+        best_round = ANILIST_FALLBACK_ROUND
+
+    if best_global and _allow_soft_pass(best_global, snapshot):
+        append_log(
+            f"INFO: final candidate: tmdbid={best_global.tmdb_id}, media={best_global.media_type}, "
+            f"score={best_global.score:.3f} (soft-pass)"
+        )
+        return best_global, snapshot, best_round
+    if best_global and best_global.score >= _fail_score():
+        append_log(
+            f"INFO: final candidate: tmdbid={best_global.tmdb_id}, media={best_global.media_type}, score={best_global.score:.3f}"
+        )
+        return best_global, snapshot, best_round
+
     append_log("INFO: final pending reason: low confidence after fallback rounds")
     return None, snapshot, min(best_round, FALLBACK_MAX_ROUNDS)
+
+
+def _try_anilist_low_confidence_fallback(
+    snapshot: LocalParseSnapshot,
+    scan_context_type: str,
+    *,
+    structure_hint: str | None = None,
+) -> RankedCandidate | None:
+    if not getattr(settings, "anilist_fallback_enabled", True):
+        return None
+    target_media = structure_hint or scan_context_type
+    if target_media not in {"tv", "movie"}:
+        return None
+
+    seed_title = build_search_name(snapshot.main_title or snapshot.cleaned_name)
+    if not seed_title:
+        return None
+
+    append_log(f'INFO: AniList fallback triggered: query="{seed_title}"')
+    alias_title, alias_source = search_anilist_english_title_sync(seed_title)
+    if not alias_title:
+        append_log("INFO: AniList fallback exhausted: no usable english title")
+        return None
+
+    normalized_alias = build_search_name(alias_title)
+    if not normalized_alias:
+        append_log("INFO: AniList fallback exhausted: normalized english title empty")
+        return None
+    if _normalize_for_similarity(normalized_alias) == _normalize_for_similarity(seed_title):
+        append_log(
+            f'INFO: AniList fallback skipped: alias unchanged -> "{normalized_alias}"'
+        )
+        return None
+
+    append_log(
+        f'INFO: AniList fallback english title: source={alias_source or "unknown"}, title="{normalized_alias}"'
+    )
+    candidate_titles = _build_anilist_candidate_titles(snapshot, normalized_alias, target_media=target_media)
+    best = _unified_competitive_search(
+        candidate_titles,
+        year_hint=snapshot.year_hint,
+        special_hint=snapshot.special_hint,
+        structure_hint=target_media,
+        season_hint=snapshot.season_hint,
+        season_hint_confidence=snapshot.season_hint_confidence,
+    )
+    if best is None:
+        append_log("INFO: AniList fallback exhausted: TMDB retry still empty")
+        return None
+    append_log(
+        f"INFO: AniList fallback TMDB retry success: tmdbid={best.tmdb_id}, media={best.media_type}, score={best.score:.3f}"
+    )
+    return best
+
+
+def _build_anilist_candidate_titles(
+    snapshot: LocalParseSnapshot,
+    alias_title: str,
+    *,
+    target_media: str,
+) -> list[str]:
+    candidates: list[str] = []
+    season_hint = snapshot.season_hint if target_media == "tv" else None
+    profile = build_search_name_profile(alias_title, season_hint)
+    if target_media == "tv" and season_hint:
+        for query in profile.season_aware:
+            _push_candidate(candidates, query)
+    _push_candidate(candidates, profile.primary)
+    _push_candidate(candidates, profile.fallback)
+    _push_candidate(candidates, alias_title)
+    return candidates
 
 
 def _unified_competitive_search(

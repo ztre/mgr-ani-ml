@@ -147,6 +147,8 @@ class Settings:
   season_aware_research_enabled: bool = True
   recognition_pass_score: float = 0.7
   recognition_fail_score: float = 0.6
+  anilist_fallback_enabled: bool = True
+  anilist_fallback_timeout_seconds: float = 8.0
 
   # AI 识别外挂功能（默认关闭，不影响原有识别流程）
   ai_enabled: bool = False
@@ -258,6 +260,14 @@ class Settings:
       data.get(f'{p}RECOGNITION_FAIL_SCORE'),
       self.recognition_fail_score,
     )
+    self.anilist_fallback_enabled = _parse_bool(
+      data.get(f'{p}ANILIST_FALLBACK_ENABLED'),
+      self.anilist_fallback_enabled,
+    )
+    self.anilist_fallback_timeout_seconds = _parse_float(
+      data.get(f'{p}ANILIST_FALLBACK_TIMEOUT_SECONDS'),
+      self.anilist_fallback_timeout_seconds,
+    )
     self.ai_enabled = _parse_bool(data.get(f'{p}AI_ENABLED'), self.ai_enabled)
     self.ai_provider = data.get(f'{p}AI_PROVIDER', self.ai_provider)
     self.ai_api_key = data.get(f'{p}AI_API_KEY', self.ai_api_key)
@@ -318,6 +328,8 @@ class Settings:
       f'{prefix}SEASON_AWARE_RESEARCH_ENABLED': str(bool(self.season_aware_research_enabled)).lower(),
       f'{prefix}RECOGNITION_PASS_SCORE': str(float(self.recognition_pass_score)),
       f'{prefix}RECOGNITION_FAIL_SCORE': str(float(self.recognition_fail_score)),
+      f'{prefix}ANILIST_FALLBACK_ENABLED': str(bool(self.anilist_fallback_enabled)).lower(),
+      f'{prefix}ANILIST_FALLBACK_TIMEOUT_SECONDS': str(float(self.anilist_fallback_timeout_seconds)),
       f'{prefix}AI_ENABLED': str(bool(self.ai_enabled)).lower(),
       f'{prefix}AI_PROVIDER': self.ai_provider,
       f'{prefix}AI_API_KEY': self.ai_api_key,
