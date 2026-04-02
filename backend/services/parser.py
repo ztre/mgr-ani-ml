@@ -109,7 +109,7 @@ _NAME_EN_REFRESHED: set[int] = set()  # 防止同一 tv_id 在本进程内无限
 
 _BRACKET_TECH_TOKEN_RE = re.compile(
     r"^(?:"
-    r"\d{3,4}[xX]\d{3,4}|"
+    r"\d{3,4}[xX]\d{3,4}p?|"
     r"\d{3,4}p|"
     r"(?:hi|ma)\d{2,3}p|"
     r"x26[45]|h26[45]|hevc|av1|"
@@ -1145,7 +1145,69 @@ def classify_extra_from_text(text: str) -> tuple[str | None, str | None, bool]:
     return None, None, False
 
 
-def _score_fallback_bracket_candidate(raw: str) -> int:
+def _is_release_group_phrase(text: str) -> bool:
+    s = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not s:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", s):
+        return bool(re.search(r"(字幕组|字幕社|压制组|搬运组)$", s))
+    normalized = re.sub(r"\b(?:[a-z]\.){2,}[a-z]?\b", lambda m: m.group(0).replace(".", ""), s)
+    tokens = [tok for tok in re.split(r"[\s\-_.&+/]+", normalized) if tok]
+    if not tokens:
+        return False
+    noise_patterns = [
+        r"vcb(?:studio)?",
+        r"mawen\d*",
+        r"mysilu",
+        r"nekomoe",
+        r"kissaten",
+        r"airota",
+        r"dmhy",
+        r"sub",
+        r"fansub",
+        r"raws?",
+        r"studio",
+    ]
+    matched = 0
+    for tok in tokens:
+        if any(re.fullmatch(p, tok, flags=re.I) for p in noise_patterns):
+            matched += 1
+    if matched == len(tokens):
+        return True
+    raw_text = str(text or "")
+    if re.search(r"[&+/]", raw_text):
+        indicator_count = 0
+        groupish_count = 0
+        for tok in tokens:
+            if re.fullmatch(r"(?:\d{3,4}p|\d{3,4}x\d{3,4}|\d+(?:\.\d+)?fps)", tok, flags=re.I):
+                continue
+            if re.search(r"(?:sub|studio|raws?|fansub|rec)$", tok, flags=re.I):
+                indicator_count += 1
+            if re.fullmatch(r"[a-z][a-z0-9]{1,19}|[a-z]{2,24}(?:sub|studio|rec)|[a-z]{2,10}\d*", tok, flags=re.I):
+                groupish_count += 1
+        if indicator_count >= 1 and groupish_count == len(tokens):
+            return True
+    return False
+
+
+def _normalize_fallback_compare_text(text: str) -> str:
+    s = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", str(text or ""))
+    s = s.replace("_", " ").replace("-", " ").replace(".", " ")
+    s = re.sub(r"[^\w\u4e00-\u9fff ]+", " ", s, flags=re.U)
+    return re.sub(r"\s+", " ", s).strip().casefold()
+
+
+def _looks_title_like_fallback_label(candidate: str, parsed_title: str | None) -> bool:
+    cand = _normalize_fallback_compare_text(candidate)
+    title = _normalize_fallback_compare_text(parsed_title or "")
+    if not cand or not title:
+        return False
+    if len(cand) < 8:
+        return False
+    return cand in title or title in cand
+
+
+def _score_fallback_bracket_candidate(raw: str, parsed_title: str | None = None) -> int:
     """Score a bracket candidate for fallback label selection.
 
     Lower score = better candidate (content label).
@@ -1153,6 +1215,8 @@ def _score_fallback_bracket_candidate(raw: str) -> int:
     """
     s = str(raw or "").strip()
     score = 0
+    if _is_release_group_phrase(s):
+        score += 120
     # Release-group pattern: multi-name joined by '&' (e.g. CASO&Airota&VCB-Studio)
     if "&" in s:
         score += 100
@@ -1162,6 +1226,21 @@ def _score_fallback_bracket_candidate(raw: str) -> int:
     # All-letters no space — generic tag token
     elif re.fullmatch(r"[A-Za-z]+", s):
         score += 30
+    if parsed_title and _looks_title_like_fallback_label(s, parsed_title):
+        score += 80
+    if re.search(
+        r"\b(?:TVSP|TVSPOT|CMS?|PV|TRAILER|TEASER|PREVIEW|IV|MV|MAKING|COMMENTARY|"
+        r"INSERT\s+SONG|STAGE\s+GREETING|SPOT|FLASH\s+ANIME|PICTURE\s+DRAMA|"
+        r"OMAKE(?:\s+FLASH)?|MENU(?:JP|UK)?\s*\d*|MENU\s+VOL\.?\s*\d+(?:-\d+)?|"
+        r"DEBATE\s+TOURNAMENT|"
+        r"LOCATION\s+SCOUTING|CONCEPT\s+MOVIE|REVIEW\s+AVANT|LIVE\s+DUBBED|"
+        r"STORYBOARD|DOCUMENTARY|MUSIC\s+CONCERT|CAST\s+COMMENTARY|PARTY)\b",
+        s,
+        re.I,
+    ):
+        score -= 25
+    if re.search(r"\b(?:NCOP|NCED|OP|ED|SP|OVA|OAD|OAV)\s*0*\d{0,3}(?:[_\-\s]*EP\s*0*\d{1,3}(?:-\d{1,3})?)?\b", s, re.I):
+        score -= 30
     # Content-label signals (rewards)
     if re.search(r"\d+\s*$", s):          # trailing number → episode/index
         score -= 20
@@ -1169,53 +1248,124 @@ def _score_fallback_bracket_candidate(raw: str) -> int:
         score -= 15
     if "'s" in s or "\u2019s" in s:       # possessive → proper noun
         score -= 10
+    if re.search(r"\d", s) and re.search(r"[A-Za-z\u4e00-\u9fff]", s):
+        score -= 10
     return score
+
+
+def _extract_stem_based_extra_fallback_label(text: str) -> str | None:
+    raw_stem = _stem(str(text or ""))
+    if not raw_stem:
+        return None
+    stem = _strip_leading_date_prefix(raw_stem)
+    stem = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", stem)
+    stem = _strip_trailing_release_group(stem)
+    stem = stem.replace("_", " ").replace(".", " ")
+    stem = re.sub(r"\s+", " ", stem).strip(" -")
+    if not stem:
+        return None
+    stem = re.sub(r"^\d{1,3}(?:\.\d+)?[\s._-]+", "", stem).strip()
+    if not stem:
+        return None
+
+    menu_volume_match = re.search(r"\bVol\.?\s*(\d+(?:-\d+)?)\s*Menu\b", stem, re.I)
+    if menu_volume_match:
+        return _normalize_extra_label(f"Menu Vol {menu_volume_match.group(1)}")
+
+    candidate_patterns = [
+        r"\b(MagiRepo)\b",
+        r"\b(MMR)\b$",
+        r"\b(Menu(?:[A-Z]{2})?\s*Vol\.?\s*\d+(?:-\d+)?)\b",
+        r"\b(Menu(?:[A-Z]{2})?\d+)\b",
+        r"\b(Picture\s+Drama(?:\s*\d+)?)\b",
+        r"\b(Omake(?:\s+flash)?\s*\d*)\b",
+        r"\b(FD(?:\s+[A-Z0-9]+)+)\b$",
+        r"\b([A-Za-z0-9][A-Za-z0-9'&]+(?:\s+[A-Za-z0-9][A-Za-z0-9'&]+){0,4}\s+Party(?:\s+\d{4})?)\b$",
+        r"\b(\d{1,3}\.\d)\b",
+    ]
+    for pattern in candidate_patterns:
+        match = re.search(pattern, stem, re.I)
+        if not match:
+            continue
+        label = _normalize_extra_label(match.group(1))
+        if label and not _is_release_group_phrase(label):
+            return label
+
+    if re.search(r"\b(?:MENU|FD|PARTY|MMR|REPO)\b", stem, re.I):
+        label = _normalize_extra_label(stem)
+        if label and not _is_release_group_phrase(label):
+            return label
+    return None
+
+
+def _looks_like_technical_extra_label(label: str | None) -> bool:
+    probe = re.sub(r"[_\-]+", " ", str(label or ""))
+    probe = re.sub(r"\s+", " ", probe).strip()
+    if not probe:
+        return False
+    tokens = [tok for tok in probe.split(" ") if tok]
+    if not tokens:
+        return False
+    allowed_numeric = re.compile(r"\d+(?:\.\d+)?")
+    return all(_BRACKET_TECH_TOKEN_RE.fullmatch(tok) or allowed_numeric.fullmatch(tok) for tok in tokens)
 
 
 def extract_strong_extra_fallback_label(text: str) -> str | None:
     """Best-effort readable label for strong special-dir context only.
 
-    When multiple brackets survive noise-filtering, the one with the lowest
-    _score_fallback_bracket_candidate() score is returned — but ONLY if that
-    score is below -29 (i.e. the bracket has clear content-label characteristics
-    such as a multi-word phrase with a trailing number, or a possessive noun).
-
-    If no bracket beats the threshold, the original first-valid bracket is
-    returned to preserve backward-compatible behaviour.
+    Release-group brackets are filtered out first. Among the remaining bracket
+    candidates, the one with the lowest _score_fallback_bracket_candidate()
+    score is returned.
     """
     raw_candidates = re.findall(r"\[([^\]]+)\]", str(text or ""))
     if not raw_candidates:
-        return None
+        return _extract_stem_based_extra_fallback_label(text)
     noise_only = re.compile(
         r"^(?:\d{1,4}p|x26[45]|h26[45]|hevc|av1|ma10p|hi10p|yuv\d+p?\d*|"
         r"flac(?:x\d+)?|aac|ac3|dts|ddp\d?\.?\d?|raw|vcb(?:-?studio)?|mawen\d*|mysilu|"
         r"jpsc|jptc|chs|cht|sc|tc|gb|big5|bd|dvd|webrip|web[-\s]?dl|bdrip|bluray|remux)+$",
         re.I,
     )
-    _CONTENT_SCORE_THRESHOLD = -29  # below this → clear content label; use it over first-valid
-    first_valid: str | None = None
+    parsed_title = None
+    parsed_source = parse_tv_filename(str(text or ""))
+    if parsed_source is not None:
+        parsed_title = parsed_source.title
+    stem_label = _extract_stem_based_extra_fallback_label(text)
     scored: list[tuple[int, str]] = []
     for raw in raw_candidates:
         cleaned = re.sub(r"\s+", " ", str(raw or "")).strip()
         if not cleaned:
             continue
-        if noise_only.match(cleaned):
+        noise_probe = re.sub(r"[_\-]+", " ", cleaned)
+        noise_probe = re.sub(r"\s+", " ", noise_probe).strip()
+        if noise_only.match(noise_probe):
             continue
-        if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", cleaned):
+        noise_tokens = [tok for tok in noise_probe.split(" ") if tok]
+        if noise_tokens and all(_BRACKET_TECH_TOKEN_RE.fullmatch(tok) for tok in noise_tokens):
+            continue
+        if re.fullmatch(r"[0-9]+\.[0-9]+", cleaned):
+            scored.append((-5, cleaned))
+            continue
+        if re.fullmatch(r"[0-9]+", cleaned):
             continue
         if not re.search(r"[A-Za-z\u4e00-\u9fff]", cleaned):
             continue
+        if _is_release_group_phrase(cleaned):
+            continue
         normalized = _normalize_extra_label(cleaned)
-        if normalized:
-            if first_valid is None:
-                first_valid = normalized
-            scored.append((_score_fallback_bracket_candidate(cleaned), normalized))
+        if not normalized:
+            continue
+        if _is_release_group_phrase(normalized):
+            continue
+        scored.append((_score_fallback_bracket_candidate(cleaned, parsed_title=parsed_title), normalized))
     if not scored:
-        return None
+        return stem_label
     best_score, best_label = min(scored, key=lambda x: x[0])
-    if best_score < _CONTENT_SCORE_THRESHOLD:
-        return best_label
-    return first_valid
+    if stem_label and (_looks_title_like_fallback_label(best_label, parsed_title) or _looks_like_technical_extra_label(best_label)):
+        return stem_label
+    if best_score >= 120:
+        return stem_label
+    return best_label
 
 
 def _special_priority_from_raw(raw: str, category: str, label: str) -> int:
@@ -1288,6 +1438,39 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         m = re.search(p, s, re.I)
         if m:
             return "special", _normalize_extra_label(m.group(1))
+
+    # 0.8) Episode-like special variants often seen inside SP/Bonus dirs.
+    m = re.search(r"\bSpecial\s+Preview\s+EP\s*0?(\d{1,3})\b", s, re.I)
+    if m:
+        return "special", _format_token_number("SP", m.group(1))
+
+    episode_variant_patterns = [
+        (r"\bNC(?:OP|ED)\s*0?\d{1,3}[_\-\s]*EP\s*0?\d{1,3}(?:-\d{1,3})?\b", "oped"),
+        (r"\bNC\s*Part\s*EP\s*0?\d{1,3}\b", "special"),
+        (r"\bEP\s*0?\d{1,3}\s*\((?:[^)]*(?:Live\s*Dubbed|Dubbed|Commentary|NC\s*Ver\.?|On\s*Air\s*Ver\.?)\s*[^)]*)\)", "special"),
+    ]
+    for pattern, category in episode_variant_patterns:
+        m = re.search(pattern, s, re.I)
+        if m:
+            return category, _normalize_extra_label(m.group(0))
+
+    bdextra_episode_variant_patterns = [
+        r"\bPreview[_\-\s]*EP\s*0?\d{1,3}\b",
+        r"\b(?:Binaural\s+Commentary|Binaural\s+Sound)\s+EP\s*0?\d{1,3}\b",
+        r"\bEyecatch\s+EP\s*0?\d{1,3}(?:-\d{1,3})?\b",
+        r"\bEP\s*0?\d{1,3}\s+(?:Review\s+Avant|Information\s+Avant|Notice\s+Avant|[ABC][\s\-]?Part\s+Non[\s\-]?Credit\s+Ver\.?)\b",
+        r"\bCommentary\s+On\s+EP\s*0?\d{1,3}\b",
+        r"\b(?:NC[\s\-]?Avant|NC[\s\-]?Epilogue)\s*[_\-\s]*EP\s*0?\d{1,3}\b",
+        r"\b(?:OP|ED)[_\-\s]*EP\s*0?\d{1,3}\s*\((?:[^)]*O\.?A\.?\s*Ver\.?[^)]*)\)",
+    ]
+    for pattern in bdextra_episode_variant_patterns:
+        m = re.search(pattern, s, re.I)
+        if m:
+            return "bdextra", _normalize_extra_label(m.group(0))
+
+    m = re.fullmatch(r"\s*(\d{1,3}\.\d)\s*", s)
+    if m:
+        return "special", m.group(1)
 
     # 1) Special
     raw_special = _extract_raw_special_label(s)

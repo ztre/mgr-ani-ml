@@ -3648,10 +3648,15 @@ def _log_special_classification(category: str | None, label: str | None) -> None
         elif upper.startswith("ED"):
             display = "ED"
     clean_label = _sanitize_special_log_label(label)
+    if category == "bdextra" and clean_label and clean_label.replace(" ", "").upper() in {"BDEXTRA", "BDEXTRA00"}:
+        clean_label = ""
     if clean_label:
         append_log(f"Special 识别: {clean_label} -> {display}")
     elif label:
-        append_log(f"Special 识别: {display} -> {display}")
+        if category == "bdextra":
+            append_log(f"Special 分类: {display}")
+        else:
+            append_log(f"Special 识别: {display} -> {display}")
     else:
         append_log(f"Special 分类: {display}")
 
