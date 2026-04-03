@@ -39,6 +39,7 @@ SEASON_DETAIL_MAX_CANDIDATES = 5
 SEASON_DETAIL_SCORE_DELTA = 0.1
 SEASON_DETAIL_COUNT_THRESHOLD = 5
 SEASON_DETAIL_BOOST = 0.2
+CJK_TOKEN_CLASS = r"0-9A-Za-z\u3005\u3006\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
 
 
 @dataclass
@@ -784,10 +785,10 @@ def _extract_significant_match_tokens(text: str) -> set[str]:
         return set()
     stopwords = {"season", "series", "the", "part", "final"}
     tokens: set[str] = set()
-    for token in re.findall(r"[0-9a-z\u4e00-\u9fff]+", normalized, re.I):
+    for token in re.findall(r"[0-9a-z\u3005\u3006\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+", normalized, re.I):
         if token in stopwords:
             continue
-        if len(token) >= 3 or re.search(r"[\u4e00-\u9fff]", token):
+        if len(token) >= 3 or re.search(r"[\u3005\u3006\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", token):
             tokens.add(token)
     return tokens
 
@@ -1129,8 +1130,8 @@ def _best_multilang_similarity(query_title: str, item: dict, media_type: str) ->
 
 
 def _title_similarity(left: str, right: str) -> float:
-    l_norm = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", left).lower()
-    r_norm = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", right).lower()
+    l_norm = re.sub(rf"[^{CJK_TOKEN_CLASS}]+", "", left).lower()
+    r_norm = re.sub(rf"[^{CJK_TOKEN_CLASS}]+", "", right).lower()
     if not l_norm or not r_norm:
         return 0.0
     return SequenceMatcher(a=l_norm, b=r_norm).ratio()
@@ -1146,13 +1147,13 @@ def _coverage_score(query_title: str, item: dict, media_type: str) -> float:
     if not texts:
         return 0.0
 
-    q_tokens = set(re.findall(r"[0-9A-Za-z\u4e00-\u9fff]+", _normalize_for_similarity(query_title)))
+    q_tokens = set(re.findall(rf"[{CJK_TOKEN_CLASS}]+", _normalize_for_similarity(query_title)))
     if not q_tokens:
         return 0.0
 
     best = 0.0
     for text in texts:
-        c_tokens = set(re.findall(r"[0-9A-Za-z\u4e00-\u9fff]+", _normalize_for_similarity(text)))
+        c_tokens = set(re.findall(rf"[{CJK_TOKEN_CLASS}]+", _normalize_for_similarity(text)))
         if not c_tokens:
             continue
         cov = len(q_tokens & c_tokens) / max(1, len(q_tokens))

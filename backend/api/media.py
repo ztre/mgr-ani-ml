@@ -23,8 +23,10 @@ from ..models import DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGro
 from ..services.group_routing import resolve_movie_target_root
 from ..services.linker import get_inode
 from ..services.parser import parse_movie_filename, parse_tv_filename
+from ..services.resource_tree import build_resource_summaries, build_resource_tree
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
 from ..services.scanner import (
+    _collect_media_files_under_dir,
     DirectoryProcessError,
     TaskCancelledError,
     init_scan_cancel_flag,
@@ -36,6 +38,7 @@ from ..services.scanner import (
 
 router = APIRouter()
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
+ATTACHMENT_EXTS = (".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub")
 
 
 class PendingOrganizeRequest(BaseModel):
@@ -45,12 +48,26 @@ class PendingOrganizeRequest(BaseModel):
     media_type: Literal["tv", "movie"] = "tv"
     season: int | None = None
     episode_offset: int | None = None
+    selected_paths: list[str] | None = None
 
 
 class BatchDeleteRequest(BaseModel):
     ids: list[int]
     delete_files: bool = False
     delete_resource_scope: bool = False
+
+
+class DeleteScopeRequest(BaseModel):
+    scope_level: Literal["resource", "season", "group", "item"]
+    item_ids: list[int]
+    resource_dir: str
+    type: Literal["tv", "movie"]
+    sync_group_id: int | None = None
+    tmdb_id: int | None = None
+    season: int | None = None
+    group_kind: str | None = None
+    group_label: str | None = None
+    delete_files: bool = False
 
 
 class ReidentifyRequest(BaseModel):
@@ -68,6 +85,22 @@ class ReidentifyDirRequest(BaseModel):
     title: str | None = None
     year: int | None = None
     season: int | None = None
+    episode_offset: int | None = None
+
+
+class ReidentifyScopeRequest(BaseModel):
+    scope_level: Literal["resource", "season", "group", "item"]
+    item_ids: list[int]
+    resource_dir: str
+    type: Literal["tv", "movie"]
+    sync_group_id: int | None = None
+    scope_tmdb_id: int | None = None
+    season: int | None = None
+    group_kind: str | None = None
+    group_label: str | None = None
+    tmdb_id: int
+    title: str | None = None
+    year: int | None = None
     episode_offset: int | None = None
 
 
@@ -90,6 +123,15 @@ class PendingLogReviewRequest(BaseModel):
 class _DeletedLinkRecord:
     source_path: Path
     target_path: Path
+
+
+@dataclass
+class _StagedDeleteResult:
+    deleted_links: list[_DeletedLinkRecord]
+    deleted_inodes: int
+    deleted_directory_states: int
+    deleted_files: int
+    pruned_dirs: int
 
 
 def _normalize_existing_dir(path: Path | None) -> Path | None:
@@ -393,12 +435,12 @@ def _delete_inodes_for_removed_sources(db: Session, rows: list[MediaRecord], del
     return int(deleted_total)
 
 
-def _execute_batch_delete(
+def _stage_batch_delete(
     db: Session,
     rows: list[MediaRecord],
     *,
     delete_files: bool,
-) -> dict[str, int]:
+) -> _StagedDeleteResult:
     deleted_ids = {int(row.id) for row in rows}
     deleted_links: list[_DeletedLinkRecord] = []
     pruned_dir_count = 0
@@ -431,8 +473,6 @@ def _execute_batch_delete(
             deleted_files += 1
             stop_at = target_roots.get((row.sync_group_id, row.type))
             pruned_dir_count += len(_prune_empty_dirs(target_path.parent, stop_at))
-
-        db.commit()
     except OSError as exc:
         db.rollback()
         try:
@@ -454,13 +494,163 @@ def _execute_batch_delete(
             ) from restore_exc
         raise HTTPException(status_code=500, detail=f"数据库提交失败: {exc}") from exc
 
+    return _StagedDeleteResult(
+        deleted_links=deleted_links,
+        deleted_inodes=deleted_inode_count,
+        deleted_directory_states=deleted_dir_state_count,
+        deleted_files=deleted_files,
+        pruned_dirs=pruned_dir_count,
+    )
+
+
+def _execute_batch_delete(
+    db: Session,
+    rows: list[MediaRecord],
+    *,
+    delete_files: bool,
+) -> dict[str, int]:
+    staged = _stage_batch_delete(db, rows, delete_files=delete_files)
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        try:
+            _restore_deleted_links(staged.deleted_links)
+        except RuntimeError as restore_exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"数据库提交失败且补偿未完全恢复: {restore_exc}",
+            ) from restore_exc
+        raise HTTPException(status_code=500, detail=f"数据库提交失败: {exc}") from exc
+
+    log_cleanup = _cleanup_nonreview_pending_logs(rows)
+
     return {
         "deleted_records": len(rows),
-        "deleted_files": deleted_files,
-        "deleted_inodes": deleted_inode_count,
-        "deleted_directory_states": deleted_dir_state_count,
-        "pruned_dirs": pruned_dir_count,
+        "deleted_files": staged.deleted_files,
+        "deleted_inodes": staged.deleted_inodes,
+        "deleted_directory_states": staged.deleted_directory_states,
+        "pruned_dirs": staged.pruned_dirs,
+        "pending_logs_removed": int(log_cleanup.get("pending_logs_removed") or 0),
+        "unprocessed_logs_removed": int(log_cleanup.get("unprocessed_logs_removed") or 0),
     }
+
+
+def _resolve_reidentify_group(rows: list[MediaRecord], db: Session) -> tuple[SyncGroup, str]:
+    if not rows:
+        raise HTTPException(status_code=404, detail="未找到可修正的媒体记录")
+
+    group_id = rows[0].sync_group_id
+    if not group_id:
+        raise HTTPException(status_code=400, detail="记录缺少同步组信息")
+
+    if any(row.sync_group_id != group_id for row in rows):
+        raise HTTPException(status_code=400, detail="作用域包含多个同步组记录")
+
+    media_type = rows[0].type
+    if any(row.type != media_type for row in rows):
+        raise HTTPException(status_code=400, detail="作用域包含多种媒体类型")
+
+    group = db.query(SyncGroup).filter(SyncGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=400, detail="同步组不存在")
+    return group, media_type
+
+
+def _run_reidentify_scope(
+    *,
+    db: Session,
+    rows: list[MediaRecord],
+    group: SyncGroup,
+    media_type: str,
+    tmdb_id: int,
+    title: str | None,
+    year: int | None,
+    season: int | None,
+    episode_offset: int | None,
+) -> dict[str, int | bool | str]:
+    staged = _stage_batch_delete(db, rows, delete_files=True)
+    try:
+        processed, failed, has_issues = reidentify_by_target_dir(
+            db=db,
+            group=group,
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            title_override=title,
+            year_override=year,
+            season_override=season,
+            episode_offset=episode_offset,
+            records=rows,
+        )
+    except DirectoryProcessError as exc:
+        db.rollback()
+        try:
+            _restore_deleted_links(staged.deleted_links)
+        except RuntimeError as restore_exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"修正失败且补偿未完全恢复: {exc}; restore={restore_exc}",
+            ) from restore_exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        try:
+            _restore_deleted_links(staged.deleted_links)
+        except RuntimeError as restore_exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"修正异常且补偿未完全恢复: {restore_exc}",
+            ) from restore_exc
+        raise HTTPException(status_code=500, detail=f"修正失败: {exc}") from exc
+
+    log_cleanup = _cleanup_nonreview_pending_logs(rows)
+    return {
+        "processed": processed,
+        "failed": failed,
+        "has_issues": has_issues,
+        "deleted_records": len(rows),
+        "deleted_files": staged.deleted_files,
+        "deleted_inodes": staged.deleted_inodes,
+        "deleted_directory_states": staged.deleted_directory_states,
+        "pruned_dirs": staged.pruned_dirs,
+        "pending_logs_removed": int(log_cleanup.get("pending_logs_removed") or 0),
+        "unprocessed_logs_removed": int(log_cleanup.get("unprocessed_logs_removed") or 0),
+    }
+
+
+def _normalize_scope_item_ids(item_ids: list[int]) -> list[int]:
+    return sorted({int(value) for value in item_ids if isinstance(value, int) or str(value).isdigit()})
+
+
+def _load_scope_media_rows(db: Session, data: DeleteScopeRequest) -> list[MediaRecord]:
+    item_ids = _normalize_scope_item_ids(data.item_ids)
+    if not item_ids:
+        raise HTTPException(status_code=400, detail="scope item_ids 不能为空")
+
+    rows = db.query(MediaRecord).filter(MediaRecord.id.in_(item_ids)).all()
+    if not rows:
+        return []
+
+    expected_resource_dir = data.resource_dir.strip().replace("\\", "/").rstrip("/")
+    expected_type = str(data.type or "").strip()
+    expected_sync_group_id = data.sync_group_id
+    expected_tmdb_id = data.tmdb_id
+
+    scoped_rows: list[MediaRecord] = []
+    for row in rows:
+        payload = _media_to_dict(row)
+        tree = build_resource_tree(
+            [payload],
+            resource_dir=expected_resource_dir,
+            media_type=expected_type,
+            sync_group_id=expected_sync_group_id,
+            tmdb_id=expected_tmdb_id,
+        )
+        if tree["resource"]["record_count"] == 0:
+            continue
+        scoped_rows.append(row)
+    return scoped_rows
 
 
 @router.get("")
@@ -511,6 +701,78 @@ def list_pending(
     return {"total": total, "items": items, "offset": offset, "limit": limit}
 
 
+def _normalize_relative_pending_path(value: str | None) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    parts = [part for part in text.split("/") if part and part != "."]
+    if any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _pending_file_type(path: Path) -> str:
+    return "attachment" if path.suffix.lower() in ATTACHMENT_EXTS else "video"
+
+
+def _build_pending_file_items(root_dir: Path, *, include: str, exclude: str, source_root: Path) -> list[dict]:
+    files = _collect_media_files_under_dir(root_dir, include, exclude, source_root)
+    items: list[dict] = []
+    for file_path in sorted(files, key=lambda value: value.as_posix()):
+        try:
+            relative_path = file_path.relative_to(root_dir).as_posix()
+        except ValueError:
+            relative_path = file_path.name
+        normalized_relative = _normalize_relative_pending_path(relative_path)
+        if not normalized_relative:
+            continue
+        parent_dir = str(Path(normalized_relative).parent).replace("\\", "/")
+        if parent_dir in {"", "."}:
+            parent_dir = "."
+        items.append(
+            {
+                "relative_path": normalized_relative,
+                "parent_dir": parent_dir,
+                "name": file_path.name,
+                "size": int(file_path.stat().st_size) if _safe_is_file(file_path) else 0,
+                "file_type": _pending_file_type(file_path),
+                "absolute_path": str(file_path),
+            }
+        )
+    return items
+
+
+@router.get("/pending/{media_id}/files")
+def list_pending_files(media_id: int, db: Session = Depends(get_db)):
+    pending = db.query(MediaRecord).filter(MediaRecord.id == media_id).first()
+    if not pending:
+        raise HTTPException(status_code=404, detail="待办记录不存在")
+    if pending.status != "pending_manual":
+        raise HTTPException(status_code=400, detail="该记录不是待办状态")
+
+    root_dir = Path(str(pending.original_path or ""))
+    if not _safe_is_dir(root_dir):
+        raise HTTPException(status_code=400, detail="待办目录不存在或不是目录")
+
+    group = db.query(SyncGroup).filter(SyncGroup.id == pending.sync_group_id).first()
+    if not group:
+        raise HTTPException(status_code=400, detail="同步组不存在")
+
+    source_root = Path(str(group.source or ""))
+    items = _build_pending_file_items(
+        root_dir,
+        include=group.include or "",
+        exclude=group.exclude or "",
+        source_root=source_root,
+    )
+    return {
+        "pending": _media_to_dict(pending),
+        "root_dir": str(root_dir),
+        "items": items,
+        "total": len(items),
+    }
+
+
 @router.get("/pending-logs")
 def list_pending_logs(
     kind: Literal["pending", "unprocessed", "review"] = Query("pending"),
@@ -533,6 +795,25 @@ def list_pending_logs(
         "offset": offset,
         "limit": limit,
     }
+
+
+@router.get("/pending-logs-kinds")
+def list_pending_log_kinds(search: str | None = None):
+    keyword = str(search or "").strip().lower()
+    items: list[dict] = []
+    for kind in ("pending", "unprocessed", "review"):
+        file_path = _resolve_pending_log_path(kind)
+        kind_items = _load_pending_log_items(file_path, kind)
+        if keyword:
+            kind_items = [item for item in kind_items if _pending_log_matches(item, keyword)]
+        items.append(
+            {
+                "kind": kind,
+                "path": str(file_path) if file_path else "",
+                "total": len(kind_items),
+            }
+        )
+    return {"items": items}
 
 
 @router.post("/pending-logs/review")
@@ -636,6 +917,80 @@ def _target_dir_like_expr(target_dir_norm: str):
     lower_target_path = func.lower(func.replace(func.coalesce(MediaRecord.target_path, ""), "\\", "/"))
     base = target_dir_norm.lower().rstrip("/")
     return or_(lower_target_path == base, lower_target_path.like(f"{base}/%"))
+
+
+def _aux_feature_expr():
+    return ~_main_feature_expr()
+
+
+def _apply_media_list_filters(q, *, search: str | None, media_type: str | None, category: str | None):
+    if media_type:
+        q = q.filter(MediaRecord.type == media_type)
+    if search:
+        q = q.filter(
+            or_(
+                MediaRecord.original_path.contains(search),
+                MediaRecord.target_path.contains(search),
+            )
+        )
+
+    normalized_category = str(category or "all").strip().lower()
+    if normalized_category == "pending":
+        q = q.filter(MediaRecord.status == "pending_manual")
+    elif normalized_category == "success":
+        q = q.filter(MediaRecord.status.in_(["scraped", "manual_fixed"]))
+    elif normalized_category == "main":
+        q = q.filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "").filter(_main_feature_expr())
+    elif normalized_category == "sps":
+        q = q.filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "").filter(_aux_feature_expr())
+    return q
+
+
+@router.get("/resources")
+def list_media_resources(
+    db: Session = Depends(get_db),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=500),
+    search: str | None = None,
+    type: str | None = Query(None, pattern="^(tv|movie)?$"),
+    category: str = Query("all"),
+):
+    q = db.query(MediaRecord).filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
+    q = _apply_media_list_filters(q, search=search, media_type=type, category=category)
+    rows = q.order_by(MediaRecord.updated_at.desc()).all()
+    summaries = build_resource_summaries([_media_to_dict(row) for row in rows])
+    total = len(summaries)
+    items = summaries[offset: offset + limit]
+    return {"total": total, "items": items, "offset": offset, "limit": limit}
+
+
+@router.get("/resource-tree")
+def get_media_resource_tree(
+    resource_dir: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    type: str | None = Query(None, pattern="^(tv|movie)?$"),
+    sync_group_id: int | None = Query(None),
+    tmdb_id: int | None = Query(None),
+):
+    normalized_resource_dir = resource_dir.strip().replace("\\", "/").rstrip("/")
+    if not normalized_resource_dir:
+        raise HTTPException(status_code=400, detail="resource_dir 不能为空")
+
+    q = db.query(MediaRecord).filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
+    q = q.filter(_target_dir_like_expr(normalized_resource_dir))
+    if type:
+        q = q.filter(MediaRecord.type == type)
+    if sync_group_id is not None:
+        q = q.filter(MediaRecord.sync_group_id == sync_group_id)
+    rows = q.order_by(MediaRecord.updated_at.desc()).all()
+    tree = build_resource_tree(
+        [_media_to_dict(row) for row in rows],
+        resource_dir=normalized_resource_dir,
+        media_type=type,
+        sync_group_id=sync_group_id,
+        tmdb_id=tmdb_id,
+    )
+    return tree
 
 
 @router.get("/search")
@@ -809,6 +1164,7 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
             year_override=data.year,
             season_override=data.season,
             episode_offset=data.episode_offset,
+            selected_relative_paths=data.selected_paths,
         )
         task.status = "completed" if failed == 0 else "failed"
         if has_issues:
@@ -859,39 +1215,62 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
         .filter(or_(lower_target_path == normalized.lower(), lower_target_path.like(f"{normalized.lower()}/%")))
         .all()
     )
-    if not rows:
-        raise HTTPException(status_code=404, detail="未找到目标目录记录")
-
-    group_id = rows[0].sync_group_id
-    if not group_id:
-        raise HTTPException(status_code=400, detail="记录缺少同步组信息")
-
-    if any(r.sync_group_id != group_id for r in rows):
-        raise HTTPException(status_code=400, detail="目标目录包含多个同步组记录")
-
-    media_type = rows[0].type
-    if any(r.type != media_type for r in rows):
-        raise HTTPException(status_code=400, detail="目标目录包含多种媒体类型")
-
-    group = db.query(SyncGroup).filter(SyncGroup.id == group_id).first()
-    if not group:
-        raise HTTPException(status_code=400, detail="同步组不存在")
-
-    processed, failed, has_issues = reidentify_by_target_dir(
+    group, media_type = _resolve_reidentify_group(rows, db)
+    result = _run_reidentify_scope(
         db=db,
+        rows=rows,
         group=group,
         media_type=media_type,
         tmdb_id=data.tmdb_id,
-        title_override=data.title,
-        year_override=data.year,
-        season_override=data.season,
+        title=data.title,
+        year=data.year,
+        season=data.season,
         episode_offset=data.episode_offset,
-        records=rows,
     )
+    processed = int(result["processed"])
+    failed = int(result["failed"])
+    has_issues = bool(result["has_issues"])
     msg = f"整组修正完成: 成功 {processed}，失败 {failed}"
     if has_issues:
         msg += "（存在问题项）"
-    return {"message": msg, "processed": processed, "failed": failed}
+    return {"message": msg, **result}
+
+
+@router.post("/reidentify-scope")
+def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get_db)):
+    scope = DeleteScopeRequest(
+        scope_level=data.scope_level,
+        item_ids=data.item_ids,
+        resource_dir=data.resource_dir,
+        type=data.type,
+        sync_group_id=data.sync_group_id,
+        tmdb_id=data.scope_tmdb_id,
+        season=data.season,
+        group_kind=data.group_kind,
+        group_label=data.group_label,
+        delete_files=True,
+    )
+    rows = _load_scope_media_rows(db, scope)
+    group, media_type = _resolve_reidentify_group(rows, db)
+    result = _run_reidentify_scope(
+        db=db,
+        rows=rows,
+        group=group,
+        media_type=media_type,
+        tmdb_id=data.tmdb_id,
+        title=data.title,
+        year=data.year,
+        season=data.season,
+        episode_offset=data.episode_offset,
+    )
+    processed = int(result["processed"])
+    failed = int(result["failed"])
+    has_issues = bool(result["has_issues"])
+    label = "Season 修正" if data.scope_level == "season" else "作用域修正"
+    msg = f"{label}完成: 成功 {processed}，失败 {failed}"
+    if has_issues:
+        msg += "（存在问题项）"
+    return {"message": msg, **result}
 
 
 @router.post("/batch-delete")
@@ -913,6 +1292,20 @@ def batch_delete(data: BatchDeleteRequest, db: Session = Depends(get_db)):
     if data.delete_resource_scope:
         rows = _expand_rows_to_resource_scope(db, rows)
 
+    return _execute_batch_delete(db, rows, delete_files=bool(data.delete_files))
+
+
+@router.post("/delete-scope")
+def delete_media_scope(data: DeleteScopeRequest, db: Session = Depends(get_db)):
+    rows = _load_scope_media_rows(db, data)
+    if not rows:
+        return {
+            "deleted_records": 0,
+            "deleted_files": 0,
+            "deleted_inodes": 0,
+            "deleted_directory_states": 0,
+            "pruned_dirs": 0,
+        }
     return _execute_batch_delete(db, rows, delete_files=bool(data.delete_files))
 
 
@@ -1006,6 +1399,27 @@ def _format_tmdb_item(media_type: str, item: dict) -> dict:
     }
 
 
+def _format_tmdb_artwork(media_type: str, tmdb_id: int, item: dict | None) -> dict:
+    payload = item if isinstance(item, dict) else {}
+    return {
+        "tmdb_id": tmdb_id,
+        "media_type": media_type,
+        "poster_path": payload.get("poster_path") or None,
+        "backdrop_path": payload.get("backdrop_path") or None,
+    }
+
+
+@router.get("/poster")
+def get_tmdb_poster(
+    tmdb_id: int = Query(..., ge=1),
+    media_type: str = Query("tv", pattern="^(tv|movie)$"),
+):
+    if not settings.tmdb_api_key:
+        return _format_tmdb_artwork(media_type, tmdb_id, None)
+    item = _tmdb_get_by_id(media_type, tmdb_id)
+    return _format_tmdb_artwork(media_type, tmdb_id, item)
+
+
 def _link_or_fail(src: Path, dst: Path) -> None:
     if not src.exists():
         raise RuntimeError("source not found")
@@ -1064,6 +1478,87 @@ def _pending_log_matches(item: dict, keyword: str) -> bool:
         if keyword in str(value).lower():
             return True
     return False
+
+
+def _normalize_log_path_value(value: str | None) -> str:
+    return str(value or "").replace("\\", "/").rstrip("/")
+
+
+def _build_deleted_log_matchers(rows: list[MediaRecord]) -> tuple[set[str], set[str]]:
+    original_paths: set[str] = set()
+    pending_dirs: set[str] = set()
+    for row in rows:
+        original_path = _normalize_log_path_value(getattr(row, "original_path", None))
+        if not original_path:
+            continue
+        original_paths.add(original_path)
+        if str(getattr(row, "status", "") or "").strip().lower() == "pending_manual" and not str(getattr(row, "target_path", "") or "").strip():
+            pending_dirs.add(original_path)
+    return original_paths, pending_dirs
+
+
+def _should_drop_nonreview_log_entry(payload: dict, original_paths: set[str], pending_dirs: set[str]) -> bool:
+    payload_original = _normalize_log_path_value(payload.get("original_path"))
+    payload_source_dir = _normalize_log_path_value(payload.get("source_dir"))
+    if payload_original and payload_original in original_paths:
+        return True
+    if pending_dirs and ((payload_original and payload_original in pending_dirs) or (payload_source_dir and payload_source_dir in pending_dirs)):
+        return True
+    return False
+
+
+def _prune_nonreview_log_file(file_path: Path | None, rows: list[MediaRecord]) -> int:
+    if file_path is None or not file_path.exists() or not file_path.is_file() or not rows:
+        return 0
+
+    original_paths, pending_dirs = _build_deleted_log_matchers(rows)
+    if not original_paths and not pending_dirs:
+        return 0
+
+    try:
+        raw_lines = file_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+
+    kept_lines: list[str] = []
+    removed = 0
+    for line in raw_lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            kept_lines.append(line)
+            continue
+        if not isinstance(payload, dict):
+            kept_lines.append(line)
+            continue
+        if _should_drop_nonreview_log_entry(payload, original_paths, pending_dirs):
+            removed += 1
+            continue
+        kept_lines.append(json.dumps(payload, ensure_ascii=False))
+
+    if removed == 0:
+        return 0
+
+    try:
+        content = "\n".join(kept_lines)
+        if content:
+            content += "\n"
+        file_path.write_text(content, encoding="utf-8")
+    except OSError:
+        return 0
+    return removed
+
+
+def _cleanup_nonreview_pending_logs(rows: list[MediaRecord]) -> dict[str, int]:
+    pending_removed = _prune_nonreview_log_file(_resolve_pending_log_path("pending"), rows)
+    unprocessed_removed = _prune_nonreview_log_file(_resolve_pending_log_path("unprocessed"), rows)
+    return {
+        "pending_logs_removed": pending_removed,
+        "unprocessed_logs_removed": unprocessed_removed,
+    }
 
 def _media_to_dict(row: MediaRecord) -> dict:
     is_dir_pending = False

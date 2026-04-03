@@ -178,6 +178,13 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
     se_preview = _extract_season_episode_priority(episode_text)
     if se_preview is not None:
         _season, _episode, _span, kind = se_preview
+        explicit_season = _extract_season_keyword(episode_text)
+        has_named_episode_token = bool(
+            re.search(r"\b(?:Episode|EP|E)\s*\d{1,3}\b", episode_text, re.I)
+            or re.search(r"\b\d{1,2}\s*[xX]\s*\d{1,3}\b", episode_text)
+        )
+        if kind in {"two_digit", "number"} and explicit_season is not None and not has_named_episode_token:
+            se_preview = None
         # 标题数字（如 Steins;Gate 0 / 86）不要误当集号
         if kind in {"two_digit", "number"} and not is_title_number_safe(_cleanup_title(clean)):
             se_preview = None
@@ -187,7 +194,7 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
             is_special = False
 
     # 仅在无强 TV 集号结构时才提前返回特典分支
-    if extra_category is not None and not _has_strong_episode_structure(episode_text):
+    if extra_category is not None and extra_category != "iv" and not _has_strong_episode_structure(episode_text):
         season = _extract_explicit_season_hint_for_extra(episode_text) or 1
         episode = _extract_extra_index(extra_label) if extra_category in {"special", "oped"} else None
         title = _cleanup_title(clean)
@@ -908,20 +915,54 @@ def _extract_bang_season(title: str) -> int | None:
     return len(m.group())
 
 
+def _detect_skip_mainline_variant_label(name: str) -> str | None:
+    """Return a normalized variant label for files that should be skipped.
+
+    These files are usually duplicate/alternate cuts of a main episode and
+    should not compete for the canonical mainline target path.
+    """
+    s = str(name or "")
+    if not s:
+        return None
+    if re.search(r"\bNCOPED\b", s, re.I):
+        return "NCOPED"
+    if re.search(r"\bNC\s*Ver\b", s, re.I) and not re.search(r"\bNC(?:OP|ED)\b", s, re.I):
+        return "NC Ver"
+
+    m = re.search(
+        r"\[\s*(?:EP?\s*)?\d{1,3}\s*(?:[-_ ]+|\()\s*"
+        r"(director'?s\s*cut|extended\s*(?:cut|edition)|special\s*edition|uncut)"
+        r"\.?\s*(?:\))?\s*\]",
+        s,
+        re.I,
+    )
+    if not m:
+        return None
+
+    raw = re.sub(r"\s+", " ", str(m.group(1) or "")).strip().rstrip(".")
+    lowered = raw.lower()
+    if lowered.startswith("director"):
+        return "Director's Cut"
+    if lowered.startswith("extended cut"):
+        return "Extended Cut"
+    if lowered.startswith("extended"):
+        return "Extended Edition"
+    if lowered.startswith("special"):
+        return "Special Edition"
+    if lowered.startswith("uncut"):
+        return "Uncut"
+    return raw or None
+
+
 def _is_nc_ver_skip_file(name: str) -> bool:
     """Return True for files that should be entirely skipped (not scanned).
 
     Rules:
     - ``NCOPED`` — combined NC OP+ED file, unsupported
     - ``NC Ver`` when NOT part of NCOP / NCED prefix
+    - explicit mainline duplicate cut tags like ``[25(Director's Cut)]``
     """
-    s = str(name or "")
-    if re.search(r"\bNCOPED\b", s, re.I):
-        return True
-    # 含 NC Ver 但不构成 NCOP 或 NCED 前缀时跳过
-    if re.search(r"\bNC\s*Ver\b", s, re.I) and not re.search(r"\bNC(?:OP|ED)\b", s, re.I):
-        return True
-    return False
+    return _detect_skip_mainline_variant_label(name) is not None
 
 
 def _extract_trailing_season_number(text: str, structure_hint: str | None = None) -> int | None:
@@ -1132,6 +1173,15 @@ def classify_extra_from_text(text: str) -> tuple[str | None, str | None, bool]:
     if bracket_tokens:
         candidates: list[tuple[int, str, str]] = []
         for raw in bracket_tokens:
+            normalized_raw = re.sub(r"\s+", " ", str(raw or "")).strip()
+            if re.fullmatch(r"event", normalized_raw, re.I):
+                candidates.append((20, "making", "Event"))
+                continue
+            if re.fullmatch(r"extra", normalized_raw, re.I):
+                body_text = re.sub(r"\[[^\]]+\]", " ", str(text or ""))
+                if re.search(r"\b(?:Live\s+)?Event\b", body_text, re.I):
+                    candidates.append((20, "making", "Event"))
+                    continue
             info = _match_extra_info(raw)
             if info:
                 priority = _special_priority_from_raw(raw, info[0], info[1])
@@ -1393,6 +1443,14 @@ def _special_priority_from_raw(raw: str, category: str, label: str) -> int:
 def _match_extra_info(text: str) -> tuple[str, str] | None:
     s = str(text or "")
 
+    m = re.search(r"\b(Web\s*Preview|Preview)\s*0?(\d{1,3})(?:[_\-\s]+(\d{1,3}))\b", s, re.I)
+    if m:
+        token = re.sub(r"\s+", "", str(m.group(1) or "")).strip() or "Preview"
+        label = _format_token_number(token, m.group(2))
+        if m.group(3):
+            label = f"{label}_{int(m.group(3))}"
+        return "preview", _normalize_extra_label(label)
+
     # 0) Bracket subtypes and richer trailer/CM/preview patterns
     subtype_patterns = [
         (r"\b(Character)\s*PV\s*(\d{0,3})\b", "character_pv", "CharacterPV"),
@@ -1445,7 +1503,7 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         return "special", _format_token_number("SP", m.group(1))
 
     episode_variant_patterns = [
-        (r"\bNC(?:OP|ED)\s*0?\d{1,3}[_\-\s]*EP\s*0?\d{1,3}(?:-\d{1,3})?\b", "oped"),
+        (r"\bNC(?:OP|ED)\s*0?\d{1,3}[_\-\s]*EP\s*0?\d{1,3}(?!\s*-\s*\d)\b", "oped"),
         (r"\bNC\s*Part\s*EP\s*0?\d{1,3}\b", "special"),
         (r"\bEP\s*0?\d{1,3}\s*\((?:[^)]*(?:Live\s*Dubbed|Dubbed|Commentary|NC\s*Ver\.?|On\s*Air\s*Ver\.?)\s*[^)]*)\)", "special"),
     ]
@@ -1464,6 +1522,16 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         r"\b(?:OP|ED)[_\-\s]*EP\s*0?\d{1,3}\s*\((?:[^)]*O\.?A\.?\s*Ver\.?[^)]*)\)",
     ]
     for pattern in bdextra_episode_variant_patterns:
+        m = re.search(pattern, s, re.I)
+        if m:
+            return "bdextra", _normalize_extra_label(m.group(0))
+
+    numbered_bdextra_patterns = [
+        r"\bEvent\s*0?(\d{1,3})\b",
+        r"\bMaking\s*0?(\d{1,3})\b",
+        r"\bNC(?:OP|ED)\s*0?\d{1,3}[_\-\s]*EP\s*0?\d{1,3}-\d{1,3}\b",
+    ]
+    for pattern in numbered_bdextra_patterns:
         m = re.search(pattern, s, re.I)
         if m:
             return "bdextra", _normalize_extra_label(m.group(0))
@@ -1490,6 +1558,9 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         m = re.search(p, s, re.I)
         if m:
             return "special", _normalize_extra_label(m.group(1))
+
+    if re.search(r"\bLive\s+Event\b", s, re.I):
+        return "making", "Event"
 
     # 2) OP / ED
     oped_patterns = [
@@ -1587,16 +1658,16 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
             return "trailer", normalized
 
     # 4) IV / MV / Interview / Making / BDExtra
-    iv_patterns = [
-        r"\b(IV)\s*0?(\d{0,3})\b",
-    ]
-    for p in iv_patterns:
-        m = re.search(p, s, re.I)
-        if m:
-            token = m.group(1)
-            idx = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
-            label = token if not idx else _format_token_number(token, idx)
-            return "iv", _normalize_extra_label(label)
+    m = re.fullmatch(r"\s*(IV)(?:\s*0?(\d{1,3})(?:[_\-\s]+(\d{1,3}))?)?\s*", s, re.I)
+    if m:
+        token = m.group(1)
+        if m.group(2):
+            label = _format_token_number(token, m.group(2))
+        else:
+            label = token
+        if m.group(3):
+            label = f"{label}_{int(m.group(3))}"
+        return "iv", _normalize_extra_label(label)
 
     mv_patterns = [
         r"\b(MV)\s*0?(\d{0,3})\b",
@@ -1630,7 +1701,7 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
         r"\b(STAFF\s*TALK)\b",
         r"\b(CAST\s*TALK)\b",
         r"\b(DOCUMENTARY)\b",
-        r"\b(EVENT)\b",
+        r"\b(Talk\s*Event)\b",
         r"\b(MAKING\s*OF)\b",
         r"\b(ROUGH\s*SKETCH)\b",
     ]

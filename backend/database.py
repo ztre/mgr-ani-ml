@@ -48,6 +48,7 @@ def init_db() -> None:
   Base.metadata.create_all(bind=engine)
   if sqlite_path is not None:
     _ensure_directory_states_unique_index()
+    _ensure_resource_lookup_indexes()
 
 
 def _apply_sqlite_pragmas() -> None:
@@ -90,6 +91,19 @@ def _ensure_directory_states_unique_index() -> None:
         "ON directory_states (sync_group_id, dir_path)"
       )
     )
+    conn.commit()
+
+
+def _ensure_resource_lookup_indexes() -> None:
+  with engine.connect() as conn:
+    statements = [
+      "CREATE INDEX IF NOT EXISTS idx_media_records_target_path ON media_records (target_path)",
+      "CREATE INDEX IF NOT EXISTS idx_media_records_sync_group_target_path ON media_records (sync_group_id, target_path)",
+      "CREATE INDEX IF NOT EXISTS idx_inode_records_target_path ON inode_records (target_path)",
+      "CREATE INDEX IF NOT EXISTS idx_inode_records_sync_group_target_path ON inode_records (sync_group_id, target_path)",
+    ]
+    for statement in statements:
+      conn.execute(text(statement))
     conn.commit()
 
 

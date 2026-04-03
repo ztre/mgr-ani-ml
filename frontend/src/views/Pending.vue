@@ -18,6 +18,7 @@
           </template>
         </el-input>
         <el-tag type="warning" effect="dark">共 {{ total }} 条</el-tag>
+        <el-button plain @click="resetSearch">重置</el-button>
         <el-button @click="loadPending" :loading="loading">
           <el-icon><Refresh /></el-icon>
           刷新
@@ -49,12 +50,12 @@
             {{ formatTime(row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right" align="center">
+        <el-table-column label="操作" width="260" fixed="right" align="center">
           <template #default="{ row }">
-            <el-button type="primary" link @click="openOrganizeDialog(row)">手动整理</el-button>
+            <el-button type="primary" plain @click="openOrganizeDialog(row)">手动整理</el-button>
             <el-button
               type="danger"
-              link
+              plain
               :loading="deletingId === row.id"
               @click="deletePending(row)"
             >
@@ -77,8 +78,9 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="手动识别整理" width="520px">
-      <el-form :model="form" label-width="110px">
+    <el-drawer v-model="dialogVisible" title="手动识别整理" direction="rtl" size="820px" destroy-on-close class="organize-drawer">
+      <div ref="organizeDrawerBodyRef" class="organize-drawer-body">
+      <el-form ref="organizeFormRef" :model="form" label-width="110px">
         <el-form-item label="待办目录">
           <div class="path-preview" :title="currentRow?.original_path">{{ currentRow?.original_path || '-' }}</div>
         </el-form-item>
@@ -110,11 +112,83 @@
           <el-input-number v-model="form.episode_offset" :min="0" />
         </el-form-item>
       </el-form>
+
+      <div ref="pendingFilesSectionRef" class="pending-files-section">
+        <div ref="pendingFilesHeaderRef" class="pending-files-header">
+          <div>
+            <div class="pending-files-title">目录文件</div>
+            <div class="pending-files-subtitle">不勾选则整理整个目录；勾选后仅整理选中文件。</div>
+          </div>
+          <div class="pending-files-actions">
+            <el-button-group class="pending-filter-group">
+              <el-button plain :type="pendingFileView === 'all' ? 'primary' : 'default'" @click="pendingFileView = 'all'">全部 {{ pendingFileItems.length }}</el-button>
+              <el-button plain :type="pendingFileView === 'video' ? 'primary' : 'default'" @click="pendingFileView = 'video'">视频 {{ pendingVideoCount }}</el-button>
+              <el-button plain :type="pendingFileView === 'attachment' ? 'primary' : 'default'" @click="pendingFileView = 'attachment'">附件 {{ pendingAttachmentCount }}</el-button>
+              <el-button plain :type="pendingFileView === 'selected' ? 'warning' : 'default'" @click="pendingFileView = 'selected'">已选 {{ selectedPendingPaths.length }}</el-button>
+            </el-button-group>
+            <el-button-group class="pending-select-group">
+              <el-button plain @click="selectAllPendingFiles" :disabled="pendingFilesLoading || !pendingFileItems.length">全选</el-button>
+              <el-button plain @click="selectVideoPendingFiles" :disabled="pendingFilesLoading || !pendingVideoCount">选视频</el-button>
+              <el-button plain @click="selectAttachmentPendingFiles" :disabled="pendingFilesLoading || !pendingAttachmentCount">选附件</el-button>
+              <el-button plain @click="clearPendingFileSelection" :disabled="pendingFilesLoading || !selectedPendingPaths.length">清空</el-button>
+            </el-button-group>
+          </div>
+        </div>
+
+        <el-alert
+          v-if="pendingFilesError"
+          ref="pendingFilesAlertRef"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="pending-files-alert"
+          :title="pendingFilesError"
+        />
+
+        <div v-else class="pending-files-table-wrap">
+          <el-table
+            ref="pendingFilesTable"
+            :data="filteredPendingFileItems"
+            row-key="relative_path"
+            :height="pendingFilesTableHeight"
+            stripe
+            v-loading="pendingFilesLoading"
+            @selection-change="handlePendingFileSelection"
+          >
+            <el-table-column type="selection" width="52" />
+            <el-table-column prop="name" label="文件名" min-width="260" show-overflow-tooltip />
+            <el-table-column prop="parent_dir" label="所在目录" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ row.parent_dir === '.' ? '根目录' : row.parent_dir }}
+              </template>
+            </el-table-column>
+            <el-table-column label="类型" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.file_type === 'video' ? 'primary' : 'info'">
+                  {{ row.file_type === 'video' ? '视频' : '附件' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="大小" width="120" align="right">
+              <template #default="{ row }">
+                {{ formatFileSize(row.size) }}
+              </template>
+            </el-table-column>
+            <template #empty>
+              <el-empty description="目录下没有可整理媒体文件" />
+            </template>
+          </el-table>
+        </div>
+      </div>
+      </div>
+
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="submitting" @click="submitOrganize">开始整理</el-button>
+        <el-button type="primary" :loading="submitting" @click="submitOrganize">
+          {{ selectedPendingPaths.length ? '整理选中文件' : '开始整理' }}
+        </el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
 
     <el-dialog
       v-model="searchDialogVisible"
@@ -194,7 +268,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, onMounted, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { mediaApi } from '../api/client'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -215,6 +289,18 @@ const searchLoading = ref(false)
 const searchKeyword = ref('')
 const searchResults = ref([])
 const deletingId = ref(null)
+const pendingFilesLoading = ref(false)
+const pendingFileItems = ref([])
+const selectedPendingPaths = ref([])
+const pendingFilesError = ref('')
+const pendingFilesTable = ref(null)
+const pendingFileView = ref('all')
+const organizeDrawerBodyRef = ref(null)
+const organizeFormRef = ref(null)
+const pendingFilesSectionRef = ref(null)
+const pendingFilesHeaderRef = ref(null)
+const pendingFilesAlertRef = ref(null)
+const pendingFilesTableHeight = ref(360)
 const form = reactive({
   media_type: 'tv',
   tmdb_id: '',
@@ -223,6 +309,42 @@ const form = reactive({
   season: undefined,
   episode_offset: undefined,
 })
+
+const pendingVideoCount = computed(() => pendingFileItems.value.filter((item) => item.file_type === 'video').length)
+const pendingAttachmentCount = computed(() => pendingFileItems.value.filter((item) => item.file_type === 'attachment').length)
+const filteredPendingFileItems = computed(() => {
+  if (pendingFileView.value === 'video') {
+    return pendingFileItems.value.filter((item) => item.file_type === 'video')
+  }
+  if (pendingFileView.value === 'attachment') {
+    return pendingFileItems.value.filter((item) => item.file_type === 'attachment')
+  }
+  if (pendingFileView.value === 'selected') {
+    const selected = new Set(selectedPendingPaths.value)
+    return pendingFileItems.value.filter((item) => selected.has(item.relative_path))
+  }
+  return pendingFileItems.value
+})
+
+let pendingLayoutFrame = null
+
+function updatePendingFilesTableHeight() {
+  if (pendingLayoutFrame !== null) {
+    cancelAnimationFrame(pendingLayoutFrame)
+  }
+  pendingLayoutFrame = requestAnimationFrame(() => {
+    const sectionEl = pendingFilesSectionRef.value
+    const headerEl = pendingFilesHeaderRef.value
+    const alertEl = pendingFilesAlertRef.value?.$el || pendingFilesAlertRef.value
+    if (!sectionEl || !headerEl) return
+
+    const sectionHeight = sectionEl.getBoundingClientRect().height
+    const headerHeight = headerEl.getBoundingClientRect().height
+    const alertHeight = alertEl ? alertEl.getBoundingClientRect().height + 12 : 0
+    const nextHeight = Math.floor(sectionHeight - headerHeight - alertHeight)
+    pendingFilesTableHeight.value = Math.max(nextHeight, 220)
+  })
+}
 
 function extractDirName(path) {
   if (!path) return '-'
@@ -235,7 +357,16 @@ function formatTime(t) {
   return dayjs(t).format('YYYY-MM-DD HH:mm')
 }
 
-function openOrganizeDialog(row) {
+function formatFileSize(size) {
+  const value = Number(size || 0)
+  if (value <= 0) return '-'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 ** 3) return `${(value / (1024 ** 2)).toFixed(1)} MB`
+  return `${(value / (1024 ** 3)).toFixed(2)} GB`
+}
+
+async function openOrganizeDialog(row) {
   currentRow.value = row
   form.media_type = row?.type || 'tv'
   form.tmdb_id = ''
@@ -243,7 +374,70 @@ function openOrganizeDialog(row) {
   form.year = undefined
   form.season = undefined
   form.episode_offset = undefined
+  pendingFileItems.value = []
+  pendingFilesError.value = ''
+  selectedPendingPaths.value = []
+  pendingFileView.value = 'all'
   dialogVisible.value = true
+  await loadPendingFiles(row)
+  await nextTick()
+  updatePendingFilesTableHeight()
+}
+
+async function loadPendingFiles(row) {
+  if (!row?.id) return
+  pendingFilesLoading.value = true
+  pendingFilesError.value = ''
+  pendingFileItems.value = []
+  selectedPendingPaths.value = []
+  pendingFileView.value = 'all'
+  try {
+    const { data } = await mediaApi.pendingFiles(row.id)
+    pendingFileItems.value = data.items || []
+    await nextTick()
+    pendingFilesTable.value?.clearSelection?.()
+    updatePendingFilesTableHeight()
+  } catch (e) {
+    pendingFilesError.value = e.response?.data?.detail || '目录文件加载失败'
+  } finally {
+    pendingFilesLoading.value = false
+    await nextTick()
+    updatePendingFilesTableHeight()
+  }
+}
+
+function handlePendingFileSelection(rows) {
+  selectedPendingPaths.value = (rows || []).map((row) => row.relative_path)
+}
+
+function clearPendingFileSelection() {
+  pendingFilesTable.value?.clearSelection?.()
+  selectedPendingPaths.value = []
+}
+
+function selectPendingFiles(predicate) {
+  const table = pendingFilesTable.value
+  if (!table) return
+  table.clearSelection?.()
+  const selected = []
+  pendingFileItems.value.forEach((item) => {
+    if (!predicate(item)) return
+    table.toggleRowSelection?.(item, true)
+    selected.push(item.relative_path)
+  })
+  selectedPendingPaths.value = selected
+}
+
+function selectAllPendingFiles() {
+  selectPendingFiles(() => true)
+}
+
+function selectVideoPendingFiles() {
+  selectPendingFiles((item) => item.file_type === 'video')
+}
+
+function selectAttachmentPendingFiles() {
+  selectPendingFiles((item) => item.file_type === 'attachment')
 }
 
 async function submitOrganize() {
@@ -261,6 +455,7 @@ async function submitOrganize() {
       media_type: form.media_type,
       season: form.media_type === 'tv' ? (form.season ?? null) : null,
       episode_offset: form.media_type === 'tv' ? (form.episode_offset ?? null) : null,
+      selected_paths: selectedPendingPaths.value.length ? [...selectedPendingPaths.value] : null,
     }
     dialogVisible.value = false
     ElMessage.info('任务已提交，请关注首页日志记录')
@@ -359,6 +554,12 @@ function handleSearch() {
   loadPending()
 }
 
+function resetSearch() {
+  search.value = ''
+  page.value = 1
+  loadPending()
+}
+
 async function loadPending() {
   loading.value = true
   try {
@@ -389,6 +590,26 @@ onMounted(() => {
   const q = route.query.search
   search.value = typeof q === 'string' ? q : ''
   loadPending()
+  window.addEventListener('resize', updatePendingFilesTableHeight)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updatePendingFilesTableHeight)
+  if (pendingLayoutFrame !== null) {
+    cancelAnimationFrame(pendingLayoutFrame)
+  }
+})
+
+watch(dialogVisible, async (visible) => {
+  if (!visible) return
+  await nextTick()
+  updatePendingFilesTableHeight()
+})
+
+watch([pendingFilesError, filteredPendingFileItems], async () => {
+  if (!dialogVisible.value) return
+  await nextTick()
+  updatePendingFilesTableHeight()
 })
 </script>
 
@@ -419,6 +640,62 @@ onMounted(() => {
   font-size: 12px;
   color: #64748b;
   word-break: break-all;
+}
+.organize-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.pending-files-section {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  margin-top: 8px;
+  border-top: 1px solid var(--amm-border, #e5e7eb);
+  min-height: 0;
+  padding-top: 18px;
+}
+.pending-files-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.pending-files-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #111827;
+}
+.pending-files-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #64748b;
+}
+.pending-files-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.pending-filter-group,
+.pending-select-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pending-files-alert {
+  margin-bottom: 12px;
+}
+.pending-files-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 .search-bar {
   margin-bottom: 24px;
@@ -524,5 +801,16 @@ onMounted(() => {
 
 :deep(.tmdb-search-dialog .el-dialog) {
   max-width: 92vw;
+}
+
+:deep(.organize-drawer .el-drawer__body) {
+  overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .pending-files-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>

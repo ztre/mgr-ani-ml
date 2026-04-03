@@ -30,9 +30,9 @@
     <el-card shadow="never" class="toolbar-card">
       <div class="kind-switch">
         <el-radio-group v-model="kind" @change="handleKindChange">
-          <el-radio-button label="pending">Pending</el-radio-button>
-          <el-radio-button label="unprocessed">Unprocessed</el-radio-button>
-          <el-radio-button label="review">Review</el-radio-button>
+          <el-radio-button v-for="option in visibleKinds" :key="option.kind" :label="option.kind">
+            {{ kindLabel(option.kind) }}
+          </el-radio-button>
         </el-radio-group>
         <el-tag effect="dark" type="info">{{ currentPath || '未配置路径' }}</el-tag>
       </div>
@@ -153,6 +153,7 @@ import dayjs from 'dayjs'
 import { mediaApi } from '../api/client'
 
 const kind = ref('pending')
+const kindOptions = ref([])
 const search = ref('')
 const loading = ref(false)
 const submitting = ref(false)
@@ -175,6 +176,18 @@ const currentKindLabel = computed(() => {
   if (kind.value === 'review') return 'review'
   return 'unprocessed'
 })
+
+const visibleKinds = computed(() => {
+  const options = kindOptions.value || []
+  const nonEmpty = options.filter((item) => Number(item.total || 0) > 0)
+  return nonEmpty.length ? nonEmpty : options
+})
+
+function kindLabel(value) {
+  if (value === 'pending') return 'Pending'
+  if (value === 'unprocessed') return 'Unprocessed'
+  return 'Review'
+}
 
 function formatTime(value) {
   if (!value) return '-'
@@ -221,6 +234,16 @@ function handleKindChange() {
 async function loadLogs() {
   loading.value = true
   try {
+    const { data: kindData } = await mediaApi.pendingLogKinds({
+      search: (search.value || '').trim() || undefined,
+    })
+    kindOptions.value = kindData.items || []
+    const nextKinds = (kindOptions.value || []).filter((item) => Number(item.total || 0) > 0)
+    const fallbackKinds = nextKinds.length ? nextKinds : (kindOptions.value || [])
+    if (fallbackKinds.length && !fallbackKinds.some((item) => item.kind === kind.value)) {
+      kind.value = fallbackKinds[0].kind
+    }
+
     const { data } = await mediaApi.pendingLogs({
       kind: kind.value,
       offset: (page.value - 1) * pageSize.value,

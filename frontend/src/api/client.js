@@ -40,24 +40,35 @@ export const syncGroupsApi = {
 
 export const mediaApi = {
   list: (params) => client.get('/media', { params }),
+  resources: (params) => client.get('/media/resources', { params }),
+  resourceTree: (params) => client.get('/media/resource-tree', { params }),
   pending: (params) => client.get('/media/pending', { params }),
+  pendingFiles: (id) => client.get(`/media/pending/${id}/files`),
   pendingLogs: (params) => client.get('/media/pending-logs', { params }),
+  pendingLogKinds: (params) => client.get('/media/pending-logs-kinds', { params }),
   createPendingReview: (data) => client.post('/media/pending-logs/review', data),
   byTargetDir: (params) => client.get('/media/by-target-dir', { params }),
   searchTmdb: (params) => client.get('/media/search', { params }),
+  poster: (params) => client.get('/media/poster', { params }),
   seasonPoster: (params) => client.get('/media/season-poster', { params }),
   stats: () => client.get('/media/stats'),
   deleteAll: () => client.delete('/media/all'),
   batchDelete: (data) => client.post('/media/batch-delete', data),
+  deleteScope: (data) => client.post('/media/delete-scope', data),
   deduplicate: () => client.post('/media/deduplicate'),
   reidentify: (id, data) => client.post(`/media/${id}/reidentify`, data),
   reidentifyByTargetDir: (data) => client.post('/media/reidentify-by-target-dir', data),
+  reidentifyScope: (data) => client.post('/media/reidentify-scope', data),
   manualOrganize: (id, data) => client.post(`/media/${id}/manual-organize`, data),
 }
 
 export const inodesApi = {
   list: (params) => client.get('/inodes', { params }),
+  resources: (params) => client.get('/inodes/resources', { params }),
+  resourceTree: (params) => client.get('/inodes/resource-tree', { params }),
   delete: (id) => client.delete(`/inodes/${id}`),
+  batchDelete: (data) => client.post('/inodes/batch-delete', data),
+  deleteScope: (data) => client.post('/inodes/delete-scope', data),
   deleteAll: () => client.delete('/inodes/all'),
   cleanup: () => client.delete('/inodes/cleanup'),
 }

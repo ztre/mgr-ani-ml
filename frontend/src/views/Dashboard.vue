@@ -200,23 +200,25 @@
     </el-card>
 
     <!-- 日志抽屉 -->
-    <el-drawer v-model="drawerVisible" title="任务日志" size="50%">
-      <div class="log-toolbar">
-        <div class="log-toolbar-left">
-          <el-switch
-            v-model="logAutoRefresh"
-            active-text="实时刷新"
-            inactive-text="暂停刷新"
-            @change="onLogAutoRefreshChange"
-          />
-          <span class="log-meta" v-if="currentLogTaskId">任务 #{{ currentLogTaskId }}</span>
-          <span class="log-meta" v-if="lastLogRefreshedAt">上次刷新 {{ lastLogRefreshedAt }}</span>
+    <el-drawer v-model="drawerVisible" title="任务日志" size="50%" class="logs-drawer">
+      <div class="logs-drawer-body">
+        <div class="log-toolbar">
+          <div class="log-toolbar-left">
+            <el-switch
+              v-model="logAutoRefresh"
+              active-text="实时刷新"
+              inactive-text="暂停刷新"
+              @change="onLogAutoRefreshChange"
+            />
+            <span class="log-meta" v-if="currentLogTaskId">任务 #{{ currentLogTaskId }}</span>
+            <span class="log-meta" v-if="lastLogRefreshedAt">上次刷新 {{ lastLogRefreshedAt }}</span>
+          </div>
+          <el-button size="small" @click="manualRefreshLogs">手动刷新</el-button>
         </div>
-        <el-button size="small" @click="manualRefreshLogs">手动刷新</el-button>
-      </div>
-      <div v-loading="logsLoading" class="log-container" style="height: 600px; display: flex; flex-direction: column;">
-        <pre v-if="currentLogs.length">{{ [...currentLogs].reverse().join('\n') }}</pre>
-        <div v-else class="empty-logs">暂无日志</div>
+        <div v-loading="logsLoading" class="log-container">
+          <pre v-if="currentLogs.length">{{ [...currentLogs].reverse().join('\n') }}</pre>
+          <div v-else class="empty-logs">暂无日志</div>
+        </div>
       </div>
     </el-drawer>
   </div>
@@ -661,9 +663,10 @@ onBeforeUnmount(() => {
 }
 
 .log-container {
+  flex: 1;
+  min-height: 0;
   padding: 16px;
   background: #f8fafc;
-  height: 100%;
   overflow: auto;
   border-radius: 10px;
 }
@@ -683,6 +686,7 @@ onBeforeUnmount(() => {
 
 .log-toolbar {
   display: flex;
+  flex: 0 0 auto;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
@@ -703,5 +707,16 @@ onBeforeUnmount(() => {
 
 .theme-switch {
   margin-right: 4px;
+}
+
+.logs-drawer-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+:deep(.logs-drawer .el-drawer__body) {
+  overflow: hidden;
 }
 </style>

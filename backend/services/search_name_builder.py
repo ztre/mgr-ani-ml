@@ -22,6 +22,8 @@ _VERSION_NOISE_PATTERN = re.compile(
     r"\b(?:nc\s*ver\.?|on\s*air\s*ver\.?|true\s*birth\s*edition|creditless|uncensored|director(?:'s)?\s*cut)\b",
     re.I,
 )
+CJK_SEARCH_CHAR_CLASS = r"0-9A-Za-z\u3005\u3006\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+CJK_SEARCH_PATTERN = re.compile(r"[\u3005\u3006\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 @dataclass(frozen=True)
@@ -74,7 +76,7 @@ def build_search_name_profile(raw_name: str, season_hint: int | None = None) -> 
     text = re.sub(r"\bS\d{1,2}\b", " ", text, flags=re.I)
     if season_hint:
         text = re.sub(r"\b(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\b\s*$", " ", text, flags=re.I)
-    text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", " ", text)
+    text = re.sub(rf"[^{CJK_SEARCH_CHAR_CLASS}]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     m = re.search(r"(?:^| )([2-9]|[12]\d|30)$", text)
     if m:
@@ -155,7 +157,7 @@ def _looks_like_noise_subtitle(text: str) -> bool:
     if SEARCH_NOISE_PATTERN.search(s):
         return True
     tokens = [tok for tok in re.split(r"[\s\-]+", s) if tok]
-    if not re.search(r"[\u4e00-\u9fff]", s) and len(tokens) <= 2 and any(any(ch.isdigit() for ch in tok) for tok in tokens):
+    if not CJK_SEARCH_PATTERN.search(s) and len(tokens) <= 2 and any(any(ch.isdigit() for ch in tok) for tok in tokens):
         return True
     return False
 

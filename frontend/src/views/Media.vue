@@ -1,17 +1,17 @@
 <template>
-  <div class="media">
+  <div class="media-page">
     <div class="header">
       <h1 class="page-title">媒体记录</h1>
       <div class="header-actions">
         <el-input
           v-model="filters.search"
-          placeholder="搜索文件名..."
+          placeholder="搜索资源或文件名..."
           clearable
-          style="width: 220px"
+          style="width: 240px"
           @clear="onFilterChanged"
           @keyup.enter="onFilterChanged"
         />
-        <el-select v-model="filters.type" placeholder="类型" clearable style="width: 100px" @change="onFilterChanged">
+        <el-select v-model="filters.type" placeholder="类型" clearable style="width: 110px" @change="onFilterChanged">
           <el-option label="TV" value="tv" />
           <el-option label="电影" value="movie" />
         </el-select>
@@ -20,60 +20,57 @@
           <el-option label="正片" value="main" />
           <el-option label="SPs/Extras" value="sps" />
         </el-select>
-        <el-button @click="loadMedia" :loading="loading">
+        <el-button plain @click="resetMainFilters">重置</el-button>
+        <el-button :loading="loading" @click="loadResources">
           <el-icon><Refresh /></el-icon>
         </el-button>
-        <el-button type="warning" plain @click="deduplicateRecords">
-          记录去重
-        </el-button>
+        <el-button type="warning" plain @click="deduplicateRecords">记录去重</el-button>
       </div>
     </div>
 
     <el-card shadow="never" class="table-card">
-      <el-table :data="seasonRows" stripe v-loading="loading" style="width: 100%">
-        <el-table-column label="资源" min-width="520">
+      <el-table :data="resources" v-loading="loading" stripe style="width: 100%">
+        <el-table-column label="资源" min-width="420">
           <template #default="{ row }">
-            <div class="title-cell" @click="openSeasonDrawer(row)">
-              <img
-                v-if="getPosterUrl(row)"
-                class="poster-thumb"
-                :src="getPosterUrl(row)"
-                alt="poster"
-                loading="lazy"
-              />
-              <div v-else class="poster-fallback">
-                <el-icon class="media-icon" :size="20">
+            <div class="resource-cell" @click="openResourceDrawer(row)">
+              <div class="resource-icon" :class="{ 'has-poster': !!resourcePosterUrl(row) }" :ref="(el) => setResourceIconRef(row, el)">
+                <img
+                  v-if="resourcePosterUrl(row)"
+                  class="resource-poster"
+                  :src="resourcePosterUrl(row)"
+                  :alt="resourcePosterAlt(row)"
+                  loading="lazy"
+                />
+                <el-icon v-else :size="20">
                   <Monitor v-if="row.type === 'tv'" />
                   <Film v-else />
                 </el-icon>
               </div>
-
-              <div class="title-info">
-                <div class="main-title">{{ getResourceName(row) }}</div>
-                <div class="sub-info">
-                  <el-tag size="small" effect="plain" class="type-tag">
-                    {{ row.type === 'tv' ? 'TV' : 'Movie' }}
-                  </el-tag>
-                  <span class="season-link">{{ row.season_summary || row.season_label }}</span>
-                  <span v-if="row.type === 'tv'">季数 {{ row.season_count || 0 }}</span>
-                  <span v-if="row.tmdb_id">TMDB: {{ row.tmdb_id }}</span>
+              <div class="resource-body">
+                <div class="resource-title">{{ row.resource_name }}</div>
+                <div class="resource-meta">
+                  <el-tag size="small" effect="plain">{{ row.type === 'tv' ? 'TV' : 'Movie' }}</el-tag>
+                  <span>{{ row.season_summary || '-' }}</span>
                   <span>记录 {{ row.record_count }}</span>
+                  <span>正片 {{ row.main_count || 0 }}</span>
+                  <span>SP/Extras {{ row.aux_count || 0 }}</span>
+                  <span v-if="row.misc_count">Misc {{ row.misc_count }}</span>
+                  <span v-if="row.tmdb_id">TMDB {{ row.tmdb_id }}</span>
                 </div>
+                <div class="resource-dir">{{ row.resource_dir }}</div>
               </div>
             </div>
           </template>
         </el-table-column>
 
         <el-table-column label="最近更新时间" width="180" align="right">
-          <template #default="{ row }">
-            {{ formatTime(row.latest_updated_at) }}
-          </template>
+          <template #default="{ row }">{{ formatTime(row.latest_updated_at) }}</template>
         </el-table-column>
 
         <el-table-column label="操作" width="130" align="center" fixed="right">
           <template #default="{ row }">
             <el-dropdown trigger="click" @command="(cmd) => onDeleteResourceCommand(row, cmd)">
-              <el-button type="danger" link size="small">删除资源</el-button>
+              <el-button type="danger" plain size="small">删除资源</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="records">仅删除该资源记录</el-dropdown-item>
@@ -92,27 +89,224 @@
           :total="total"
           :page-sizes="[20, 50, 100]"
           layout="total, sizes, prev, pager, next"
-          @size-change="refreshPagedRows"
-          @current-change="refreshPagedRows"
+          @size-change="loadResources"
+          @current-change="loadResources"
         />
       </div>
     </el-card>
 
+    <el-drawer v-model="drawerVisible" direction="rtl" size="64%" :title="drawerTitle" destroy-on-close>
+      <div class="drawer-header-sticky">
+        <div class="drawer-path">{{ drawerResource?.resource_dir || '-' }}</div>
+        <div class="drawer-toolbar">
+          <div class="drawer-toolbar-left">
+            <el-input v-model="drawerSearch" placeholder="搜索当前资源内文件..." clearable style="width: 240px" />
+            <el-select v-model="drawerCategory" placeholder="分类" style="width: 120px">
+              <el-option label="全部" value="all" />
+              <el-option label="正片" value="main" />
+              <el-option label="SPs/Extras" value="sps" />
+            </el-select>
+            <el-button plain @click="resetDrawerFilters">重置</el-button>
+            <el-button :loading="drawerLoading" @click="reloadDrawer">
+              <el-icon><Refresh /></el-icon>
+            </el-button>
+            <el-button type="primary" plain :disabled="!drawerResource?.resource_dir" @click="openDirFixDialog">
+              修正整个资源
+            </el-button>
+          </div>
+          <div class="drawer-toolbar-right">
+            <span class="selection-summary">已选 {{ selectedDrawerItems.length }} 条</span>
+            <el-button plain size="small" :disabled="!selectedDrawerItems.length" @click="clearDrawerSelection">清空选择</el-button>
+            <el-dropdown trigger="click" :disabled="!selectedDrawerItems.length" @command="deleteSelectedItems">
+              <el-button type="warning" plain size="small">删除选中</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="records">仅删除选中记录</el-dropdown-item>
+                  <el-dropdown-item command="records_and_links">删除选中 + 硬链接</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-dropdown trigger="click" @command="onDeleteDrawerResourceCommand">
+              <el-button type="danger" plain size="small">删除当前资源</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="records">仅删除该资源记录</el-dropdown-item>
+                  <el-dropdown-item command="records_and_links">删除该资源 + 硬链接</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
+        </div>
+        <div v-if="displayNodes.length > 0" class="node-nav sticky-node-nav">
+          <el-radio-group v-model="selectedNodeKey" size="small">
+            <el-radio-button v-for="node in displayNodes" :key="node.key" :label="node.key">
+              {{ node.label }} ({{ node.visibleCount }})
+            </el-radio-button>
+          </el-radio-group>
+        </div>
+      </div>
+
+      <el-empty v-if="!drawerLoading && displayNodes.length === 0" description="当前资源没有匹配内容" />
+
+      <template v-else>
+        <el-card v-if="currentNode" shadow="never" class="node-card">
+          <div class="node-card-header">
+            <div>
+              <div class="node-title">{{ currentNode.label }}</div>
+              <div class="node-summary">
+                实际 {{ currentNode.record_count }} 条 / 当前可见 {{ currentNode.visibleCount }} 条 / 正片 {{ currentNode.main_count || 0 }} / SP {{ currentNode.aux_count || 0 }}
+              </div>
+            </div>
+            <div class="node-header-actions">
+              <el-button
+                v-if="currentNode.scope?.scope_level === 'season'"
+                type="primary"
+                plain
+                size="small"
+                @click="openSeasonFixDialog(currentNode)"
+              >
+                修正该 Season
+              </el-button>
+              <el-dropdown trigger="click" @command="(cmd) => onDeleteNodeCommand(currentNode, cmd)">
+                <el-button type="danger" plain size="small">删除 {{ currentNode.season != null ? 'Season' : '节点' }}</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="records">仅删除该级记录</el-dropdown-item>
+                    <el-dropdown-item command="records_and_links">删除该级 + 硬链接</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </div>
+
+          <div class="group-grid">
+            <el-card v-for="group in currentNode.groups" :key="group.key" shadow="hover" class="group-card">
+              <template #header>
+                <div class="group-header">
+                  <div>
+                    <div class="group-title">{{ group.label }}</div>
+                    <div class="group-summary">
+                      实际 {{ group.item_count }} 条 / 当前可见 {{ group.visibleCount }} 条
+                    </div>
+                  </div>
+                  <div class="group-actions">
+                    <el-button plain size="small" @click="toggleGroupCollapse(group)">
+                      {{ isGroupCollapsed(group) ? '展开分组' : '收起分组' }}
+                    </el-button>
+                    <el-dropdown trigger="click" @command="(cmd) => onDeleteGroupCommand(group, cmd)">
+                      <el-button type="danger" plain size="small">删除分组</el-button>
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item command="records">仅删除该分组记录</el-dropdown-item>
+                          <el-dropdown-item command="records_and_links">删除该分组 + 硬链接</el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
+                  </div>
+                </div>
+              </template>
+
+              <div v-if="isGroupCollapsed(group)" class="collapsed-group-hint">
+                该分组默认折叠，点击“展开分组”查看明细。
+              </div>
+
+              <el-table v-else :data="group.items" stripe style="width: 100%">
+                <el-table-column label="选中" width="72" align="center">
+                  <template #default="{ row }">
+                    <el-checkbox :model-value="isRowSelected(row)" @change="(checked) => toggleRowSelection(row, checked)" />
+                  </template>
+                </el-table-column>
+
+                <el-table-column label="文件" min-width="320" >
+                  <template #default="{ row }">
+                    <div class="path-flow">
+                      <div class="path-row source" :title="row.original_path">
+                        <span class="path-label">源</span>
+                        <span class="path-name">{{ extractFilename(row.original_path) }}</span>
+                      </div>
+                      <div class="path-arrow" v-if="row.target_path">→</div>
+                      <div class="path-row target" v-if="row.target_path" :title="row.target_path">
+                        <span class="path-label">标</span>
+                        <span class="path-name">{{ extractFilename(row.target_path) }}</span>
+                      </div>
+                    </div>
+                  </template>
+                </el-table-column>
+
+                <el-table-column label="归属" width="120" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="bucketTagType(row.tree_bucket)" effect="light">{{ bucketLabel(row.tree_bucket) }}</el-tag>
+                  </template>
+                </el-table-column>
+
+                <el-table-column label="大小" width="110" align="center">
+                  <template #default="{ row }">{{ formatSize(row.size) }}</template>
+                </el-table-column>
+
+                <el-table-column label="时间/状态" width="150" align="center">
+                  <template #default="{ row }">
+                    <div class="status-cell">
+                      <div>{{ formatTime(row.updated_at || row.created_at) }}</div>
+                      <el-tag v-if="row.status" :type="statusType(row.status)" size="small" effect="dark">{{ statusText(row.status) }}</el-tag>
+                    </div>
+                  </template>
+                </el-table-column>
+
+                <el-table-column label="操作" width="130" align="center" fixed="right">
+                  <template #default="{ row }">
+                    <div class="row-actions">
+                      <el-button class="row-action-button" type="primary" plain size="small" @click="openFixDialog(row)">修正</el-button>
+                      <el-dropdown trigger="click" @command="(cmd) => onDeleteItemCommand(row, cmd)">
+                        <el-button class="row-action-button" type="danger" plain size="small">删除</el-button>
+                        <template #dropdown>
+                          <el-dropdown-menu>
+                            <el-dropdown-item command="records">仅删记录</el-dropdown-item>
+                            <el-dropdown-item command="records_and_links">记录 + 硬链接</el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
+                    </div>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </el-card>
+          </div>
+        </el-card>
+      </template>
+    </el-drawer>
+
+    <teleport to="body">
+      <transition
+        :css="false"
+        @enter="onFloatingPosterEnter"
+        @leave="onFloatingPosterLeave"
+      >
+        <div v-if="floatingPosterUrl" class="drawer-floating-poster-shell" aria-hidden="true">
+          <div class="drawer-floating-poster-card">
+            <img
+              class="drawer-floating-poster-image"
+              :src="floatingPosterUrl"
+              :alt="floatingPosterAlt"
+              loading="lazy"
+            />
+          </div>
+        </div>
+      </transition>
+    </teleport>
+
     <el-dialog v-model="fixDialogVisible" title="手动修正识别" width="500px">
       <el-form :model="fixForm" label-width="100px">
         <el-form-item label="文件名">
-          <div class="text-ellipsis" :title="currentFixRow?.original_path">
-            {{ extractFilename(currentFixRow?.original_path) }}
-          </div>
+          <div class="text-ellipsis" :title="currentFixRow?.original_path">{{ extractFilename(currentFixRow?.original_path) }}</div>
         </el-form-item>
         <el-form-item label="TMDB ID" required>
           <el-input v-model.number="fixForm.tmdb_id" placeholder="例如: 45782" />
         </el-form-item>
         <el-form-item label="标题" required>
-          <el-input v-model="fixForm.title" placeholder="TMDB 标准标题 (如: 刀剑神域)" />
+          <el-input v-model="fixForm.title" placeholder="TMDB 标准标题" />
         </el-form-item>
         <el-form-item label="年份" required>
-          <el-input v-model.number="fixForm.year" placeholder="首播年份 (如: 2012)" />
+          <el-input v-model.number="fixForm.year" placeholder="首播年份或上映年份" />
         </el-form-item>
         <el-form-item label="季号">
           <el-input-number v-model="fixForm.season" :min="0" />
@@ -121,167 +315,21 @@
           <el-input-number v-model="fixForm.episode" :min="0" />
         </el-form-item>
         <el-form-item label="集号偏移">
-          <el-input-number v-model="fixForm.episode_offset" :min="0" />
+          <el-input-number v-model="fixForm.episode_offset" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <span class="dialog-footer">
-          <el-button @click="fixDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="fixing" @click="submitFix">提交修正</el-button>
-        </span>
+        <el-button @click="fixDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="fixing" @click="submitFix">提交修正</el-button>
       </template>
     </el-dialog>
 
-    <el-drawer
-      v-model="seasonDrawerVisible"
-      direction="rtl"
-      size="58%"
-      :title="seasonDrawerTitle"
-      destroy-on-close
-    >
-      <div class="drawer-path">{{ seasonDrawerDir }}</div>
-      <div class="drawer-header-actions">
-        <div class="drawer-filters">
-          <el-input
-            v-model="seasonDrawerSearch"
-            placeholder="搜索文件名..."
-            clearable
-            style="width: 220px"
-          />
-          <el-select
-            v-if="seasonDrawerType === 'tv'"
-            v-model="seasonDrawerSeason"
-            placeholder="Season"
-            style="width: 140px"
-          >
-            <el-option label="全部 Season" value="all" />
-            <el-option
-              v-for="label in seasonDrawerSeasonOptions"
-              :key="label"
-              :label="label"
-              :value="label"
-            />
-          </el-select>
-          <el-select v-model="seasonDrawerCategory" placeholder="分类" style="width: 120px">
-            <el-option label="全部" value="all" />
-            <el-option label="正片" value="main" />
-            <el-option label="SPs/Extras" value="sps" />
-          </el-select>
-          <el-button @click="refreshSeasonDrawerItems" :loading="seasonDrawerLoading">
-            <el-icon><Refresh /></el-icon>
-          </el-button>
-          <el-button type="primary" plain @click="openDirFixDialog" :disabled="!seasonDrawerDir">
-            整体修正
-          </el-button>
-        </div>
-        <div class="drawer-danger-actions">
-          <el-button
-            type="danger"
-            plain
-            size="small"
-            :disabled="seasonDrawerSelectedRows.length === 0"
-            @click="deleteDrawerSelected(false)"
-          >
-            删除选中记录
-          </el-button>
-          <el-button
-            type="danger"
-            size="small"
-            :disabled="seasonDrawerSelectedRows.length === 0"
-            @click="deleteDrawerSelected(true)"
-          >
-            删除选中+硬链接
-          </el-button>
-          <el-dropdown trigger="click" @command="onDeleteDrawerResourceCommand">
-            <el-button type="danger" plain size="small">
-              删除当前资源
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="records">仅删除该资源记录</el-dropdown-item>
-                <el-dropdown-item command="records_and_links">删除该资源 + 硬链接</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-        </div>
-      </div>
-      <el-table
-        :data="filteredSeasonDrawerItems"
-        v-loading="seasonDrawerLoading"
-        stripe
-        style="width: 100%"
-        @selection-change="onDrawerSelectionChange"
-      >
-        <el-table-column type="selection" width="50" />
-        <el-table-column label="文件名" min-width="300">
-          <template #default="{ row }">
-            <div class="path-flow">
-              <div class="path-row source" :title="row.original_path">
-                <span class="label">源</span>
-                <span class="path">{{ extractFilename(row.original_path) }}</span>
-              </div>
-              <div class="arrow-row" v-if="row.target_path">
-                <el-icon><Bottom /></el-icon>
-              </div>
-              <div class="path-row target" v-if="row.target_path" :title="row.target_path">
-                <span class="label">标</span>
-                <span class="path">{{ extractFilename(row.target_path) }}</span>
-              </div>
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="方式" width="90" align="center">
-          <template #default>
-            <el-tag effect="light" round>硬链接</el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="大小" width="110" align="right">
-          <template #default="{ row }">{{ formatSize(row.size) }}</template>
-        </el-table-column>
-
-        <el-table-column label="时间/状态" width="150" align="right">
-          <template #default="{ row }">
-            <div class="status-cell">
-              <div class="time">{{ formatTime(row.created_at) }}</div>
-              <el-tag :type="statusType(row.status)" size="small" effect="dark">
-                {{ statusText(row.status) }}
-              </el-tag>
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="操作" width="130" align="center" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              type="primary"
-              link
-              size="small"
-              :disabled="row.is_directory_pending"
-              :title="row.is_directory_pending ? '目录级待办不支持直接修正，请先手动整理目录后重扫' : ''"
-              @click="openFixDialog(row)"
-            >
-              修正
-            </el-button>
-            <el-dropdown trigger="click" @command="(cmd) => onDeleteDrawerRowCommand(row, cmd)">
-              <el-button type="danger" link size="small">删除</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="records">仅删记录</el-dropdown-item>
-                  <el-dropdown-item command="records_and_links">记录+硬链接</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-drawer>
-
-    <el-dialog v-model="dirFixDialogVisible" title="整组资源修正" width="520px">
+    <el-dialog v-model="dirFixDialogVisible" :title="dirFixMode === 'season' ? 'Season 修正重整' : '整组资源修正'" width="520px">
       <el-form :model="dirFixForm" label-width="110px">
-        <el-form-item label="资源目录">
-          <div class="text-ellipsis" :title="seasonDrawerDir">{{ seasonDrawerDir || '-' }}</div>
+        <el-form-item :label="dirFixMode === 'season' ? 'Season 范围' : '资源目录'">
+          <div class="text-ellipsis" :title="dirFixMode === 'season' ? currentNode?.label : drawerResource?.resource_dir">
+            {{ dirFixMode === 'season' ? `${drawerResource?.resource_dir || '-'} / ${currentNode?.label || '-'}` : (drawerResource?.resource_dir || '-') }}
+          </div>
         </el-form-item>
         <el-form-item label="TMDB ID" required>
           <el-input v-model.number="dirFixForm.tmdb_id" placeholder="例如: 45782" />
@@ -290,10 +338,10 @@
           <el-input v-model="dirFixForm.title" placeholder="TMDB 标准标题" />
         </el-form-item>
         <el-form-item label="年份" required>
-          <el-input v-model.number="dirFixForm.year" placeholder="首播年份 (如: 2012)" />
+          <el-input v-model.number="dirFixForm.year" placeholder="首播年份或上映年份" />
         </el-form-item>
         <el-form-item label="季号 (Season)">
-          <el-input-number v-model="dirFixForm.season" :min="0" />
+          <el-input-number v-model="dirFixForm.season" :min="0" :disabled="dirFixMode === 'season'" />
         </el-form-item>
         <el-form-item label="Episode Offset">
           <el-input-number v-model="dirFixForm.episode_offset" />
@@ -308,424 +356,440 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
-import { mediaApi, syncGroupsApi } from '../api/client'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Film, Monitor, Refresh } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { getCachedMeta, getCachedPoster, setCachedMeta, setCachedPoster } from '../utils/tmdbUiCache'
+import { mediaApi } from '../api/client'
+import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
+import { useResourcePoster } from '../utils/resourcePosterStore'
 
-const route = useRoute()
-const rawItems = ref([])
-const allSeasonRows = ref([])
-const seasonRows = ref([])
-const total = ref(0)
 const loading = ref(false)
+const resources = ref([])
+const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
-const filters = reactive({ type: '', category: 'all', search: '' })
+const filters = reactive({ search: '', type: '', category: 'all' })
+
+const drawerVisible = ref(false)
+const drawerLoading = ref(false)
+const drawerTitle = ref('')
+const drawerResource = ref(null)
+const drawerTree = ref([])
+const selectedNodeKey = ref('')
+const drawerSearch = ref('')
+const drawerCategory = ref('all')
+const drawerSelectedIds = ref([])
+const collapsedGroups = ref({})
+const resourceIconElements = new Map()
+
+const { ensurePosterForResource, hydrateCachedPosterMeta, resourcePosterUrl, resourcePosterAlt } = useResourcePoster(
+  (params) => mediaApi.poster(params).then(({ data }) => data),
+)
 
 const fixDialogVisible = ref(false)
 const fixing = ref(false)
 const currentFixRow = ref(null)
+const fixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode: 1, episode_offset: undefined })
+
 const dirFixDialogVisible = ref(false)
 const dirFixing = ref(false)
-const seasonDrawerVisible = ref(false)
-const seasonDrawerLoading = ref(false)
-const seasonDrawerTitle = ref('')
-const seasonDrawerDir = ref('')
-const seasonDrawerType = ref('')
-const seasonDrawerItems = ref([])
-const seasonDrawerSelectedRows = ref([])
-const seasonDrawerSearch = ref('')
-const seasonDrawerCategory = ref('all')
-const seasonDrawerSeason = ref('all')
-const posterCache = reactive({})
-const tmdbMetaCache = reactive({})
-const syncGroupRootNames = reactive({})
-const globalRootNames = ref(new Set())
-const fixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode: 1, episode_offset: undefined })
+const dirFixMode = ref('resource')
+const dirFixScope = ref(null)
 const dirFixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode_offset: undefined })
-const AUX_RESOURCE_DIRS = new Set(['extras', 'specials', 'trailers', 'interviews'])
 
 function extractFilename(path) {
-  if (!path) return ''
-  return path.split(/[/\\]/).pop()
+  return String(path || '').split(/[/\\]/).pop() || ''
 }
 
-function extractRootName(path) {
-  if (!path) return ''
-  const normalized = String(path).replace(/\\/g, '/').replace(/\/+$/, '')
-  if (!normalized) return ''
-  const seg = normalized.split('/').filter(Boolean)
-  return (seg.pop() || '').trim()
+function setResourceIconRef(resource, el) {
+  setResourceIconElement(resourceIconElements, resource, el)
 }
 
-function normalizePath(path) {
-  return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '')
+function onFloatingPosterEnter(el, done) {
+  const targetEl = resourceIconElements.get(resourceIdentityKey(drawerResource.value))
+  animateFloatingPosterEnter(el, targetEl, done)
 }
 
-function splitPathParts(path) {
-  return normalizePath(path).split('/').filter(Boolean)
+function onFloatingPosterLeave(el, done) {
+  const targetEl = resourceIconElements.get(resourceIdentityKey(drawerResource.value))
+  animateFloatingPosterLeave(el, targetEl, done)
 }
 
-function isAncestorPath(ancestor, child) {
-  const a = normalizePath(ancestor).toLowerCase()
-  const c = normalizePath(child).toLowerCase()
-  if (!a || !c) return false
-  return c === a || c.startsWith(`${a}/`)
+function formatTime(value) {
+  if (!value) return '-'
+  return dayjs(value).format('YYYY-MM-DD HH:mm')
 }
 
-function extractTargetDir(path) {
-  if (!path) return ''
-  const parts = path.split(/[/\\]/).filter(Boolean)
-  if (parts.length <= 1) return path
-  return path.replace(/[/\\][^/\\]+$/, '')
-}
-
-function extractSeasonDir(path) {
-  if (!path) return ''
-  const normalized = String(path).replace(/\\/g, '/')
-  const m = normalized.match(/^(.*\/Season\s+\d{1,2})(?:\/|$)/i)
-  if (m?.[1]) return m[1]
-  return extractTargetDir(path)
-}
-
-function extractShowDir(path) {
-  if (!path) return ''
-  const seasonDir = extractSeasonDir(path)
-  if (!seasonDir || seasonDir === path) return extractTargetDir(path)
-  return extractTargetDir(seasonDir)
-}
-
-function extractMovieResourceDir(path) {
-  if (!path) return ''
-  const targetDir = extractTargetDir(path)
-  const leaf = extractFilename(targetDir).toLowerCase()
-  if (AUX_RESOURCE_DIRS.has(leaf)) {
-    return extractTargetDir(targetDir)
+function formatSize(size) {
+  const value = Number(size || 0)
+  if (!value) return '-'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let next = value
+  let index = 0
+  while (next >= 1024 && index < units.length - 1) {
+    next /= 1024
+    index += 1
   }
-  return targetDir
+  return `${next.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
-function extractSeasonLabelFromPath(path) {
-  if (!path) return 'Season --'
-  const normalized = String(path).replace(/\\/g, '/')
-  const m = normalized.match(/\/(Season\s+\d{1,2})(?:\/|$)/i)
-  if (!m?.[1]) return 'Season --'
-  const n = m[1].match(/\d+/)?.[0]
-  return n ? `Season ${String(Number(n)).padStart(2, '0')}` : m[1]
+function bucketLabel(bucket) {
+  if (bucket === 'main') return '正片'
+  if (bucket === 'aux') return 'SP/Extras'
+  return 'Misc'
 }
 
-function formatSeasonSummary(labels) {
-  const uniq = Array.from(new Set((labels || []).filter(Boolean)))
-  if (!uniq.length) return '-'
-  if (uniq.length <= 2) return uniq.join(' / ')
-  return `${uniq.length} seasons`
+function bucketTagType(bucket) {
+  if (bucket === 'main') return 'primary'
+  if (bucket === 'aux') return 'warning'
+  return 'info'
 }
 
-function extractDrawerSeasonBucket(path) {
-  if (!path) return 'Other'
-  const normalized = String(path).replace(/\\/g, '/')
-  const seasonMatch = normalized.match(/\/(Season\s+\d{1,2})(?:\/|$)/i)
-  if (seasonMatch?.[1]) return extractSeasonLabelFromPath(path)
-  const auxMatch = normalized.match(/\/(specials|extras|trailers|interviews)(?:\/|$)/i)
-  if (!auxMatch?.[1]) return 'Other'
-  const labelMap = {
-    specials: 'Specials',
-    extras: 'Extras',
-    trailers: 'Trailers',
-    interviews: 'Interviews',
-  }
-  return labelMap[auxMatch[1].toLowerCase()] || 'Other'
+function statusType(status) {
+  if (status === 'scraped' || status === 'manual_fixed') return 'success'
+  if (status === 'pending_manual') return 'warning'
+  if (status === 'failed') return 'danger'
+  return 'info'
 }
 
-function isDrawerExtraLike(row) {
-  const normalized = String(row?.target_path || row?.original_path || '').replace(/\\/g, '/').toLowerCase()
-  if (!normalized) return false
-  return (
-    normalized.includes('/season 00/') ||
-    normalized.includes('/specials/') ||
-    normalized.includes('/extras/') ||
-    normalized.includes('/trailers/') ||
-    normalized.includes('/interviews/')
-  )
+function statusText(status) {
+  if (status === 'scraped') return '已整理'
+  if (status === 'manual_fixed') return '已修正'
+  if (status === 'pending_manual') return '待处理'
+  if (status === 'failed') return '失败'
+  return status || '-'
 }
 
-function drawerItemMatchesCategory(row, category) {
-  if (!row) return false
-  const isExtraLike = isDrawerExtraLike(row)
-  if (category === 'main') return !isExtraLike
-  if (category === 'sps') return isExtraLike
-  return true
+function itemMatchesSearch(item, keyword) {
+  if (!keyword) return true
+  const text = [item.original_path, item.target_path, extractFilename(item.original_path), extractFilename(item.target_path)]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  return text.includes(keyword)
 }
 
-function extractResourceName(path, type) {
-  if (!path) return '-'
-  if (type === 'movie') {
-    return String(extractFilename(extractMovieResourceDir(path)) || '-').replace(/\s*\[tmdbid=\d+\]/i, '').trim()
-  }
-  const seasonDir = extractSeasonDir(path)
-  const showDir = extractTargetDir(seasonDir)
-  return String(extractFilename(showDir) || '-').replace(/\s*\[tmdbid=\d+\]/i, '').trim()
-}
+const displayNodes = computed(() => {
+  const keyword = String(drawerSearch.value || '').trim().toLowerCase()
+  const category = drawerCategory.value || 'all'
+  return (drawerTree.value || [])
+    .map((node) => {
+      const groups = (node.groups || [])
+        .map((group) => {
+          const items = (group.items || []).filter((item) => {
+            if (category === 'main' && item.tree_bucket !== 'main') return false
+            if (category === 'sps' && item.tree_bucket === 'main') return false
+            return itemMatchesSearch(item, keyword)
+          })
+          return { ...group, items, visibleCount: items.length }
+        })
+        .filter((group) => group.items.length > 0)
+      const visibleCount = groups.reduce((sum, group) => sum + group.items.length, 0)
+      return { ...node, groups, visibleCount }
+    })
+    .filter((node) => node.groups.length > 0)
+})
 
-function buildPosterUrl(path) {
-  if (!path) return ''
-  return `https://image.tmdb.org/t/p/w185${path}`
-}
-
-function extractSeasonNumber(label) {
-  const n = String(label || '').match(/\d+/)?.[0]
-  return n ? Number(n) : null
-}
-
-function metaKeyForRow(row) {
-  return `${row?.type || 'tv'}:${row?.tmdb_id || ''}`
-}
-
-function posterKeyForRow(row) {
-  const base = metaKeyForRow(row)
-  const seasonNum = row?.type === 'tv' ? extractSeasonNumber(row?.season_label) : null
-  return seasonNum !== null ? `${base}:s${seasonNum}` : base
-}
-
-function getPosterUrl(row) {
-  const key = posterKeyForRow(row)
-  if (!row?.tmdb_id || !key) return ''
-  if (!posterCache[key]) {
-    loadTmdbMeta(row)
-    return ''
-  }
-  if (posterCache[key] === '__loading__') return ''
-  return posterCache[key]
-}
-
-function getResourceName(row) {
-  const key = metaKeyForRow(row)
-  const meta = tmdbMetaCache[key]
-  if (meta?.title) {
-    return meta.year ? `${meta.title} (${meta.year})` : meta.title
-  }
-  if (row?.tmdb_id) {
-    loadTmdbMeta(row.sample || row)
-    return `TMDB: ${row.tmdb_id}`
-  }
-  const fallback = String(row?.resource_name || '').trim()
-  return isSyncGroupRootFallbackName(row, fallback) ? '未识别资源' : (fallback || '未识别资源')
-}
-
-function isSyncGroupRootFallbackName(row, name) {
-  const value = String(name || '').trim().toLowerCase()
-  if (!value) return true
-  const groupId = row?.sample?.sync_group_id
-  if (groupId) {
-    const roots = syncGroupRootNames[groupId]
-    if (roots && roots.size) return roots.has(value)
-  }
-  return globalRootNames.value.has(value)
-}
-
-function saveSyncGroupRootNames(groups) {
-  const allNames = new Set()
-  for (const group of groups || []) {
-    const gid = group?.id
-    if (!gid) continue
-    const names = new Set()
-    const groupName = String(group?.name || '').trim()
-
-    const srcParts = splitPathParts(group?.source)
-    const dstParts = splitPathParts(group?.target)
-    for (const seg of [...srcParts, ...dstParts]) {
-      if (!seg) continue
-      const lowered = seg.toLowerCase()
-      names.add(lowered)
-      allNames.add(lowered)
-    }
-    if (groupName) {
-      const lowered = groupName.toLowerCase()
-      names.add(lowered)
-      allNames.add(lowered)
-    }
-    syncGroupRootNames[gid] = names
-  }
-  globalRootNames.value = allNames
-}
-
-async function loadSyncGroupsMeta() {
-  try {
-    const { data } = await syncGroupsApi.list()
-    saveSyncGroupRootNames(data || [])
-  } catch {
-    // ignore: fallback name filtering becomes no-op when sync groups are unavailable
-  }
-}
-
-async function loadTmdbMeta(row) {
-  const tmdbId = row?.tmdb_id
-  const mediaType = row?.type || 'tv'
-  const metaKey = `${mediaType}:${tmdbId || ''}`
-  const posterKey = posterKeyForRow(row)
-  if (!tmdbId || !posterKey || posterCache[posterKey] === '__loading__') return
-  const cachedMeta = getCachedMeta(metaKey)
-  if (cachedMeta && !tmdbMetaCache[metaKey]) {
-    tmdbMetaCache[metaKey] = cachedMeta
-  }
-  const cachedPoster = getCachedPoster(posterKey)
-  if (cachedPoster !== null && cachedPoster !== undefined && !posterCache[posterKey]) {
-    posterCache[posterKey] = cachedPoster
-  }
-  if (tmdbMetaCache[metaKey]?.title && typeof posterCache[posterKey] === 'string' && posterCache[posterKey] !== '__loading__') {
-    return
-  }
-  posterCache[posterKey] = '__loading__'
-  try {
-    const seasonNum = mediaType === 'tv' ? extractSeasonNumber(row?.season_label) : null
-    if (seasonNum !== null) {
-      const { data: seasonData } = await mediaApi.seasonPoster({ tmdb_id: tmdbId, season: seasonNum })
-      const seasonPoster = buildPosterUrl(seasonData?.poster_path)
-      if (seasonPoster) {
-        posterCache[posterKey] = seasonPoster
-        setCachedPoster(posterKey, seasonPoster)
+const currentNode = computed(() => displayNodes.value.find((node) => node.key === selectedNodeKey.value) || displayNodes.value[0] || null)
+const selectedDrawerItems = computed(() => {
+  const selectedIds = new Set(drawerSelectedIds.value || [])
+  const items = []
+  for (const node of drawerTree.value || []) {
+    for (const group of node.groups || []) {
+      for (const item of group.items || []) {
+        if (selectedIds.has(item.id)) {
+          items.push(item)
+        }
       }
     }
-    const { data } = await mediaApi.searchTmdb({ q: String(tmdbId), media_type: mediaType, limit: 1 })
-    const item = data?.items?.[0]
-    if (!posterCache[posterKey] || posterCache[posterKey] === '__loading__') {
-      posterCache[posterKey] = buildPosterUrl(item?.poster_path) || ''
-      setCachedPoster(posterKey, posterCache[posterKey] || '')
-    }
-    tmdbMetaCache[metaKey] = {
-      title: item?.title || '',
-      year: item?.year || null,
-    }
-    setCachedMeta(metaKey, tmdbMetaCache[metaKey])
-  } catch {
-    posterCache[posterKey] = ''
-    tmdbMetaCache[metaKey] = { title: '', year: null }
-    setCachedPoster(posterKey, '')
-    setCachedMeta(metaKey, tmdbMetaCache[metaKey])
   }
-}
+  return items
+})
+const floatingPosterUrl = computed(() => {
+  if (!drawerVisible.value || !drawerResource.value) return ''
+  return resourcePosterUrl(drawerResource.value, 'w500')
+})
+const floatingPosterAlt = computed(() => resourcePosterAlt(drawerResource.value))
 
-function groupRows(records) {
-  const map = new Map()
-  for (const row of records || []) {
-    const basePath = row.target_path || row.original_path || ''
-    const resourceDir = row.type === 'tv' ? extractShowDir(basePath) : extractMovieResourceDir(basePath)
-    const seasonDir = row.type === 'tv' ? extractSeasonDir(basePath) : resourceDir
-    const seasonLabel = row.type === 'tv' ? extractSeasonLabelFromPath(basePath) : 'Movie'
-    const key = `${row.type || ''}:${row.tmdb_id || 0}:${normalizePath(resourceDir)}`
-    const latest = new Date(row.updated_at || row.created_at || 0).getTime()
-    if (!map.has(key)) {
-      map.set(key, {
-        key,
-        type: row.type,
-        tmdb_id: row.tmdb_id,
-        resource_dir: resourceDir,
-        season_dir: seasonDir,
-        season_dirs: seasonDir ? [seasonDir] : [],
-        season_labels: seasonLabel ? [seasonLabel] : [],
-        season_label: seasonLabel,
-        season_summary: seasonLabel,
-        season_count: row.type === 'tv' ? 1 : 0,
-        resource_name: extractResourceName(basePath, row.type),
-        record_count: 1,
-        latest_updated_at: row.updated_at || row.created_at,
-        latest_ts: latest,
-        sample: row,
-        item_ids: row.id ? [row.id] : [],
-      })
-      continue
-    }
-    const item = map.get(key)
-    item.record_count += 1
-    if (row.id) item.item_ids.push(row.id)
-    if (seasonDir && !item.season_dirs.includes(seasonDir)) item.season_dirs.push(seasonDir)
-    if (seasonLabel && !item.season_labels.includes(seasonLabel)) item.season_labels.push(seasonLabel)
-    item.season_count = item.type === 'tv' ? item.season_dirs.length : 0
-    item.season_summary = item.type === 'tv' ? formatSeasonSummary(item.season_labels) : 'Movie'
-    if (latest > item.latest_ts) {
-      item.latest_ts = latest
-      item.latest_updated_at = row.updated_at || row.created_at
-      item.sample = row
-      item.season_label = seasonLabel
-      item.season_dir = seasonDir
-    }
+watch(displayNodes, (nodes) => {
+  if (!nodes.length) {
+    selectedNodeKey.value = ''
+    return
   }
-  return Array.from(map.values()).sort((a, b) => b.latest_ts - a.latest_ts)
-}
-
-const seasonDrawerSeasonOptions = computed(() => {
-  if (seasonDrawerType.value !== 'tv') return []
-  const labels = Array.from(new Set(
-    (seasonDrawerItems.value || [])
-      .map((item) => extractDrawerSeasonBucket(item?.target_path || item?.original_path || ''))
-      .filter(Boolean),
-  ))
-  return labels.sort((a, b) => {
-    const aNum = extractSeasonNumber(a)
-    const bNum = extractSeasonNumber(b)
-    if (aNum !== null && bNum !== null) return aNum - bNum
-    if (aNum !== null) return -1
-    if (bNum !== null) return 1
-    return a.localeCompare(b, 'zh-Hans-CN')
-  })
+  if (!nodes.some((node) => node.key === selectedNodeKey.value)) {
+    selectedNodeKey.value = nodes[0].key
+  }
 })
 
-const filteredSeasonDrawerItems = computed(() => {
-  const search = String(seasonDrawerSearch.value || '').trim().toLowerCase()
-  const category = seasonDrawerCategory.value || 'all'
-  const season = seasonDrawerSeason.value || 'all'
-  return (seasonDrawerItems.value || []).filter((row) => {
-    const source = String(row?.original_path || '').toLowerCase()
-    const target = String(row?.target_path || '').toLowerCase()
-    if (search && !source.includes(search) && !target.includes(search)) return false
-    if (!drawerItemMatchesCategory(row, category)) return false
-    if (seasonDrawerType.value === 'tv' && season !== 'all') {
-      const bucket = extractDrawerSeasonBucket(row?.target_path || row?.original_path || '')
-      if (bucket !== season) return false
-    }
-    return true
-  })
-})
-
-function refreshPagedRows() {
-  total.value = allSeasonRows.value.length
-  const start = (page.value - 1) * pageSize.value
-  seasonRows.value = allSeasonRows.value.slice(start, start + pageSize.value)
+async function loadResources() {
+  loading.value = true
+  try {
+    const { data } = await mediaApi.resources({
+      offset: (page.value - 1) * pageSize.value,
+      limit: pageSize.value,
+      search: filters.search || undefined,
+      type: filters.type || undefined,
+      category: filters.category || 'all',
+    })
+    resources.value = data.items || []
+    hydrateCachedPosterMeta(resources.value)
+    total.value = Number(data.total || 0)
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '加载媒体资源失败')
+  } finally {
+    loading.value = false
+  }
 }
 
 function onFilterChanged() {
   page.value = 1
-  loadMedia()
+  loadResources()
 }
 
-function onDrawerSelectionChange(rows) {
-  seasonDrawerSelectedRows.value = rows || []
+function resetMainFilters() {
+  filters.search = ''
+  filters.type = ''
+  filters.category = 'all'
+  onFilterChanged()
+}
+
+async function loadDrawerTree(resource) {
+  if (!resource?.resource_dir) return
+  drawerLoading.value = true
+  try {
+    const { data } = await mediaApi.resourceTree({
+      resource_dir: resource.resource_dir,
+      type: resource.type || undefined,
+      sync_group_id: resource.sync_group_id || undefined,
+      tmdb_id: resource.tmdb_id || undefined,
+    })
+    drawerResource.value = data.resource || resource
+    ensurePosterForResource(drawerResource.value)
+    drawerTree.value = data.nodes || []
+    collapsedGroups.value = Object.fromEntries(
+      (data.nodes || [])
+        .flatMap((node) => node.groups || [])
+        .map((group) => [group.key, ['main', 'aux', 'extras'].includes(group.kind)])
+    )
+    drawerSelectedIds.value = []
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '加载资源树失败')
+  } finally {
+    drawerLoading.value = false
+  }
+}
+
+async function openResourceDrawer(resource) {
+  drawerTitle.value = resource?.resource_name || '资源详情'
+  drawerVisible.value = true
+  drawerSearch.value = ''
+  drawerCategory.value = 'all'
+  drawerResource.value = resource
+  ensurePosterForResource(resource)
+  await loadDrawerTree(resource)
+}
+
+async function reloadDrawer() {
+  if (!drawerResource.value) return
+  await loadDrawerTree(drawerResource.value)
+}
+
+function resetDrawerFilters() {
+  drawerSearch.value = ''
+  drawerCategory.value = 'all'
+  reloadDrawer()
+}
+
+function isGroupCollapsed(group) {
+  return Boolean(collapsedGroups.value?.[group.key])
+}
+
+function toggleGroupCollapse(group) {
+  collapsedGroups.value = {
+    ...collapsedGroups.value,
+    [group.key]: !isGroupCollapsed(group),
+  }
+}
+
+function isRowSelected(row) {
+  return drawerSelectedIds.value.includes(row?.id)
+}
+
+function toggleRowSelection(row, checked) {
+  const rowId = Number(row?.id || 0)
+  if (!rowId) return
+  const selected = new Set(drawerSelectedIds.value || [])
+  if (checked) {
+    selected.add(rowId)
+  } else {
+    selected.delete(rowId)
+  }
+  drawerSelectedIds.value = Array.from(selected)
+}
+
+function clearDrawerSelection() {
+  drawerSelectedIds.value = []
+}
+
+function scopeVisibleCount(scope, fallbackCount = 0) {
+  if (!scope) return fallbackCount
+  return fallbackCount
+}
+
+async function confirmScopeDelete(label, scope, visibleCount, deleteFiles) {
+  const actualCount = Number(scope?.item_ids?.length || 0)
+  const visibleText = visibleCount !== actualCount ? `当前筛选可见 ${visibleCount} 条，实际会处理 ${actualCount} 条。` : `将处理 ${actualCount} 条记录。`
+  const actionText = deleteFiles ? '并删除硬链接文件' : '仅删除记录'
+  await ElMessageBox.confirm(`${label}\n${visibleText}\n操作：${actionText}`, '确认删除', { type: 'warning' })
+}
+
+async function deleteMediaScope(scope, deleteFiles) {
+  const payload = { ...scope, delete_files: !!deleteFiles }
+  const { data } = await mediaApi.deleteScope(payload)
+  return data
+}
+
+async function onDeleteResourceCommand(row, command) {
+  if (!row?.sample_id) {
+    ElMessage.warning('当前资源缺少可删除记录')
+    return
+  }
+  const deleteFiles = command === 'records_and_links'
+  try {
+    await ElMessageBox.confirm(deleteFiles ? '将删除该资源记录及硬链接文件，是否继续？' : '将删除该资源记录，是否继续？', '确认删除', { type: 'warning' })
+    await mediaApi.batchDelete({ ids: [row.sample_id], delete_files: deleteFiles, delete_resource_scope: true })
+    ElMessage.success('资源删除完成')
+    if (drawerVisible.value && drawerResource.value?.key === row.key) {
+      drawerVisible.value = false
+    }
+    await loadResources()
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error?.response?.data?.detail || error?.message || '删除资源失败')
+  }
+}
+
+async function onDeleteDrawerResourceCommand(command) {
+  const scope = drawerResource.value?.scope
+  if (!scope) {
+    ElMessage.warning('当前资源作用域不可用')
+    return
+  }
+  const deleteFiles = command === 'records_and_links'
+  try {
+    await confirmScopeDelete(`删除资源 ${drawerResource.value.resource_name}`, scope, displayNodes.value.reduce((sum, node) => sum + node.visibleCount, 0), deleteFiles)
+    await deleteMediaScope(scope, deleteFiles)
+    ElMessage.success('资源删除完成')
+    drawerVisible.value = false
+    await loadResources()
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error?.response?.data?.detail || error?.message || '删除资源失败')
+  }
+}
+
+async function onDeleteNodeCommand(node, command) {
+  const deleteFiles = command === 'records_and_links'
+  try {
+    await confirmScopeDelete(`删除 ${node.label}`, node.scope, scopeVisibleCount(node.scope, node.visibleCount), deleteFiles)
+    await deleteMediaScope(node.scope, deleteFiles)
+    ElMessage.success('节点删除完成')
+    await Promise.all([loadResources(), reloadDrawer()])
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error?.response?.data?.detail || error?.message || '删除节点失败')
+  }
+}
+
+async function onDeleteGroupCommand(group, command) {
+  const deleteFiles = command === 'records_and_links'
+  try {
+    await confirmScopeDelete(`删除分组 ${group.label}`, group.scope, scopeVisibleCount(group.scope, group.visibleCount), deleteFiles)
+    await deleteMediaScope(group.scope, deleteFiles)
+    ElMessage.success('分组删除完成')
+    await Promise.all([loadResources(), reloadDrawer()])
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error?.response?.data?.detail || error?.message || '删除分组失败')
+  }
+}
+
+async function onDeleteItemCommand(row, command) {
+  const deleteFiles = command === 'records_and_links'
+  try {
+    await confirmScopeDelete(`删除文件 ${extractFilename(row.original_path)}`, row.scope, 1, deleteFiles)
+    await deleteMediaScope(row.scope, deleteFiles)
+    ElMessage.success('删除成功')
+    await Promise.all([loadResources(), reloadDrawer()])
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error?.response?.data?.detail || error?.message || '删除失败')
+  }
+}
+
+async function deleteSelectedItems(command) {
+  const deleteFiles = command === 'records_and_links'
+  const ids = selectedDrawerItems.value.map((item) => Number(item.id)).filter((value) => value > 0)
+  if (!ids.length) {
+    ElMessage.warning('请先选择具体记录')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      deleteFiles ? `将删除选中的 ${ids.length} 条记录及硬链接，是否继续？` : `将删除选中的 ${ids.length} 条记录，是否继续？`,
+      '删除选中记录',
+      { type: 'warning' },
+    )
+    await mediaApi.batchDelete({ ids, delete_files: deleteFiles })
+    ElMessage.success('选中记录删除完成')
+    await Promise.all([loadResources(), reloadDrawer()])
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error?.response?.data?.detail || error?.message || '删除选中记录失败')
+  }
 }
 
 function openFixDialog(row) {
-  if (row.is_directory_pending) {
-    ElMessage.warning('目录级待办不支持直接修正，请先手动整理目录后重扫')
-    return
-  }
   currentFixRow.value = row
-  fixForm.tmdb_id = row.tmdb_id || ''
+  fixForm.tmdb_id = row.tmdb_id || drawerResource.value?.tmdb_id || ''
   fixForm.title = ''
   fixForm.year = ''
-  fixForm.season = undefined
-  fixForm.episode = undefined
+  fixForm.season = row.tree_season || currentNode.value?.season || 1
+  fixForm.episode = 1
   fixForm.episode_offset = undefined
   fixDialogVisible.value = true
 }
 
-function openDirFixDialog() {
-  if (!seasonDrawerDir.value) {
-    ElMessage.warning('缺少资源目录信息')
+async function submitFix() {
+  if (!currentFixRow.value?.id || !fixForm.tmdb_id || !fixForm.title) {
+    ElMessage.warning('请填写完整的修正信息')
     return
   }
-  dirFixForm.tmdb_id = ''
+  fixing.value = true
+  try {
+    const { data } = await mediaApi.reidentify(currentFixRow.value.id, {
+      tmdb_id: Number(fixForm.tmdb_id),
+      title: fixForm.title,
+      year: fixForm.year ? Number(fixForm.year) : undefined,
+      season: fixForm.season ?? undefined,
+      episode: fixForm.episode ?? undefined,
+      episode_offset: fixForm.episode_offset ?? undefined,
+    })
+    ElMessage.success(data?.message || '修正成功')
+    fixDialogVisible.value = false
+    await Promise.all([loadResources(), reloadDrawer()])
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '修正失败')
+  } finally {
+    fixing.value = false
+  }
+}
+
+function openDirFixDialog() {
+  dirFixMode.value = 'resource'
+  dirFixScope.value = drawerResource.value?.scope || null
+  dirFixForm.tmdb_id = drawerResource.value?.tmdb_id || ''
   dirFixForm.title = ''
   dirFixForm.year = ''
   dirFixForm.season = undefined
@@ -733,514 +797,345 @@ function openDirFixDialog() {
   dirFixDialogVisible.value = true
 }
 
-async function submitFix() {
-  if (!fixForm.tmdb_id || !fixForm.title || !fixForm.year) {
-    ElMessage.warning('请填写完整的 TMDB 信息 (ID, 标题, 年份)')
-    return
-  }
-
-  fixing.value = true
-  try {
-    await mediaApi.reidentify(currentFixRow.value.id, {
-      tmdb_id: fixForm.tmdb_id,
-      title: fixForm.title,
-      year: fixForm.year,
-      season: fixForm.season,
-      episode: fixForm.episode,
-      episode_offset: fixForm.episode_offset,
-    })
-    ElMessage.success('修正成功')
-    fixDialogVisible.value = false
-    await loadMedia()
-    if (seasonDrawerVisible.value && seasonDrawerDir.value) {
-      seasonDrawerItems.value = await fetchAllMediaByTargetDirItems(seasonDrawerDir.value)
-    }
-  } catch (e) {
-    ElMessage.error(`修正失败: ${e.response?.data?.detail || e.message}`)
-  } finally {
-    fixing.value = false
-  }
+function openSeasonFixDialog(node) {
+  dirFixMode.value = 'season'
+  dirFixScope.value = node?.scope || null
+  dirFixForm.tmdb_id = drawerResource.value?.tmdb_id || ''
+  dirFixForm.title = ''
+  dirFixForm.year = ''
+  dirFixForm.season = node?.season ?? currentNode.value?.season ?? 1
+  dirFixForm.episode_offset = undefined
+  dirFixDialogVisible.value = true
 }
 
 async function submitDirFix() {
-  if (!dirFixForm.tmdb_id || !dirFixForm.title || !dirFixForm.year) {
-    ElMessage.warning('请填写完整的 TMDB 信息 (ID, 标题, 年份)')
-    return
-  }
-  if (!seasonDrawerDir.value) {
-    ElMessage.warning('缺少资源目录信息')
+  if (!drawerResource.value?.resource_dir || !dirFixForm.tmdb_id || !dirFixForm.title) {
+    ElMessage.warning('请填写完整的修正信息')
     return
   }
   dirFixing.value = true
   try {
     const payload = {
-      target_dir: seasonDrawerDir.value,
-      tmdb_id: dirFixForm.tmdb_id,
+      tmdb_id: Number(dirFixForm.tmdb_id),
       title: dirFixForm.title,
-      year: dirFixForm.year,
-      season: dirFixForm.season,
-      episode_offset: dirFixForm.episode_offset,
+      year: dirFixForm.year ? Number(dirFixForm.year) : undefined,
+      season: dirFixForm.season ?? undefined,
+      episode_offset: dirFixForm.episode_offset ?? undefined,
     }
-    const { data } = await mediaApi.reidentifyByTargetDir(payload)
-    ElMessage.success(data?.message || '修正成功')
+    const { data } = dirFixMode.value === 'season'
+      ? await mediaApi.reidentifyScope({
+          ...(dirFixScope.value || {}),
+          scope_tmdb_id: dirFixScope.value?.tmdb_id ?? drawerResource.value?.tmdb_id ?? undefined,
+          ...payload,
+        })
+      : await mediaApi.reidentifyByTargetDir({
+          target_dir: drawerResource.value.resource_dir,
+          ...payload,
+        })
+    ElMessage.success(data?.message || (dirFixMode.value === 'season' ? 'Season 修正成功' : '整组修正成功'))
     dirFixDialogVisible.value = false
-    await loadMedia()
-    await refreshSeasonDrawerItems()
-  } catch (e) {
-    ElMessage.error(`修正失败: ${e.response?.data?.detail || e.message}`)
+    await Promise.all([loadResources(), reloadDrawer()])
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || (dirFixMode.value === 'season' ? 'Season 修正失败' : '整组修正失败'))
   } finally {
     dirFixing.value = false
   }
 }
 
-function statusType(s) {
-  const map = { pending: 'info', pending_manual: 'warning', linked: 'warning', scraped: 'success', error: 'danger' }
-  return map[s] || 'info'
-}
-
-function statusText(s) {
-  const map = { pending: '待处理', pending_manual: '待办(需确认)', linked: '已链接', scraped: '成功', error: '失败' }
-  return map[s] || s
-}
-
-function formatSize(bytes) {
-  if (!bytes) return '-'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let n = Number(bytes)
-  let i = 0
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024
-    i += 1
-  }
-  return `${n.toFixed(2)} ${units[i]}`
-}
-
-function formatTime(t) {
-  if (!t) return '-'
-  return dayjs(t).format('YYYY-MM-DD HH:mm')
-}
-
-async function openSeasonDrawer(row) {
-  const resourceDir = row?.resource_dir
-  if (!resourceDir) return
-  seasonDrawerVisible.value = true
-  seasonDrawerDir.value = resourceDir
-  seasonDrawerType.value = row?.type || ''
-  seasonDrawerTitle.value = `${getResourceName(row)} · ${row.season_summary || row.season_label}`
-  seasonDrawerSearch.value = ''
-  seasonDrawerCategory.value = 'all'
-  seasonDrawerSeason.value = 'all'
-  seasonDrawerLoading.value = true
-  try {
-    seasonDrawerItems.value = await fetchAllMediaByTargetDirItems(resourceDir)
-    seasonDrawerSelectedRows.value = []
-  } catch (e) {
-    seasonDrawerItems.value = []
-    ElMessage.error(e?.response?.data?.detail || '加载资源目录记录失败')
-  } finally {
-    seasonDrawerLoading.value = false
-  }
-}
-
-async function refreshSeasonDrawerItems() {
-  if (!seasonDrawerDir.value) return
-  seasonDrawerLoading.value = true
-  try {
-    seasonDrawerItems.value = await fetchAllMediaByTargetDirItems(seasonDrawerDir.value)
-    seasonDrawerSelectedRows.value = []
-  } catch (e) {
-    seasonDrawerItems.value = []
-    ElMessage.error(e?.response?.data?.detail || '刷新资源目录记录失败')
-  } finally {
-    seasonDrawerLoading.value = false
-  }
-}
-
-async function deleteByIds(ids, deleteFiles, sceneName, deleteResourceScope = false) {
-  const validIds = (ids || []).filter((x) => Number.isFinite(Number(x))).map((x) => Number(x))
-  if (!validIds.length) {
-    ElMessage.warning('没有可删除的记录')
-    return false
-  }
-  const hint = deleteFiles ? '并删除硬链接文件' : '仅删除媒体记录'
-  await ElMessageBox.confirm(
-    `确认删除 ${validIds.length} 条记录？\n操作将${hint}。`,
-    sceneName || '确认删除',
-    {
-      type: 'warning',
-      confirmButtonText: '确认删除',
-      cancelButtonText: '取消',
-    },
-  )
-  const { data } = await mediaApi.batchDelete({
-    ids: validIds,
-    delete_files: !!deleteFiles,
-    delete_resource_scope: !!deleteResourceScope,
-  })
-  const successParts = [
-    `记录 ${data?.deleted_records ?? 0} 条`,
-    `文件 ${data?.deleted_files ?? 0} 个`,
-    `inode ${data?.deleted_inodes ?? 0} 条`,
-    `目录状态 ${data?.deleted_directory_states ?? 0} 条`,
-    `空目录 ${data?.pruned_dirs ?? 0} 个`,
-  ]
-  ElMessage.success(`删除完成：${successParts.join('，')}`)
-  return true
-}
-
-async function fetchAllMediaByTargetDirItems(targetDir) {
-  if (!targetDir) return []
-  const limit = 2000
-  let offset = 0
-  let total = 0
-  const items = []
-
-  do {
-    const { data } = await mediaApi.byTargetDir({
-      target_dir: targetDir,
-      offset,
-      limit,
-    })
-    const pageItems = data?.items || []
-    total = Number(data?.total || 0)
-    items.push(...pageItems)
-    offset += pageItems.length
-    if (!pageItems.length) break
-  } while (offset < total)
-
-  return items
-}
-
-async function onDeleteDrawerRowCommand(row, command) {
-  try {
-    const ok = await deleteByIds([row?.id], command === 'records_and_links', '删除当前记录')
-    if (!ok) return
-    await loadMedia()
-    await refreshSeasonDrawerItems()
-  } catch (e) {
-    if (e !== 'cancel') {
-      ElMessage.error(e?.response?.data?.detail || '删除失败')
-    }
-  }
-}
-
-async function deleteDrawerSelected(deleteFiles) {
-  try {
-    const ids = seasonDrawerSelectedRows.value.map((x) => x.id)
-    const ok = await deleteByIds(ids, deleteFiles, '删除选中记录')
-    if (!ok) return
-    await loadMedia()
-    await refreshSeasonDrawerItems()
-  } catch (e) {
-    if (e !== 'cancel') {
-      ElMessage.error(e?.response?.data?.detail || '删除失败')
-    }
-  }
-}
-
-async function deleteResourceByDir(targetDir, deleteFiles, fallbackIds = []) {
-  if (!targetDir) {
-    ElMessage.warning('缺少资源目录信息')
-    return
-  }
-  const items = await fetchAllMediaByTargetDirItems(targetDir)
-  const ids = items.length
-    ? items.map((x) => x.id)
-    : (fallbackIds || []).filter((x) => Number.isFinite(Number(x))).map((x) => Number(x))
-  return deleteByIds(ids, deleteFiles, '删除整组资源', true)
-}
-
-async function onDeleteDrawerResourceCommand(command) {
-  try {
-    const deleteFiles = command === 'records_and_links'
-    let ok = false
-    if (seasonDrawerType.value === 'tv' && seasonDrawerSeason.value !== 'all') {
-      const scopedIds = (seasonDrawerItems.value || [])
-        .filter((item) => extractSeasonLabelFromPath(item?.target_path || item?.original_path || '') === seasonDrawerSeason.value)
-        .map((item) => item.id)
-      ok = await deleteByIds(scopedIds, deleteFiles, `删除 ${seasonDrawerSeason.value}`, true)
-    } else {
-      ok = await deleteResourceByDir(
-        seasonDrawerDir.value,
-        deleteFiles,
-        (seasonDrawerItems.value || []).map((x) => x.id),
-      )
-    }
-    if (!ok) return
-    await loadMedia()
-    if (seasonDrawerVisible.value) {
-      await refreshSeasonDrawerItems()
-    }
-  } catch (e) {
-    if (e !== 'cancel') {
-      ElMessage.error(e?.response?.data?.detail || '删除失败')
-    }
-  }
-}
-
-async function onDeleteResourceCommand(row, command) {
-  try {
-    const ok = await deleteResourceByDir(
-      row?.resource_dir || row?.season_dir,
-      command === 'records_and_links',
-      row?.item_ids || [],
-    )
-    if (!ok) return
-    await loadMedia()
-    if (seasonDrawerVisible.value && seasonDrawerDir.value === (row?.resource_dir || row?.season_dir)) {
-      await refreshSeasonDrawerItems()
-    }
-  } catch (e) {
-    if (e !== 'cancel') {
-      ElMessage.error(e?.response?.data?.detail || '删除失败')
-    }
-  }
-}
-
-async function fetchAllMediaItems(params) {
-  const limit = 2000
-  let offset = 0
-  let total = 0
-  const items = []
-
-  do {
-    const { data } = await mediaApi.list({
-      ...params,
-      offset,
-      limit,
-    })
-    const pageItems = data?.items || []
-    total = Number(data?.total || 0)
-    items.push(...pageItems)
-    offset += pageItems.length
-    if (!pageItems.length) break
-  } while (offset < total)
-
-  return items
-}
-
-async function loadMedia() {
-  loading.value = true
-  try {
-    const items = await fetchAllMediaItems({
-      type: filters.type || undefined,
-      category: filters.category || 'all',
-      search: filters.search || undefined,
-    })
-    rawItems.value = items.filter((x) => String(x?.target_path || '').trim())
-    allSeasonRows.value = groupRows(rawItems.value)
-    refreshPagedRows()
-    for (const row of allSeasonRows.value) {
-      getPosterUrl(row)
-    }
-  } catch {
-    rawItems.value = []
-    allSeasonRows.value = []
-    seasonRows.value = []
-    total.value = 0
-  } finally {
-    loading.value = false
-  }
-}
-
 async function deduplicateRecords() {
   try {
-    await ElMessageBox.confirm('将按“同步组 + 源路径”只保留最新一条媒体记录。是否继续？', '确认去重', { type: 'warning' })
+    await ElMessageBox.confirm('将按原始路径保留最新记录并删除重复项，是否继续？', '记录去重', { type: 'warning' })
     const { data } = await mediaApi.deduplicate()
-    ElMessage.success(data.message || '去重完成')
-    loadMedia()
-  } catch (e) {
-    if (e !== 'cancel') ElMessage.error('去重失败')
+    ElMessage.success(data?.message || '去重完成')
+    await Promise.all([loadResources(), reloadDrawer()])
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error?.response?.data?.detail || error?.message || '去重失败')
   }
 }
 
 onMounted(() => {
-  if (route.query.search) filters.search = String(route.query.search)
-  loadSyncGroupsMeta()
-  loadMedia()
+  loadResources()
 })
 </script>
 
 <style scoped>
-.header {
+.media-page {
   display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.header,
+.header-actions,
+.drawer-toolbar,
+.drawer-toolbar-left,
+.drawer-toolbar-right,
+.node-card-header,
+.node-header-actions,
+.group-header,
+.group-actions {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-  gap: 24px;
-  flex-wrap: wrap;
-}
-
-.header-actions {
-  display: flex;
   gap: 12px;
-  align-items: center;
   flex-wrap: wrap;
 }
 
-.table-card {
-  border: none;
-  background: transparent;
+.page-title {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
 }
 
-:deep(.el-table) {
-  background-color: transparent;
-  --el-table-tr-bg-color: transparent;
-}
-
-.title-cell {
+.resource-cell {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 14px;
   cursor: pointer;
 }
 
-.media-icon {
-  margin-top: 2px;
-  color: #94a3b8;
-}
-
-.poster-thumb {
-  width: 44px;
-  height: 66px;
-  object-fit: cover;
-  border-radius: 6px;
-  flex-shrink: 0;
-  background: #e5e7eb;
-}
-
-.poster-fallback {
-  width: 44px;
-  height: 66px;
-  border-radius: 6px;
+.resource-icon {
+  width: 56px;
+  height: 78px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #eef6ff, #f7f3e8);
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
-  background: #f1f5f9;
+  color: #315c8a;
+  flex: 0 0 auto;
+  overflow: hidden;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
-.title-info {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.resource-icon.has-poster {
+  background: #dbe4f0;
 }
 
-.main-title {
-  font-weight: 600;
-  font-size: 14px;
-  color: #111827;
-  line-height: 1.4;
-  word-break: break-all;
+.resource-poster {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
-.sub-info {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: #64748b;
-}
-
-.season-link {
-  color: #2563eb;
-  font-weight: 500;
-}
-
-.type-tag {
-  transform: scale(0.9);
-  transform-origin: left;
-}
-
+.resource-body,
+.node-title,
+.group-title,
+.status-cell,
 .path-flow {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 12px;
-  font-family: monospace;
+}
+
+.resource-title,
+.node-title,
+.group-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.resource-meta,
+.resource-dir,
+.drawer-path,
+.node-summary,
+.group-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.resource-dir,
+.drawer-path {
+  word-break: break-all;
+}
+
+.drawer-header-sticky {
+  position: sticky;
+  top: -20px;
+  z-index: 10;
+  padding: 20px 20px 12px;
+  margin: -20px -20px 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #ffffff 80%, rgba(255, 255, 255, 0.92) 100%);
+  border-bottom: 1px solid #e5e7eb;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+}
+
+.drawer-path {
+  padding: 4px 0 10px;
+}
+
+.drawer-toolbar {
+  padding: 0;
+  margin: 0;
+}
+
+.selection-summary {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pagination-container {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.node-nav {
+  margin: 12px 0 16px;
+  overflow-x: auto;
+}
+
+.sticky-node-nav {
+  margin: 12px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+:deep(.sticky-node-nav .el-radio-group) {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+  min-width: max-content;
+}
+
+:deep(.sticky-node-nav .el-radio-button__inner) {
+  border-radius: 999px !important;
+  border: 1px solid #dbe3ef !important;
+  box-shadow: none !important;
+  background: #f8fafc;
+  color: #334155;
+}
+
+:deep(.sticky-node-nav .el-radio-button:first-child .el-radio-button__inner),
+:deep(.sticky-node-nav .el-radio-button:last-child .el-radio-button__inner) {
+  border-radius: 999px !important;
+}
+
+:deep(.sticky-node-nav .el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: #1d4ed8;
+  border-color: #1d4ed8 !important;
+  color: #ffffff;
+}
+
+.node-card,
+.group-card {
+  border-radius: 16px;
+}
+
+.group-grid {
+  display: grid;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.collapsed-group-hint {
+  padding: 8px 4px 0;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .path-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #64748b;
+  min-width: 0;
 }
 
-.path-row.source .path {
-  color: #64748b;
+.path-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.path-row.target .path {
-  color: #111827;
-}
-
-.label {
-  flex-shrink: 0;
-  font-size: 10px;
-  opacity: 0.6;
-  width: 14px;
-}
-
-.path {
-  white-space: nowrap;
+.path-name,
+.text-ellipsis {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  direction: rtl;
-  text-align: left;
+  white-space: nowrap;
 }
 
-.arrow-row {
-  padding-left: 22px;
+.path-arrow {
   color: #94a3b8;
-  line-height: 1;
+  margin-left: 28px;
 }
 
-.status-cell {
+.row-actions {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-}
-
-.time {
-  font-size: 12px;
-  color: #94a3b8;
-}
-
-.pagination-container {
-  margin-top: 24px;
-  display: flex;
-  justify-content: flex-end;
-}
-
-.drawer-path {
-  margin-bottom: 10px;
-  color: #64748b;
-  word-break: break-all;
-}
-
-.drawer-header-actions {
-  display: flex;
-  gap: 10px 14px;
-  align-items: flex-start;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.drawer-filters {
-  display: flex;
-  gap: 10px;
   align-items: center;
-  flex-wrap: wrap;
-}
-
-.drawer-danger-actions {
-  display: flex;
+  justify-content: center;
   gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
+}
+
+.row-action-button {
+  min-width: 60px;
+}
+
+.drawer-floating-poster-shell {
+  position: fixed;
+  top: clamp(92px, 11vh, 148px);
+  right: calc(64% + 24px);
+  transform: none;
+  z-index: 2100;
+  width: min(340px, calc(36vw - 32px));
+  aspect-ratio: 2 / 3;
+  pointer-events: none;
+  transform-origin: center center;
+  --poster-collapse-x: 24px;
+  --poster-collapse-y: 14px;
+  --poster-collapse-scale-x: 0.95;
+  --poster-collapse-scale-y: 0.95;
+}
+
+.drawer-floating-poster-card {
+  width: 100%;
+  height: 100%;
+  border-radius: 30px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(241, 245, 249, 0.82));
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 0 32px 96px rgba(15, 23, 42, 0.28);
+  backdrop-filter: blur(10px);
+}
+
+.drawer-floating-poster-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+:deep(.row-actions .el-dropdown) {
+  display: inline-flex;
+}
+
+@media (max-width: 1180px) {
+  .drawer-floating-poster-shell {
+    display: none;
+  }
+}
+
+@media (max-width: 960px) {
+  .header,
+  .drawer-toolbar,
+  .node-card-header,
+  .group-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 </style>

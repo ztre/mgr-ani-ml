@@ -30,6 +30,7 @@ from .metadata import scrape_movie_metadata, scrape_tv_metadata
 from .parser import (
     ParseResult,
     SPECIAL_TYPE_MAP,
+    _detect_skip_mainline_variant_label,
     _extract_title_from_all_bracket_format,
     classify_extra_from_text,
     extract_bang_season,
@@ -38,7 +39,6 @@ from .parser import (
     is_title_number_safe,
     parse_movie_filename,
     parse_tv_filename,
-    _is_nc_ver_skip_file,
 )
 from .recognition_flow import (
     LocalParseSnapshot,
@@ -606,6 +606,7 @@ def run_manual_organize(
     year_override: int | None = None,
     season_override: int | None = None,
     episode_offset: int | None = None,
+    selected_relative_paths: list[str] | None = None,
 ) -> tuple[int, int, bool]:
     task_id = current_task_id.get()
 
@@ -665,9 +666,18 @@ def run_manual_organize(
     include = group.include or ""
     exclude = group.exclude or ""
     source_root = Path(group.source)
-    media_files = _collect_media_files_under_dir(root_dir, include, exclude, source_root)
-    if not media_files:
+    all_media_files = _collect_media_files_under_dir(root_dir, include, exclude, source_root)
+    if not all_media_files:
         raise DirectoryProcessError("待办目录中没有可处理媒体")
+
+    selection_mode = bool(selected_relative_paths)
+    media_files = _select_manual_media_files(all_media_files, root_dir, selected_relative_paths)
+    if selection_mode and not media_files:
+        raise DirectoryProcessError("未选择可处理媒体文件")
+    if not selection_mode:
+        media_files = all_media_files
+
+    manual_scope_complete = (not selection_mode) or (len(media_files) == len(all_media_files))
 
     video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=_video_sort_key)
     attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
@@ -681,7 +691,7 @@ def run_manual_organize(
 
     append_log(
         f"手动整理进入扫描主流程: group={group.name}, dir={root_dir}, media_type={media_type}, "
-        f"tmdb_id={tmdb_id}, title={resolved_title}, files={len(media_files)}"
+        f"tmdb_id={tmdb_id}, title={resolved_title}, files={len(media_files)}, selection_mode={selection_mode}"
     )
 
     processed = 0
@@ -731,12 +741,19 @@ def run_manual_organize(
         if is_scan_cancel_requested(task_id):
             _cancel_manual_task("manual-finalize")
 
-        db.delete(pending)
+        if manual_scope_complete:
+            db.delete(pending)
+        else:
+            pending.updated_at = datetime.now(timezone.utc)
         db.commit()
         return processed, 0, bool(context.get("_has_issues"))
     except TaskCancelledError:
         raise
     except DirectoryProcessError:
+        db.rollback()
+        _rollback_operations(op_log)
+        raise
+    except Exception:
         db.rollback()
         _rollback_operations(op_log)
         raise
@@ -1358,11 +1375,13 @@ def _process_file(
         )
         return
 
-    if _is_nc_ver_skip_file(src_path.name):
-        append_log(f"INFO: NC Ver 文件已跳过: {src_path.name}")
+    skip_variant_label = _detect_skip_mainline_variant_label(src_path.name)
+    if skip_variant_label:
+        skip_reason = "NC Ver skip" if skip_variant_label in {"NC Ver", "NCOPED"} else "mainline variant skip"
+        append_log(f"INFO: 主视频变体文件已跳过({skip_variant_label}): {src_path.name}")
         _record_unhandled_item(
             original_path=src_path,
-            reason="NC Ver skip",
+            reason=skip_reason,
             file_type="video" if ext in VIDEO_EXTS else "attachment",
             sync_group_id=sync_group_id,
             tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
@@ -1775,36 +1794,11 @@ def _process_file(
                 dir_runtime=dir_runtime or {},
                 op_log=op_log,
             )
-            conflict_reason = (
-                f"main video target conflict: {decision.dst_path} | links_rolled_back=True"
-            )
             append_log(f"WARNING: 主视频目标冲突已回滚并转待办: {src_path.name} | 目标: {decision.dst_path}")
-            _record_unhandled_item(
-                original_path=src_path,
-                reason=conflict_reason,
-                file_type=decision.file_type or "video",
-                sync_group_id=sync_group_id,
-                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                season=decision.parse_result.season,
-                episode=decision.parse_result.episode,
-                extra_category=decision.parse_result.extra_category,
-                suggested_target=decision.dst_path,
-            )
             context["_has_issues"] = True
             raise DirectoryProcessError(f"主视频目标冲突: {src_path.name} -> {decision.dst_path}")
         else:
             append_log(f"WARNING: 转待办: {src_path.name} | 原因: {decision.reason}")
-        _record_unhandled_item(
-            original_path=src_path,
-            reason=decision.reason or "target occupied by other source",
-            file_type=decision.file_type or "video",
-            sync_group_id=sync_group_id,
-            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-            season=decision.parse_result.season,
-            episode=decision.parse_result.episode,
-            extra_category=decision.parse_result.extra_category,
-            suggested_target=decision.dst_path,
-        )
         context["_has_issues"] = True
         return
     if decision.status == "skip":
@@ -1875,17 +1869,6 @@ def _process_file(
             if pending_path:
                 mark_pending(item, reason, pending_path)
             append_log(f"WARNING: 转待办: {src_path.name} | 原因: {reason}")
-            _record_unhandled_item(
-                original_path=src_path,
-                reason=reason,
-                file_type=file_type_for_result,
-                sync_group_id=sync_group_id,
-                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-                season=parse_result.season,
-                episode=parse_result.episode,
-                extra_category=parse_result.extra_category,
-                suggested_target=dst_path,
-            )
             dir_runtime["pending_count"] = int(dir_runtime.get("pending_count") or 0) + 1
             context["_has_issues"] = True
             return
@@ -2454,6 +2437,43 @@ def _collect_media_files_under_dir(media_dir: Path, include: str, exclude: str, 
     return files
 
 
+def _normalize_manual_selected_path(path_value: str | None) -> str:
+    value = str(path_value or "").strip().replace("\\", "/")
+    if not value:
+        return ""
+    parts = [part for part in value.split("/") if part and part != "."]
+    if any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _select_manual_media_files(media_files: list[Path], root_dir: Path, selected_relative_paths: list[str] | None) -> list[Path]:
+    if not selected_relative_paths:
+        return list(media_files or [])
+
+    available: dict[str, Path] = {}
+    for file_path in media_files or []:
+        try:
+            relative_path = file_path.relative_to(root_dir).as_posix()
+        except ValueError:
+            relative_path = file_path.name
+        normalized = _normalize_manual_selected_path(relative_path)
+        if normalized:
+            available[normalized] = file_path
+
+    selected: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in selected_relative_paths:
+        normalized = _normalize_manual_selected_path(raw_path)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        file_path = available.get(normalized)
+        if file_path is not None:
+            selected.append(file_path)
+    return selected
+
+
 def _extract_first_dir_name(dirs: list[Path], source_root: Path) -> str | None:
     if not dirs:
         return None
@@ -2510,13 +2530,19 @@ def _cleanup_directory_records(db: Session, sync_group_id: int, scope: Path) -> 
     deleted_media = 0
     deleted_inodes = 0
 
-    for obj in list(db.new):
+    pending_objects = list(getattr(db, "new", []) or [])
+    for obj in pending_objects:
         if isinstance(obj, MediaRecord) and obj.sync_group_id == sync_group_id and _path_is_within_scope(obj.original_path, scope):
-            db.expunge(obj)
+            if hasattr(db, "expunge"):
+                db.expunge(obj)
             deleted_media += 1
         elif isinstance(obj, InodeRecord) and obj.sync_group_id == sync_group_id and _path_is_within_scope(obj.source_path, scope):
-            db.expunge(obj)
+            if hasattr(db, "expunge"):
+                db.expunge(obj)
             deleted_inodes += 1
+
+    if not all(hasattr(db, attr) for attr in ("query", "delete")):
+        return deleted_media, deleted_inodes
 
     media_rows = db.query(MediaRecord).filter(MediaRecord.sync_group_id == sync_group_id).all()
     for row in media_rows:
@@ -2564,7 +2590,7 @@ def _mark_dir_pending(
     reason: str,
     *,
     emit_log: bool = True,
-    emit_jsonl: bool = True,
+    emit_jsonl: bool = False,
 ) -> Path:
     pending_dir = _resolve_manual_scope(src_path, source_root)
     if emit_jsonl:
@@ -2610,7 +2636,7 @@ def _finalize_dir_to_pending(
     state: str,
     reason: str,
     op_log: OperationLog | None = None,
-    emit_jsonl: bool = True,
+    emit_jsonl: bool = False,
 ) -> None:
     if op_log is not None:
         _rollback_operations(op_log)
@@ -2880,7 +2906,9 @@ def _is_ignored_name(name: str) -> bool:
     lowered = str(name or "").lower()
     if not lowered:
         return False
-    return any(token in lowered for token in IGNORED_TOKENS)
+    stem = Path(lowered).stem
+    tokens = re.findall(r"[a-z]+|\d+", stem)
+    return any(token in IGNORED_TOKENS for token in tokens)
 
 
 def _video_sort_key(p: Path) -> tuple[int, str]:
@@ -3029,6 +3057,8 @@ def _special_label_prefix(category: str | None, label: str | None) -> str:
 def _resolve_prefix_for_parse(parse_result: ParseResult) -> str | None:
     if not parse_result.extra_category:
         return None
+    if parse_result.extra_category == "bdextra":
+        return "BDExtra"
     label = str(parse_result.extra_label or "")
     upper = label.upper()
     for token, (_bucket, prefix) in SPECIAL_TYPE_MAP.items():
@@ -3305,10 +3335,12 @@ def _detect_bracket_variant_as_special(filename: str) -> tuple[str | None, str |
             continue
 
         # Preview 类：Preview01_1 / Preview01 / Preview
-        m = re.search(r"\bPreview\s*0*(\d*)", raw, re.I)
+        m = re.search(r"\bPreview\s*0*(\d*)(?:[_\-\s]+(\d{1,3}))?", raw, re.I)
         if m:
             idx = m.group(1)
             label = _format_prefix_number("Preview", int(idx)) if idx else "Preview"
+            if m.group(2):
+                label = f"{label} {int(m.group(2))}"
             return "preview", label, True
 
         # On Air Ver
