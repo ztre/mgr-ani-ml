@@ -753,8 +753,7 @@ async function submitFix() {
     fixDialogVisible.value = false
     await loadMedia()
     if (seasonDrawerVisible.value && seasonDrawerDir.value) {
-      const { data } = await mediaApi.byTargetDir({ target_dir: seasonDrawerDir.value, limit: 1000 })
-      seasonDrawerItems.value = data.items || []
+      seasonDrawerItems.value = await fetchAllMediaByTargetDirItems(seasonDrawerDir.value)
     }
   } catch (e) {
     ElMessage.error(`修正失败: ${e.response?.data?.detail || e.message}`)
@@ -833,8 +832,7 @@ async function openSeasonDrawer(row) {
   seasonDrawerSeason.value = 'all'
   seasonDrawerLoading.value = true
   try {
-    const { data } = await mediaApi.byTargetDir({ target_dir: resourceDir, limit: 1000 })
-    seasonDrawerItems.value = data.items || []
+    seasonDrawerItems.value = await fetchAllMediaByTargetDirItems(resourceDir)
     seasonDrawerSelectedRows.value = []
   } catch (e) {
     seasonDrawerItems.value = []
@@ -848,8 +846,7 @@ async function refreshSeasonDrawerItems() {
   if (!seasonDrawerDir.value) return
   seasonDrawerLoading.value = true
   try {
-    const { data } = await mediaApi.byTargetDir({ target_dir: seasonDrawerDir.value, limit: 1000 })
-    seasonDrawerItems.value = data.items || []
+    seasonDrawerItems.value = await fetchAllMediaByTargetDirItems(seasonDrawerDir.value)
     seasonDrawerSelectedRows.value = []
   } catch (e) {
     seasonDrawerItems.value = []
@@ -859,7 +856,7 @@ async function refreshSeasonDrawerItems() {
   }
 }
 
-async function deleteByIds(ids, deleteFiles, sceneName) {
+async function deleteByIds(ids, deleteFiles, sceneName, deleteResourceScope = false) {
   const validIds = (ids || []).filter((x) => Number.isFinite(Number(x))).map((x) => Number(x))
   if (!validIds.length) {
     ElMessage.warning('没有可删除的记录')
@@ -878,11 +875,40 @@ async function deleteByIds(ids, deleteFiles, sceneName) {
   const { data } = await mediaApi.batchDelete({
     ids: validIds,
     delete_files: !!deleteFiles,
+    delete_resource_scope: !!deleteResourceScope,
   })
-  ElMessage.success(
-    `删除完成：记录 ${data?.deleted_records || 0} 条，文件 ${data?.deleted_files || 0} 个`,
-  )
+  const successParts = [
+    `记录 ${data?.deleted_records ?? 0} 条`,
+    `文件 ${data?.deleted_files ?? 0} 个`,
+    `inode ${data?.deleted_inodes ?? 0} 条`,
+    `目录状态 ${data?.deleted_directory_states ?? 0} 条`,
+    `空目录 ${data?.pruned_dirs ?? 0} 个`,
+  ]
+  ElMessage.success(`删除完成：${successParts.join('，')}`)
   return true
+}
+
+async function fetchAllMediaByTargetDirItems(targetDir) {
+  if (!targetDir) return []
+  const limit = 2000
+  let offset = 0
+  let total = 0
+  const items = []
+
+  do {
+    const { data } = await mediaApi.byTargetDir({
+      target_dir: targetDir,
+      offset,
+      limit,
+    })
+    const pageItems = data?.items || []
+    total = Number(data?.total || 0)
+    items.push(...pageItems)
+    offset += pageItems.length
+    if (!pageItems.length) break
+  } while (offset < total)
+
+  return items
 }
 
 async function onDeleteDrawerRowCommand(row, command) {
@@ -912,19 +938,34 @@ async function deleteDrawerSelected(deleteFiles) {
   }
 }
 
-async function deleteResourceByDir(targetDir, deleteFiles) {
+async function deleteResourceByDir(targetDir, deleteFiles, fallbackIds = []) {
   if (!targetDir) {
     ElMessage.warning('缺少资源目录信息')
     return
   }
-  const { data } = await mediaApi.byTargetDir({ target_dir: targetDir, limit: 2000 })
-  const ids = (data?.items || []).map((x) => x.id)
-  return deleteByIds(ids, deleteFiles, '删除整组资源')
+  const items = await fetchAllMediaByTargetDirItems(targetDir)
+  const ids = items.length
+    ? items.map((x) => x.id)
+    : (fallbackIds || []).filter((x) => Number.isFinite(Number(x))).map((x) => Number(x))
+  return deleteByIds(ids, deleteFiles, '删除整组资源', true)
 }
 
 async function onDeleteDrawerResourceCommand(command) {
   try {
-    const ok = await deleteResourceByDir(seasonDrawerDir.value, command === 'records_and_links')
+    const deleteFiles = command === 'records_and_links'
+    let ok = false
+    if (seasonDrawerType.value === 'tv' && seasonDrawerSeason.value !== 'all') {
+      const scopedIds = (seasonDrawerItems.value || [])
+        .filter((item) => extractSeasonLabelFromPath(item?.target_path || item?.original_path || '') === seasonDrawerSeason.value)
+        .map((item) => item.id)
+      ok = await deleteByIds(scopedIds, deleteFiles, `删除 ${seasonDrawerSeason.value}`, true)
+    } else {
+      ok = await deleteResourceByDir(
+        seasonDrawerDir.value,
+        deleteFiles,
+        (seasonDrawerItems.value || []).map((x) => x.id),
+      )
+    }
     if (!ok) return
     await loadMedia()
     if (seasonDrawerVisible.value) {
@@ -939,7 +980,11 @@ async function onDeleteDrawerResourceCommand(command) {
 
 async function onDeleteResourceCommand(row, command) {
   try {
-    const ok = await deleteResourceByDir(row?.resource_dir || row?.season_dir, command === 'records_and_links')
+    const ok = await deleteResourceByDir(
+      row?.resource_dir || row?.season_dir,
+      command === 'records_and_links',
+      row?.item_ids || [],
+    )
     if (!ok) return
     await loadMedia()
     if (seasonDrawerVisible.value && seasonDrawerDir.value === (row?.resource_dir || row?.season_dir)) {
@@ -952,17 +997,37 @@ async function onDeleteResourceCommand(row, command) {
   }
 }
 
+async function fetchAllMediaItems(params) {
+  const limit = 2000
+  let offset = 0
+  let total = 0
+  const items = []
+
+  do {
+    const { data } = await mediaApi.list({
+      ...params,
+      offset,
+      limit,
+    })
+    const pageItems = data?.items || []
+    total = Number(data?.total || 0)
+    items.push(...pageItems)
+    offset += pageItems.length
+    if (!pageItems.length) break
+  } while (offset < total)
+
+  return items
+}
+
 async function loadMedia() {
   loading.value = true
   try {
-    const { data } = await mediaApi.list({
+    const items = await fetchAllMediaItems({
       type: filters.type || undefined,
       category: filters.category || 'all',
       search: filters.search || undefined,
-      offset: 0,
-      limit: 2000,
     })
-    rawItems.value = (data.items || []).filter((x) => String(x?.target_path || '').trim())
+    rawItems.value = items.filter((x) => String(x?.target_path || '').trim())
     allSeasonRows.value = groupRows(rawItems.value)
     refreshPagedRows()
     for (const row of allSeasonRows.value) {

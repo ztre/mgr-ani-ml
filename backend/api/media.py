@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -46,6 +50,7 @@ class PendingOrganizeRequest(BaseModel):
 class BatchDeleteRequest(BaseModel):
     ids: list[int]
     delete_files: bool = False
+    delete_resource_scope: bool = False
 
 
 class ReidentifyRequest(BaseModel):
@@ -79,6 +84,383 @@ class PendingLogReviewRequest(BaseModel):
     episode: int | None = None
     extra_category: str | None = None
     suggested_target: str | None = None
+
+
+@dataclass(frozen=True)
+class _DeletedLinkRecord:
+    source_path: Path
+    target_path: Path
+
+
+def _normalize_existing_dir(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path
+
+
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.exists() and path.is_dir()
+    except OSError:
+        return False
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.exists() and path.is_file()
+    except OSError:
+        return False
+
+
+def _normalize_target_path(value: str | None) -> str:
+    return str(value or "").replace("\\", "/").rstrip("/")
+
+
+def _extract_target_dir(path_value: str | None) -> str:
+    normalized = _normalize_target_path(path_value)
+    if not normalized:
+        return ""
+    parts = normalized.split("/")
+    if len(parts) <= 1:
+        return normalized
+    return "/".join(parts[:-1])
+
+
+def _extract_season_dir(path_value: str | None) -> str:
+    normalized = _normalize_target_path(path_value)
+    match = re.match(r"^(.*?/Season\s+\d{1,2})(?:/|$)", normalized, re.I)
+    if match and match.group(1):
+        return match.group(1)
+    return _extract_target_dir(normalized)
+
+
+def _extract_show_dir(path_value: str | None) -> str:
+    season_dir = _extract_season_dir(path_value)
+    if not season_dir or season_dir == _normalize_target_path(path_value):
+        return _extract_target_dir(path_value)
+    return _extract_target_dir(season_dir)
+
+
+def _extract_tv_primary_season(path_value: str | None) -> int | None:
+    normalized = _normalize_target_path(path_value)
+    match = re.match(r"^.*?/Season\s+(\d{1,2})(?:/|$)", normalized, re.I)
+    if not match:
+        return None
+    season = int(match.group(1))
+    return season if season > 0 else None
+
+
+def _extract_tv_aux_season(path_value: str | None) -> int | None:
+    normalized = _normalize_target_path(path_value)
+    if not normalized:
+        return None
+
+    target_dir = _extract_target_dir(normalized)
+    leaf = Path(target_dir).name.lower()
+    filename = Path(normalized).name
+
+    if leaf in {"season 00", "specials"}:
+        match = re.search(r"\bS00E(\d{3,4})\b", filename, re.I)
+        if not match:
+            return None
+        encoded_episode = int(match.group(1))
+        if encoded_episode < 100:
+            return None
+        season = encoded_episode // 100
+        return season if season > 0 else None
+
+    if leaf in {"extras", "trailers", "interviews"}:
+        match = re.search(r"\bS(\d{1,2})(?:[_ .-]|$)", filename, re.I)
+        if not match:
+            return None
+        season = int(match.group(1))
+        return season if season > 0 else None
+
+    return None
+
+
+def _tv_resource_scope_key(row: MediaRecord) -> tuple[int | None, str, str, int] | None:
+    target_path = str(row.target_path or "").strip()
+    if not target_path:
+        return None
+    show_dir = _normalize_target_path(_extract_show_dir(target_path))
+    if not show_dir:
+        return None
+
+    season = _extract_tv_primary_season(target_path)
+    if season is None:
+        season = _extract_tv_aux_season(target_path)
+    if season is None:
+        return None
+
+    return (row.sync_group_id, "tv", show_dir, season)
+
+
+def _extract_movie_resource_dir(path_value: str | None) -> str:
+    target_dir = _extract_target_dir(path_value)
+    if not target_dir:
+        return ""
+    leaf = Path(target_dir).name.lower()
+    if leaf in {"extras", "specials", "trailers", "interviews"}:
+        return _extract_target_dir(target_dir)
+    return target_dir
+
+
+def _resource_scope_key(row: MediaRecord) -> tuple[object, ...] | None:
+    target_path = str(row.target_path or "").strip()
+    if not target_path:
+        return None
+    media_type = str(row.type or "")
+    if media_type == "tv":
+        return _tv_resource_scope_key(row)
+
+    resource_dir = _extract_movie_resource_dir(target_path)
+    normalized_dir = _normalize_target_path(resource_dir)
+    if not normalized_dir:
+        return None
+    return (row.sync_group_id, media_type, normalized_dir)
+
+
+def _expand_rows_to_resource_scope(db: Session, rows: list[MediaRecord]) -> list[MediaRecord]:
+    scope_keys = {key for row in rows if (key := _resource_scope_key(row)) is not None}
+    if not scope_keys:
+        return rows
+
+    group_ids = sorted({key[0] for key in scope_keys if key and key[0] is not None})
+    if not group_ids:
+        return rows
+
+    candidates = (
+        db.query(MediaRecord)
+        .filter(MediaRecord.sync_group_id.in_(group_ids))
+        .filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
+        .all()
+    )
+    expanded: dict[int, MediaRecord] = {int(row.id): row for row in rows if row.id is not None}
+    for candidate in candidates:
+        key = _resource_scope_key(candidate)
+        if key is None or key not in scope_keys or candidate.id is None:
+            continue
+        expanded[int(candidate.id)] = candidate
+    return list(expanded.values())
+
+
+def _derive_source_dir(original_path: str, status: str | None, target_path: str | None) -> Path:
+    path = Path(str(original_path or ""))
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status == "pending_manual" and not str(target_path or "").strip():
+        return path
+    if _safe_is_dir(path):
+        return path
+    return path.parent
+
+
+def _group_target_root(db: Session, group_id: int | None, media_type: str) -> Path | None:
+    if group_id is None:
+        return None
+    group = db.query(SyncGroup).filter(SyncGroup.id == group_id).first()
+    if group is None:
+        return None
+    if media_type == "movie":
+        movie_root, _reason = resolve_movie_target_root(db, group)
+        if movie_root is not None:
+            return movie_root
+    target_value = str(group.target or "").strip()
+    return Path(target_value) if target_value else None
+
+
+def _prune_empty_dirs(start_dir: Path, stop_at: Path | None) -> list[Path]:
+    removed: list[Path] = []
+    current = _normalize_existing_dir(start_dir)
+    stop_dir = _normalize_existing_dir(stop_at)
+    while current is not None:
+        if stop_dir is not None and current == stop_dir:
+            break
+        parent = current.parent
+        try:
+            current.rmdir()
+            removed.append(current)
+        except OSError:
+            break
+        if parent == current:
+            break
+        current = parent
+    return removed
+
+
+def _restore_deleted_links(deleted_links: list[_DeletedLinkRecord]) -> None:
+    restore_errors: list[str] = []
+    for item in deleted_links:
+        try:
+            if _safe_is_file(item.target_path):
+                continue
+            item.target_path.parent.mkdir(parents=True, exist_ok=True)
+            os.link(str(item.source_path), str(item.target_path))
+        except OSError as exc:
+            restore_errors.append(f"{item.target_path} ({exc})")
+    if restore_errors:
+        raise RuntimeError("; ".join(restore_errors))
+
+
+def _delete_directory_states_for_removed_sources(
+    db: Session,
+    rows: list[MediaRecord],
+    deleted_ids: set[int],
+) -> int:
+    affected_by_group: dict[int, set[str]] = defaultdict(set)
+    affected_group_ids = {row.sync_group_id for row in rows if row.sync_group_id is not None}
+    if not affected_group_ids:
+        return 0
+
+    for row in rows:
+        if row.sync_group_id is None:
+            continue
+        source_dir = _derive_source_dir(row.original_path, row.status, row.target_path)
+        affected_by_group[row.sync_group_id].add(str(source_dir))
+
+    if not affected_by_group:
+        return 0
+
+    remaining_rows = (
+        db.query(MediaRecord)
+        .filter(MediaRecord.sync_group_id.in_(sorted(affected_group_ids)))
+        .filter(~MediaRecord.id.in_(sorted(deleted_ids)))
+        .all()
+    )
+
+    remaining_by_group: dict[int, set[str]] = defaultdict(set)
+    for row in remaining_rows:
+        if row.sync_group_id is None:
+            continue
+        source_dir = _derive_source_dir(row.original_path, row.status, row.target_path)
+        remaining_by_group[row.sync_group_id].add(str(source_dir))
+
+    deleted_count = 0
+    for group_id, dir_paths in affected_by_group.items():
+        removable = dir_paths - remaining_by_group.get(group_id, set())
+        if not removable:
+            continue
+        deleted_count += (
+            db.query(DirectoryState)
+            .filter(DirectoryState.sync_group_id == group_id)
+            .filter(DirectoryState.dir_path.in_(sorted(removable)))
+            .delete(synchronize_session=False)
+        )
+    return int(deleted_count)
+
+
+def _delete_inodes_for_removed_sources(db: Session, rows: list[MediaRecord], deleted_ids: set[int]) -> int:
+    affected_keys = {
+        (row.sync_group_id, row.original_path)
+        for row in rows
+        if row.sync_group_id is not None and str(row.original_path or "").strip()
+    }
+    if not affected_keys:
+        return 0
+
+    group_ids = sorted({group_id for group_id, _path in affected_keys if group_id is not None})
+    if not group_ids:
+        return 0
+
+    remaining_rows = (
+        db.query(MediaRecord.sync_group_id, MediaRecord.original_path)
+        .filter(MediaRecord.sync_group_id.in_(group_ids))
+        .filter(~MediaRecord.id.in_(sorted(deleted_ids)))
+        .all()
+    )
+    remaining_keys = {(group_id, original_path) for group_id, original_path in remaining_rows if group_id is not None}
+    removable_keys = affected_keys - remaining_keys
+    if not removable_keys:
+        return 0
+
+    deleted_total = 0
+    by_group: dict[int, list[str]] = defaultdict(list)
+    for group_id, source_path in removable_keys:
+        if group_id is None:
+            continue
+        by_group[group_id].append(source_path)
+
+    for group_id, source_paths in by_group.items():
+        deleted_total += (
+            db.query(InodeRecord)
+            .filter(InodeRecord.sync_group_id == group_id)
+            .filter(InodeRecord.source_path.in_(sorted(source_paths)))
+            .delete(synchronize_session=False)
+        )
+    return int(deleted_total)
+
+
+def _execute_batch_delete(
+    db: Session,
+    rows: list[MediaRecord],
+    *,
+    delete_files: bool,
+) -> dict[str, int]:
+    deleted_ids = {int(row.id) for row in rows}
+    deleted_links: list[_DeletedLinkRecord] = []
+    pruned_dir_count = 0
+    deleted_files = 0
+
+    target_roots: dict[tuple[int | None, str], Path | None] = {}
+    for row in rows:
+        key = (row.sync_group_id, row.type)
+        if key not in target_roots:
+            target_roots[key] = _group_target_root(db, row.sync_group_id, row.type)
+
+    deleted_inode_count = _delete_inodes_for_removed_sources(db, rows, deleted_ids)
+    deleted_dir_state_count = _delete_directory_states_for_removed_sources(db, rows, deleted_ids)
+
+    for row in rows:
+        db.delete(row)
+
+    db.flush()
+
+    try:
+        for row in rows:
+            target_value = str(row.target_path or "").strip()
+            if not delete_files or not target_value:
+                continue
+            target_path = Path(target_value)
+            if not _safe_is_file(target_path):
+                continue
+            target_path.unlink()
+            deleted_links.append(_DeletedLinkRecord(source_path=Path(row.original_path), target_path=target_path))
+            deleted_files += 1
+            stop_at = target_roots.get((row.sync_group_id, row.type))
+            pruned_dir_count += len(_prune_empty_dirs(target_path.parent, stop_at))
+
+        db.commit()
+    except OSError as exc:
+        db.rollback()
+        try:
+            _restore_deleted_links(deleted_links)
+        except RuntimeError as restore_exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"删除失败且补偿未完全恢复: {exc}; restore={restore_exc}",
+            ) from restore_exc
+        raise HTTPException(status_code=500, detail=f"删除文件或目录失败: {exc}") from exc
+    except Exception as exc:
+        db.rollback()
+        try:
+            _restore_deleted_links(deleted_links)
+        except RuntimeError as restore_exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"数据库提交失败且补偿未完全恢复: {restore_exc}",
+            ) from restore_exc
+        raise HTTPException(status_code=500, detail=f"数据库提交失败: {exc}") from exc
+
+    return {
+        "deleted_records": len(rows),
+        "deleted_files": deleted_files,
+        "deleted_inodes": deleted_inode_count,
+        "deleted_directory_states": deleted_dir_state_count,
+        "pruned_dirs": pruned_dir_count,
+    }
 
 
 @router.get("")
@@ -209,6 +591,7 @@ def stats(db: Session = Depends(get_db)):
 def list_media_by_target_dir(
     target_dir: str = Query(..., min_length=1),
     limit: int = Query(200, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     target_dir = target_dir.strip()
@@ -219,13 +602,13 @@ def list_media_by_target_dir(
     q = (
         db.query(MediaRecord)
         .filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
-        .filter(_video_only_expr())
         .filter(_target_dir_like_expr(normalized))
         .order_by(MediaRecord.updated_at.desc())
-        .limit(limit)
     )
-    items = [_media_to_dict(x) for x in q.all()]
-    return {"items": items, "target_dir": target_dir, "total": len(items)}
+    total = q.count()
+    rows = q.offset(offset).limit(limit).all()
+    items = [_media_to_dict(x) for x in rows]
+    return {"items": items, "target_dir": target_dir, "total": total, "offset": offset, "limit": limit}
 
 
 def _video_only_expr():
@@ -518,21 +901,19 @@ def batch_delete(data: BatchDeleteRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="ids 不能为空")
 
     rows = db.query(MediaRecord).filter(MediaRecord.id.in_(ids)).all()
-    deleted_files = 0
+    if not rows:
+        return {
+            "deleted_records": 0,
+            "deleted_files": 0,
+            "deleted_inodes": 0,
+            "deleted_directory_states": 0,
+            "pruned_dirs": 0,
+        }
 
-    for row in rows:
-        if data.delete_files and row.target_path:
-            p = Path(row.target_path)
-            try:
-                if p.exists() and p.is_file():
-                    p.unlink()
-                    deleted_files += 1
-            except OSError:
-                pass
-        db.delete(row)
+    if data.delete_resource_scope:
+        rows = _expand_rows_to_resource_scope(db, rows)
 
-    db.commit()
-    return {"deleted_records": len(rows), "deleted_files": deleted_files}
+    return _execute_batch_delete(db, rows, delete_files=bool(data.delete_files))
 
 
 @router.delete("/all")

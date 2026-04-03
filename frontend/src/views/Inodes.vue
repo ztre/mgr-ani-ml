@@ -492,18 +492,38 @@ async function deleteInode(row) {
   }
 }
 
+async function fetchAllInodes(params) {
+  const limit = 2000
+  let skip = 0
+  let total = 0
+  const items = []
+
+  do {
+    const { data } = await inodesApi.list({
+      ...params,
+      skip,
+      limit,
+    })
+    const pageItems = data?.items || []
+    total = Number(data?.total || 0)
+    items.push(...pageItems)
+    skip += pageItems.length
+    if (!pageItems.length) break
+  } while (skip < total)
+
+  return items
+}
+
 async function loadInodes() {
   loading.value = true
   try {
-    const { data } = await inodesApi.list({
-      skip: 0,
-      limit: 2000,
+    const items = await fetchAllInodes({
       search: searchQuery.value || undefined,
       sync_group_id: syncGroupId.value ?? undefined,
       has_target: typeof hasTarget.value === 'boolean' ? hasTarget.value : undefined,
     })
 
-    rawInodes.value = (data.items || [])
+    rawInodes.value = items
       .filter((x) => String(x?.target_path || '').trim())
       .map((x) => ({ ...x, __group_key: toGroupKey(x) }))
 

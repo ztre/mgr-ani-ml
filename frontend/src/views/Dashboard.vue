@@ -214,7 +214,7 @@
         </div>
         <el-button size="small" @click="manualRefreshLogs">手动刷新</el-button>
       </div>
-      <div v-loading="logsLoading" class="log-container" style="height: 750px; display: flex; flex-direction: column;">
+      <div v-loading="logsLoading" class="log-container" style="height: 600px; display: flex; flex-direction: column;">
         <pre v-if="currentLogs.length">{{ [...currentLogs].reverse().join('\n') }}</pre>
         <div v-else class="empty-logs">暂无日志</div>
       </div>

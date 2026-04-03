@@ -898,10 +898,15 @@ def _process_sync_group(
             if d.name == target_dir_path.name:
                 filtered_dirs.append(d)
         media_dirs = filtered_dirs
+
+    blocked_dirs: set[Path] = _load_existing_recorded_dirs(db, group.id, source)
+    media_dirs = [d for d in media_dirs if not _is_under_pending_dir(d, blocked_dirs)]
+
     append_log(f"找到 {len(media_dirs)} 个待处理目录")
     first_dir_name = _extract_first_dir_name(media_dirs, source)
 
     task_id = current_task_id.get()
+    enqueued_count = 0
     for media_dir in media_dirs:
         if is_scan_cancel_requested(task_id):
             _log_cancel_phase("enqueue", f"stop_before_dir={media_dir}")
@@ -918,8 +923,9 @@ def _process_sync_group(
             task_id=task_id,
         )
         MEDIA_TASK_QUEUE.put(task)
+        enqueued_count += 1
 
-    append_log(f"INFO: 已入队任务: {len(media_dirs)}")
+    append_log(f"INFO: 已入队任务: {enqueued_count}")
     return first_dir_name, False
 
 
@@ -942,7 +948,6 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
 
     blocked_dirs: set[Path] = _load_existing_recorded_dirs(db, group.id, source)
     if _is_under_pending_dir(media_dir, blocked_dirs):
-        append_log(f"INFO: 跳过已在媒体记录/待办中的目录: {media_dir}")
         return False
 
     signature = _build_dir_signature(media_dir, source, include, exclude)
@@ -2493,6 +2498,63 @@ def _load_existing_recorded_dirs(db: Session, sync_group_id: int, source_root: P
     return out
 
 
+def _path_is_within_scope(path_value: str | None, scope: Path) -> bool:
+    if not path_value:
+        return False
+    scope_norm = _normalize_path(scope)
+    path_norm = _normalize_path(Path(path_value))
+    return path_norm == scope_norm or path_norm.startswith(scope_norm + "/")
+
+
+def _cleanup_directory_records(db: Session, sync_group_id: int, scope: Path) -> tuple[int, int]:
+    deleted_media = 0
+    deleted_inodes = 0
+
+    for obj in list(db.new):
+        if isinstance(obj, MediaRecord) and obj.sync_group_id == sync_group_id and _path_is_within_scope(obj.original_path, scope):
+            db.expunge(obj)
+            deleted_media += 1
+        elif isinstance(obj, InodeRecord) and obj.sync_group_id == sync_group_id and _path_is_within_scope(obj.source_path, scope):
+            db.expunge(obj)
+            deleted_inodes += 1
+
+    media_rows = db.query(MediaRecord).filter(MediaRecord.sync_group_id == sync_group_id).all()
+    for row in media_rows:
+        if not _path_is_within_scope(row.original_path, scope):
+            continue
+        db.delete(row)
+        deleted_media += 1
+
+    inode_rows = db.query(InodeRecord).filter(InodeRecord.sync_group_id == sync_group_id).all()
+    for row in inode_rows:
+        if not _path_is_within_scope(row.source_path, scope):
+            continue
+        db.delete(row)
+        deleted_inodes += 1
+
+    return deleted_media, deleted_inodes
+
+
+def _has_media_records_for_directory(db: Session, sync_group_id: int, media_dir: Path) -> bool:
+    dir_norm = _normalize_path(media_dir)
+    rows = (
+        db.query(MediaRecord.original_path, MediaRecord.status)
+        .filter(MediaRecord.sync_group_id == sync_group_id)
+        .all()
+    )
+    for original_path, status in rows:
+        if not original_path:
+            continue
+        path = Path(original_path)
+        if status == "pending_manual":
+            candidate = path
+        else:
+            candidate = path if path.suffix == "" else path.parent
+        if _normalize_path(candidate) == dir_norm:
+            return True
+    return False
+
+
 def _mark_dir_pending(
     db: Session,
     src_path: Path,
@@ -2552,6 +2614,9 @@ def _finalize_dir_to_pending(
 ) -> None:
     if op_log is not None:
         _rollback_operations(op_log)
+    cleanup_scope = media_dir if media_dir.is_dir() else media_dir.parent
+    pending_scope = _resolve_manual_scope(media_dir, source_root)
+    deleted_media, deleted_inodes = _cleanup_directory_records(db, sync_group_id, cleanup_scope)
     pending_dir = _mark_dir_pending(
         db,
         media_dir,
@@ -2563,6 +2628,10 @@ def _finalize_dir_to_pending(
         emit_jsonl=emit_jsonl,
     )
     _upsert_dir_state(db, sync_group_id, media_dir, signature, state, reason)
+    if deleted_media or deleted_inodes:
+        append_log(
+            f"INFO: 目录级数据库回滚: media_records={deleted_media}, inode_records={deleted_inodes} ({pending_dir})"
+        )
     append_log(f"WARNING: 目录处理失败并转待办: {pending_dir} | 原因: {reason}")
 
 
@@ -2616,7 +2685,11 @@ def _can_skip_dir_by_signature(db: Session, sync_group_id: int, media_dir: Path,
     ).first()
     if not state:
         return False
-    return state.status == "SUCCESS" and state.signature == signature
+    return (
+        state.status == "SUCCESS"
+        and state.signature == signature
+        and _has_media_records_for_directory(db, sync_group_id, media_dir)
+    )
 
 
 def _upsert_dir_state(
