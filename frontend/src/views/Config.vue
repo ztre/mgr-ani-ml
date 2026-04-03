@@ -113,6 +113,22 @@
           <el-input v-model="form.review_jsonl_path" placeholder="/app/pending/review.jsonl" />
         </el-form-item>
 
+        <el-divider content-position="left">低置信度识别兜底</el-divider>
+        <div class="section-desc section-gap">
+          仅在 TV 或 Movie 目录识别已进入低置信度失败路径时，额外调用 AniList 获取英文名，再用英文名重试一次 TMDB。正常成功路径不受影响。
+        </div>
+        <el-form-item label="启用 AniList 兜底">
+          <el-switch v-model="form.anilist_fallback_enabled" />
+        </el-form-item>
+        <el-form-item label="AniList 超时(秒)">
+          <el-input-number
+            v-model="form.anilist_fallback_timeout_seconds"
+            :min="1"
+            :max="30"
+            :step="1"
+          />
+        </el-form-item>
+
         <el-divider content-position="left">AI 识别（实验性）</el-divider>
         <div class="section-desc section-gap">
           启用后，识别成功的 TV 目录将额外调用 AI 对集号映射进行校正，仅覆盖普通剧集（不影响特典/花絮），失败时自动回退原有结果。
@@ -249,6 +265,8 @@ const form = ref({
   pending_jsonl_path: '/app/pending/pending.jsonl',
   unprocessed_items_jsonl_path: '/app/pending/unprocessed_items.jsonl',
   review_jsonl_path: '/app/pending/review.jsonl',
+  anilist_fallback_enabled: true,
+  anilist_fallback_timeout_seconds: 8,
   // AI 识别
   ai_enabled: false,
   ai_provider: 'openai',

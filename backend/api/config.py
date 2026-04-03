@@ -29,6 +29,8 @@ class ConfigResponse(BaseModel):
     pending_jsonl_path: str
     unprocessed_items_jsonl_path: str
     review_jsonl_path: str
+    anilist_fallback_enabled: bool
+    anilist_fallback_timeout_seconds: float
     # AI 识别外挂功能
     ai_enabled: bool
     ai_provider: str
@@ -58,6 +60,8 @@ class ConfigUpdate(BaseModel):
     pending_jsonl_path: str | None = None
     unprocessed_items_jsonl_path: str | None = None
     review_jsonl_path: str | None = None
+    anilist_fallback_enabled: bool | None = None
+    anilist_fallback_timeout_seconds: float | None = None
     # AI 识别外挂功能
     ai_enabled: bool | None = None
     ai_provider: str | None = None
@@ -102,6 +106,8 @@ def get_config():
         pending_jsonl_path=str(settings.pending_jsonl_path or ""),
         unprocessed_items_jsonl_path=str(settings.unprocessed_items_jsonl_path or ""),
         review_jsonl_path=str(settings.review_jsonl_path or ""),
+        anilist_fallback_enabled=bool(settings.anilist_fallback_enabled),
+        anilist_fallback_timeout_seconds=float(settings.anilist_fallback_timeout_seconds or 8.0),
         ai_enabled=bool(settings.ai_enabled),
         ai_provider=str(settings.ai_provider or "openai"),
         ai_api_key=str(settings.ai_api_key or ""),
@@ -150,6 +156,10 @@ def update_config(data: ConfigUpdate):
         settings.unhandled_jsonl_path = settings.unprocessed_items_jsonl_path
     if data.review_jsonl_path is not None:
         settings.review_jsonl_path = data.review_jsonl_path.strip()
+    if data.anilist_fallback_enabled is not None:
+        settings.anilist_fallback_enabled = data.anilist_fallback_enabled
+    if data.anilist_fallback_timeout_seconds is not None:
+        settings.anilist_fallback_timeout_seconds = max(1.0, float(data.anilist_fallback_timeout_seconds))
     # AI 识别外挂功能
     if data.ai_enabled is not None:
         settings.ai_enabled = data.ai_enabled
