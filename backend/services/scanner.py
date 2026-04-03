@@ -2044,8 +2044,11 @@ def _register_video_anchor(
     special_by_raw_multi = dir_runtime.setdefault("special_targets_by_raw_label_multi", {})
     special_by_fine = dir_runtime.setdefault("special_target_by_fine_label", {})
     parent_key = str(src_path.parent)
-    by_parent[parent_key] = dst_path
-    by_parent_recent[parent_key] = dst_path
+    if not parse_result.extra_category:
+        # mainline weak fallback 只能指向主视频；extra/special 不应覆盖它，
+        # 否则主视频缺失时，普通字幕/音轨会被 recent 锚点误绑到最后一个 Trailer/PV。
+        by_parent[parent_key] = dst_path
+        by_parent_recent[parent_key] = dst_path
     special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
     if special_key is not None:
         bucket = by_parent_special.setdefault(special_key, [])

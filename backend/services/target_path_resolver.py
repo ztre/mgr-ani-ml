@@ -8,7 +8,7 @@ from pathlib import Path
 from ..api.logs import append_log
 from .linker import is_same_inode
 from .media_content_types import EXTRA_CATEGORIES, SPECIAL_CATEGORIES
-from .parser import ParseResult
+from .parser import ParseResult, extract_strong_extra_fallback_label
 from .renamer import compute_movie_target_path, compute_tv_target_path
 
 SPECIAL_ANCHOR_CATEGORIES = {
@@ -1030,6 +1030,9 @@ def _build_readable_suffix(src_path: Path, parse_result: ParseResult) -> str:
     cleaned_all = _normalize_suffix_text(raw)
     if cleaned_all and not re.fullmatch(r"\d+", cleaned_all) and not _is_release_group_phrase(cleaned_all):
         return cleaned_all[:28]
+    fallback_label = extract_strong_extra_fallback_label(src_path.name)
+    if fallback_label and not _is_release_group_phrase(fallback_label):
+        return fallback_label[:28]
     return f"h{hashlib.md5(str(src_path).encode('utf-8')).hexdigest()[:6]}"
 
 
