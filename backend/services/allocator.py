@@ -22,32 +22,32 @@ def scan_existing_special_indices(target_root: Path, tmdbid: int | None) -> dict
     show_dirs = [p for p in target_root.iterdir() if p.is_dir() and f"[tmdbid={tmdbid}]" in p.name]
     if not show_dirs:
         return {}
-    show_dir = show_dirs[0]
 
     # 仅扫描已落地的目标目录，构建 (tmdbid, season_key, prefix) -> max_index
     cache: dict[tuple[int | None, int | None, str], int] = {}
-    for path in show_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        name = path.name
-        m = INDEX_PATTERN.search(name)
-        if m:
-            season_key = int(m.group("season"))
-            prefix = str(m.group("prefix")).upper()
-            index = int(m.group("index"))
-            key = (tmdbid, season_key, prefix)
-            cache[key] = max(cache.get(key, 0), index)
-            continue
+    for show_dir in show_dirs:
+        for path in show_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            name = path.name
+            m = INDEX_PATTERN.search(name)
+            if m:
+                season_key = int(m.group("season"))
+                prefix = str(m.group("prefix")).upper()
+                index = int(m.group("index"))
+                key = (tmdbid, season_key, prefix)
+                cache[key] = max(cache.get(key, 0), index)
+                continue
 
-        m_se = SEASON00_PATTERN.search(name)
-        m_label = LABEL_PATTERN.search(name)
-        if m_se and m_label:
-            episode = int(m_se.group("episode"))
-            season_key = episode // 100 if episode >= 100 else None
-            prefix = m_label.group(1).upper()
-            index = int(m_label.group(2))
-            key = (tmdbid, season_key, prefix)
-            cache[key] = max(cache.get(key, 0), index)
+            m_se = SEASON00_PATTERN.search(name)
+            m_label = LABEL_PATTERN.search(name)
+            if m_se and m_label:
+                episode = int(m_se.group("episode"))
+                season_key = episode // 100 if episode >= 100 else None
+                prefix = m_label.group(1).upper()
+                index = int(m_label.group(2))
+                key = (tmdbid, season_key, prefix)
+                cache[key] = max(cache.get(key, 0), index)
 
     return cache
 

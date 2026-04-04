@@ -159,6 +159,7 @@ def resolve_attachment_follow_target_details(
         return None
 
     def _lookup_special_anchor(layer_prefix: str) -> AttachmentAnchorResult | None:
+        prefix_ambiguous = False
         if parse_result.extra_category in SPECIAL_CATEGORIES:
             prefix = _special_label_prefix(parse_result.extra_category, parse_result.extra_label)
             if prefix:
@@ -167,7 +168,7 @@ def resolve_attachment_follow_target_details(
                     "__missing__",
                 )
                 if prefix_value is None:
-                    return _result(None, f"{layer_prefix}:prefix-ambiguous")
+                    prefix_ambiguous = True
                 if prefix_value != "__missing__":
                     return _result(prefix_value, f"{layer_prefix}:prefix")
         special_token = _special_anchor_token(parse_result, src_path, original_label=parse_result.extra_label)
@@ -193,6 +194,8 @@ def resolve_attachment_follow_target_details(
             if len(candidates) > 1:
                 append_log(f"WARNING: 特典附件锚点冲突: {src_path.name} -> {len(candidates)} 个候选")
                 return _result(None, f"{layer_prefix}:ambiguous")
+        if prefix_ambiguous:
+            return _result(None, f"{layer_prefix}:prefix-ambiguous")
         return None
 
     def _lookup_episode_anchor(layer_prefix: str) -> AttachmentAnchorResult | None:
@@ -785,7 +788,7 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
     if scene:
         parts.append(re.sub(r"\s+", " ", scene).strip())
     ep = _extract_episode_from_filename_loose(src_path.name)
-    if ep is not None:
+    if ep is not None and (parse_result.episode is None or int(ep) == int(parse_result.episode)):
         parts.append(f"E{int(ep):02d}")
     for tag in _extract_distinguish_source_tags(src_path.stem):
         parts.append(tag)

@@ -22,13 +22,14 @@ from ..database import get_db
 from ..models import DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
 from ..services.group_routing import resolve_movie_target_root
 from ..services.linker import get_inode
-from ..services.parser import parse_movie_filename, parse_tv_filename
+from ..services.parser import classify_extra_from_text, parse_movie_filename, parse_tv_filename
 from ..services.resource_tree import build_resource_summaries, build_resource_tree
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
 from ..services.scanner import (
     _collect_media_files_under_dir,
     DirectoryProcessError,
     TaskCancelledError,
+    detect_special_dir_context,
     init_scan_cancel_flag,
     pop_scan_cancel_flag,
     reidentify_by_target_dir,
@@ -39,6 +40,7 @@ from ..services.scanner import (
 router = APIRouter()
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
 ATTACHMENT_EXTS = (".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub")
+PRUNABLE_METADATA_FILENAMES = {"tvshow.nfo", "movie.nfo", "poster.jpg", "fanart.jpg"}
 
 
 class PendingOrganizeRequest(BaseModel):
@@ -87,6 +89,7 @@ class ReidentifyDirRequest(BaseModel):
     title: str | None = None
     year: int | None = None
     season: int | None = None
+    season_override: int | None = None
     episode_offset: int | None = None
 
 
@@ -104,6 +107,7 @@ class ReidentifyScopeRequest(BaseModel):
     tmdb_id: int
     title: str | None = None
     year: int | None = None
+    season_override: int | None = None
     episode_offset: int | None = None
 
 
@@ -135,6 +139,20 @@ class _StagedDeleteResult:
     deleted_directory_states: int
     deleted_files: int
     pruned_dirs: int
+    pruned_metadata_files: int
+
+
+@dataclass(frozen=True)
+class _PruneBlockedDir:
+    path: Path
+    reason: str
+
+
+@dataclass
+class _ReidentifyPruneReport:
+    pruned_dirs: list[Path]
+    blocked_dirs: list[_PruneBlockedDir]
+    deleted_metadata_files: list[Path]
 
 
 def _normalize_existing_dir(path: Path | None) -> Path | None:
@@ -336,6 +354,66 @@ def _prune_empty_dirs(start_dir: Path, stop_at: Path | None) -> list[Path]:
     return removed
 
 
+def _prune_empty_dirs_with_metadata(start_dir: Path, stop_at: Path | None) -> tuple[list[Path], list[Path]]:
+    removed_dirs = _prune_empty_dirs(start_dir, stop_at)
+    removed_metadata_files: list[Path] = []
+    current = _normalize_existing_dir(removed_dirs[-1].parent if removed_dirs else start_dir)
+    stop_dir = _normalize_existing_dir(stop_at)
+    while current is not None:
+        if stop_dir is not None and current == stop_dir:
+            break
+        parent = current.parent
+        try:
+            current.rmdir()
+            removed_dirs.append(current)
+        except OSError:
+            removed_metadata = _remove_prunable_metadata_files(current)
+            if not removed_metadata:
+                break
+            removed_metadata_files.extend(removed_metadata)
+            try:
+                current.rmdir()
+                removed_dirs.append(current)
+            except OSError:
+                break
+        if parent == current:
+            break
+        current = parent
+    return removed_dirs, removed_metadata_files
+
+
+def _remove_prunable_metadata_files(dir_path: Path) -> list[Path]:
+    try:
+        entries = list(dir_path.iterdir())
+    except OSError:
+        return []
+
+    if not entries:
+        return []
+
+    removable_files: list[Path] = []
+    for entry in entries:
+        try:
+            if entry.is_dir():
+                return []
+            if not entry.is_file():
+                return []
+        except OSError:
+            return []
+        if entry.name.lower() not in PRUNABLE_METADATA_FILENAMES:
+            return []
+        removable_files.append(entry)
+
+    removed: list[Path] = []
+    for file_path in removable_files:
+        try:
+            file_path.unlink()
+            removed.append(file_path)
+        except OSError:
+            return removed
+    return removed
+
+
 def _restore_deleted_links(deleted_links: list[_DeletedLinkRecord]) -> None:
     restore_errors: list[str] = []
     for item in deleted_links:
@@ -448,6 +526,7 @@ def _stage_batch_delete(
     deleted_links: list[_DeletedLinkRecord] = []
     pruned_dir_count = 0
     deleted_files = 0
+    pruned_metadata_files = 0
 
     target_roots: dict[tuple[int | None, str], Path | None] = {}
     for row in rows:
@@ -475,7 +554,9 @@ def _stage_batch_delete(
             deleted_links.append(_DeletedLinkRecord(source_path=Path(row.original_path), target_path=target_path))
             deleted_files += 1
             stop_at = target_roots.get((row.sync_group_id, row.type))
-            pruned_dir_count += len(_prune_empty_dirs(target_path.parent, stop_at))
+            removed_dirs, removed_metadata = _prune_empty_dirs_with_metadata(target_path.parent, stop_at)
+            pruned_dir_count += len(removed_dirs)
+            pruned_metadata_files += len(removed_metadata)
     except OSError as exc:
         db.rollback()
         try:
@@ -503,6 +584,7 @@ def _stage_batch_delete(
         deleted_directory_states=deleted_dir_state_count,
         deleted_files=deleted_files,
         pruned_dirs=pruned_dir_count,
+        pruned_metadata_files=pruned_metadata_files,
     )
 
 
@@ -535,9 +617,64 @@ def _execute_batch_delete(
         "deleted_inodes": staged.deleted_inodes,
         "deleted_directory_states": staged.deleted_directory_states,
         "pruned_dirs": staged.pruned_dirs,
+        "pruned_metadata_files": staged.pruned_metadata_files,
         "pending_logs_removed": int(log_cleanup.get("pending_logs_removed") or 0),
         "unprocessed_logs_removed": int(log_cleanup.get("unprocessed_logs_removed") or 0),
     }
+
+
+def _prune_reidentify_old_target_dirs(db: Session, rows: list[MediaRecord]) -> _ReidentifyPruneReport:
+    pruned_dirs: set[Path] = set()
+    blocked_dirs: list[_PruneBlockedDir] = []
+    deleted_metadata_files: list[Path] = []
+    candidate_dirs: set[Path] = set()
+    target_roots: dict[tuple[int | None, str], Path | None] = {}
+
+    for row in rows:
+        target_value = str(getattr(row, "target_path", "") or "").strip()
+        if not target_value:
+            continue
+        key = (getattr(row, "sync_group_id", None), getattr(row, "type", ""))
+        if key not in target_roots:
+            target_roots[key] = _group_target_root(db, key[0], key[1])
+
+        target_path = Path(target_value)
+        current = _normalize_existing_dir(target_path.parent)
+        stop_dir = _normalize_existing_dir(target_roots.get(key))
+        while current is not None:
+            if stop_dir is not None and current == stop_dir:
+                break
+            candidate_dirs.add(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
+    for current in sorted(candidate_dirs, key=lambda value: len(value.parts), reverse=True):
+        try:
+            current.rmdir()
+            pruned_dirs.add(current)
+        except OSError as exc:
+            removed_metadata = _remove_prunable_metadata_files(current)
+            if removed_metadata:
+                deleted_metadata_files.extend(removed_metadata)
+                try:
+                    current.rmdir()
+                    pruned_dirs.add(current)
+                    continue
+                except OSError as retry_exc:
+                    exc = retry_exc
+            if any(blocked.path.is_relative_to(current) for blocked in blocked_dirs):
+                continue
+            reason = str(exc.strerror or exc).strip() or type(exc).__name__
+            blocked_dirs.append(_PruneBlockedDir(path=current, reason=reason))
+            continue
+
+    return _ReidentifyPruneReport(
+        pruned_dirs=sorted(pruned_dirs, key=lambda value: (len(value.parts), str(value))),
+        blocked_dirs=blocked_dirs,
+        deleted_metadata_files=deleted_metadata_files,
+    )
 
 
 def _resolve_reidentify_group(rows: list[MediaRecord], db: Session) -> tuple[SyncGroup, str]:
@@ -651,10 +788,12 @@ def _run_reidentify_scope(
     tmdb_id: int,
     title: str | None,
     year: int | None,
-    season: int | None,
+    season: int | None = None,
+    season_override: int | None = None,
     episode_offset: int | None,
 ) -> dict[str, int | bool | str]:
     staged = _stage_batch_delete(db, rows, delete_files=True)
+    effective_season_override = season_override if season_override is not None else season
     try:
         processed, failed, has_issues = reidentify_by_target_dir(
             db=db,
@@ -663,7 +802,7 @@ def _run_reidentify_scope(
             tmdb_id=tmdb_id,
             title_override=title,
             year_override=year,
-            season_override=season,
+            season_override=effective_season_override,
             episode_offset=episode_offset,
             records=rows,
         )
@@ -688,6 +827,24 @@ def _run_reidentify_scope(
             ) from restore_exc
         raise HTTPException(status_code=500, detail=f"修正失败: {exc}") from exc
 
+    prune_report = _prune_reidentify_old_target_dirs(db, rows)
+    extra_pruned_dirs = len(prune_report.pruned_dirs)
+    total_pruned_metadata_files = staged.pruned_metadata_files + len(prune_report.deleted_metadata_files)
+    if extra_pruned_dirs:
+        append_log(f"INFO: 修正后旧目标空目录补清理: {extra_pruned_dirs} 个")
+    if total_pruned_metadata_files:
+        append_log(f"INFO: 修正后旧目标元数据补清理: {total_pruned_metadata_files} 个文件")
+    if prune_report.blocked_dirs:
+        blocked_preview = "; ".join(
+            f"{item.path} ({item.reason})" for item in prune_report.blocked_dirs[:3]
+        )
+        if len(prune_report.blocked_dirs) > 3:
+            blocked_preview += f"; 其余 {len(prune_report.blocked_dirs) - 3} 个已省略"
+        append_log(
+            "WARNING: 修正后旧目标目录未完全删除: "
+            f"{len(prune_report.blocked_dirs)} 个目录仍保留 -> {blocked_preview}"
+        )
+
     log_cleanup = _cleanup_nonreview_pending_logs(rows)
     return {
         "processed": processed,
@@ -697,7 +854,8 @@ def _run_reidentify_scope(
         "deleted_files": staged.deleted_files,
         "deleted_inodes": staged.deleted_inodes,
         "deleted_directory_states": staged.deleted_directory_states,
-        "pruned_dirs": staged.pruned_dirs,
+        "pruned_dirs": staged.pruned_dirs + extra_pruned_dirs,
+        "pruned_metadata_files": total_pruned_metadata_files,
         "pending_logs_removed": int(log_cleanup.get("pending_logs_removed") or 0),
         "unprocessed_logs_removed": int(log_cleanup.get("unprocessed_logs_removed") or 0),
     }
@@ -729,7 +887,7 @@ def _run_single_reidentify(
     if data.episode is not None:
         pr = pr._replace(episode=max(0, data.episode))
     if data.episode_offset is not None and media_type == "tv" and pr.episode is not None and pr.extra_category is None:
-        adjusted = pr.episode - int(data.episode_offset)
+        adjusted = pr.episode + int(data.episode_offset)
         pr = pr._replace(episode=max(1, adjusted))
 
     target_root = Path(group.target)
@@ -868,7 +1026,23 @@ def _pending_file_type(path: Path) -> str:
     return "attachment" if path.suffix.lower() in ATTACHMENT_EXTS else "video"
 
 
-def _build_pending_file_items(root_dir: Path, *, include: str, exclude: str, source_root: Path) -> list[dict]:
+def _pending_video_role(path: Path, media_type: str | None) -> str:
+    if path.suffix.lower() in ATTACHMENT_EXTS:
+        return "attachment"
+    if detect_special_dir_context(path)[0]:
+        return "special"
+    if classify_extra_from_text(path.name)[0]:
+        return "special"
+
+    parsed = parse_tv_filename(str(path)) if media_type == "tv" else parse_movie_filename(str(path))
+    if parsed is None:
+        return "mainline"
+    if getattr(parsed, "extra_category", None) is not None or getattr(parsed, "is_special", False):
+        return "special"
+    return "mainline"
+
+
+def _build_pending_file_items(root_dir: Path, *, include: str, exclude: str, source_root: Path, media_type: str | None = None) -> list[dict]:
     files = _collect_media_files_under_dir(root_dir, include, exclude, source_root)
     items: list[dict] = []
     for file_path in sorted(files, key=lambda value: value.as_posix()):
@@ -889,6 +1063,7 @@ def _build_pending_file_items(root_dir: Path, *, include: str, exclude: str, sou
                 "name": file_path.name,
                 "size": int(file_path.stat().st_size) if _safe_is_file(file_path) else 0,
                 "file_type": _pending_file_type(file_path),
+                "content_role": _pending_video_role(file_path, media_type),
                 "absolute_path": str(file_path),
             }
         )
@@ -917,6 +1092,7 @@ def list_pending_files(media_id: int, db: Session = Depends(get_db)):
         include=group.include or "",
         exclude=group.exclude or "",
         source_root=source_root,
+        media_type=pending.type,
     )
     return {
         "pending": _media_to_dict(pending),
@@ -1228,7 +1404,8 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
         target_name=src.name,
         start_message=(
             f"单文件修正任务启动: media_id={media_id}, group={group.name}, "
-            f"file={src.name}, media_type={data.media_type or row.type}, tmdb_id={data.tmdb_id}"
+            f"file={src.name}, media_type={data.media_type or row.type}, tmdb_id={data.tmdb_id}, "
+            f"episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: f"单文件修正任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
         runner=lambda: _run_single_reidentify(db=db, row=row, group=group, data=data),
@@ -1338,7 +1515,7 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
         target_name=Path(normalized).name or normalized,
         start_message=(
             f"整组修正任务启动: group={group.name}, target_dir={normalized}, "
-            f"media_type={media_type}, tmdb_id={data.tmdb_id}"
+            f"media_type={media_type}, tmdb_id={data.tmdb_id}, episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: (
             f"整组修正任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}"
@@ -1359,7 +1536,7 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
                     tmdb_id=data.tmdb_id,
                     title=data.title,
                     year=data.year,
-                    season=data.season,
+                    season_override=(data.season_override if data.season_override is not None else data.season),
                     episode_offset=data.episode_offset,
                 )
             )
@@ -1392,7 +1569,8 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
         target_name=(data.group_label or Path(data.resource_dir).name or data.resource_dir),
         start_message=(
             f"{label}任务启动: group={group.name}, scope={data.scope_level}, "
-            f"target={data.group_label or data.resource_dir}, media_type={media_type}, tmdb_id={data.tmdb_id}"
+            f"target={data.group_label or data.resource_dir}, media_type={media_type}, tmdb_id={data.tmdb_id}, "
+            f"episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: f"{label}任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
         runner=lambda: {
@@ -1411,7 +1589,7 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
                     tmdb_id=data.tmdb_id,
                     title=data.title,
                     year=data.year,
-                    season=data.season,
+                    season_override=data.season_override,
                     episode_offset=data.episode_offset,
                 )
             )
@@ -1433,6 +1611,7 @@ def batch_delete(data: BatchDeleteRequest, db: Session = Depends(get_db)):
             "deleted_inodes": 0,
             "deleted_directory_states": 0,
             "pruned_dirs": 0,
+            "pruned_metadata_files": 0,
         }
 
     if data.delete_resource_scope:
@@ -1451,6 +1630,7 @@ def delete_media_scope(data: DeleteScopeRequest, db: Session = Depends(get_db)):
             "deleted_inodes": 0,
             "deleted_directory_states": 0,
             "pruned_dirs": 0,
+            "pruned_metadata_files": 0,
         }
     return _execute_batch_delete(db, rows, delete_files=bool(data.delete_files))
 

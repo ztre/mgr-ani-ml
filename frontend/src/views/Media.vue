@@ -95,7 +95,14 @@
       </div>
     </el-card>
 
-    <el-drawer v-model="drawerVisible" direction="rtl" size="64%" :title="drawerTitle" destroy-on-close>
+    <el-drawer
+      v-model="drawerVisible"
+      direction="rtl"
+      size="64%"
+      :title="drawerTitle"
+      destroy-on-close
+      :before-close="handleOverlayBeforeClose"
+    >
       <div class="drawer-header-sticky">
         <div class="drawer-path">{{ drawerResource?.resource_dir || '-' }}</div>
         <div class="drawer-toolbar">
@@ -275,6 +282,46 @@
       </template>
     </el-drawer>
 
+    <el-drawer
+      v-model="fixMonitorVisible"
+      direction="rtl"
+      size="46%"
+      title="修正任务日志"
+      append-to-body
+      destroy-on-close
+      class="fix-monitor-drawer"
+      :before-close="handleOverlayBeforeClose"
+    >
+      <div class="logs-drawer-body">
+        <div class="log-toolbar">
+          <div class="log-toolbar-left">
+            <el-tag size="small" :type="taskStatusTagType(fixMonitorTaskStatus)">{{ taskStatusText(fixMonitorTaskStatus) }}</el-tag>
+            <span class="log-meta" v-if="fixMonitorTaskId">任务 #{{ fixMonitorTaskId }}</span>
+            <span class="log-meta" v-if="fixMonitorTargetLabel">{{ fixMonitorTargetLabel }}</span>
+            <span class="log-meta" v-if="fixMonitorLastRefreshedAt">上次刷新 {{ fixMonitorLastRefreshedAt }}</span>
+          </div>
+          <div class="log-toolbar-right">
+            <el-switch
+              v-model="fixMonitorAutoRefresh"
+              active-text="实时刷新"
+              inactive-text="暂停刷新"
+              @change="onFixMonitorAutoRefreshChange"
+            />
+            <el-button size="small" :disabled="!fixMonitorTaskId" @click="manualRefreshFixMonitor">手动刷新</el-button>
+          </div>
+        </div>
+        <div class="log-monitor-summary">
+          <span v-if="fixMonitorWaitingForTask" class="log-monitor-waiting">正在等待修正任务写入日志...</span>
+          <span v-else-if="isTerminalTaskStatus(fixMonitorTaskStatus)" class="log-monitor-finished">修正已结束，日志面板保持打开，关闭时会一并收起下层抽屉。</span>
+          <span v-else class="log-monitor-running">修正进行中，可实时查看日志进度。</span>
+        </div>
+        <div v-loading="fixMonitorLogsLoading" class="log-container">
+          <pre v-if="fixMonitorLogs.length">{{ [...fixMonitorLogs].reverse().join('\n') }}</pre>
+          <div v-else class="empty-logs">{{ fixMonitorWaitingForTask ? '等待任务启动...' : '暂无日志' }}</div>
+        </div>
+      </div>
+    </el-drawer>
+
     <teleport to="body">
       <transition
         :css="false"
@@ -327,7 +374,7 @@
           <el-input-number v-model="fixForm.episode" :min="0" />
         </el-form-item>
         <el-form-item v-if="fixForm.media_type === 'tv'" label="集号偏移">
-          <el-input-number v-model="fixForm.episode_offset" :min="0" />
+          <el-input-number v-model="fixForm.episode_offset" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -371,10 +418,10 @@
           <el-input-number v-model="dirFixForm.year" :min="1900" :max="2100" />
         </el-form-item>
         <el-form-item v-if="dirFixForm.media_type === 'tv'" label="强制季号">
-          <el-input-number v-model="dirFixForm.season" :min="0" :disabled="dirFixMode === 'season'" />
+          <el-input-number v-model="dirFixForm.season" :min="0" />
         </el-form-item>
         <el-form-item v-if="dirFixForm.media_type === 'tv'" label="集号偏移">
-          <el-input-number v-model="dirFixForm.episode_offset" :min="0" />
+          <el-input-number v-model="dirFixForm.episode_offset" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -461,11 +508,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Film, Monitor, Refresh, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { mediaApi } from '../api/client'
+import { mediaApi, tasksApi } from '../api/client'
 import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
 import { useResourcePoster } from '../utils/resourcePosterStore'
 
@@ -503,12 +550,24 @@ const dirFixing = ref(false)
 const dirFixMode = ref('resource')
 const dirFixScope = ref(null)
 const dirFixFormRef = ref(null)
-const dirFixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: 1, episode_offset: undefined })
+const dirFixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: undefined, episode_offset: undefined })
 const tmdbSearchDialogVisible = ref(false)
 const tmdbSearchLoading = ref(false)
 const tmdbSearchKeyword = ref('')
 const tmdbSearchResults = ref([])
 const tmdbSearchTarget = ref('fix')
+const fixMonitorVisible = ref(false)
+const fixMonitorLogsLoading = ref(false)
+const fixMonitorLogs = ref([])
+const fixMonitorTaskId = ref(null)
+const fixMonitorTaskStatus = ref('pending')
+const fixMonitorTargetLabel = ref('')
+const fixMonitorLastRefreshedAt = ref('')
+const fixMonitorWaitingForTask = ref(false)
+const fixMonitorAutoRefresh = ref(true)
+const fixMonitorRequestPending = ref(false)
+const fixMonitorMatchSpec = ref(null)
+let fixMonitorTimer = null
 
 function extractFilename(path) {
   return String(path || '').split(/[/\\]/).pop() || ''
@@ -546,10 +605,196 @@ function formatSize(size) {
   return `${next.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
+function clearFixMonitorTimer() {
+  if (fixMonitorTimer) {
+    clearInterval(fixMonitorTimer)
+    fixMonitorTimer = null
+  }
+}
+
+function resetFixMonitorState() {
+  clearFixMonitorTimer()
+  fixMonitorLogsLoading.value = false
+  fixMonitorLogs.value = []
+  fixMonitorTaskId.value = null
+  fixMonitorTaskStatus.value = 'pending'
+  fixMonitorTargetLabel.value = ''
+  fixMonitorLastRefreshedAt.value = ''
+  fixMonitorWaitingForTask.value = false
+  fixMonitorAutoRefresh.value = true
+  fixMonitorRequestPending.value = false
+  fixMonitorMatchSpec.value = null
+}
+
+function closeAllMediaOverlays() {
+  fixDialogVisible.value = false
+  dirFixDialogVisible.value = false
+  tmdbSearchDialogVisible.value = false
+  fixMonitorVisible.value = false
+  drawerVisible.value = false
+  resetFixMonitorState()
+}
+
+function handleOverlayBeforeClose(done) {
+  closeAllMediaOverlays()
+  done()
+}
+
+function isTerminalTaskStatus(status) {
+  return ['completed', 'failed', 'cancelled'].includes(String(status || ''))
+}
+
+function taskStatusText(status) {
+  const value = String(status || '')
+  if (value === 'running') return '运行中'
+  if (value === 'completed') return '已完成'
+  if (value === 'failed') return '失败'
+  if (value === 'cancelled') return '已取消'
+  if (value === 'cancelling') return '取消中'
+  return fixMonitorWaitingForTask.value ? '启动中' : '待确认'
+}
+
+function taskStatusTagType(status) {
+  const value = String(status || '')
+  if (value === 'running') return 'primary'
+  if (value === 'completed') return 'success'
+  if (value === 'failed') return 'danger'
+  if (value === 'cancelled') return 'info'
+  if (value === 'cancelling') return 'warning'
+  return 'warning'
+}
+
+function buildFixMonitorMatchSpec({ typePrefix, targetName, targetLabel }) {
+  return {
+    typePrefix,
+    targetName,
+    targetLabel,
+    startedAtMs: Date.now(),
+  }
+}
+
+function findMatchingFixMonitorTask(tasks) {
+  const spec = fixMonitorMatchSpec.value
+  if (!spec) return null
+  return (tasks || []).find((task) => {
+    const taskType = String(task?.type || '')
+    const taskTargetName = String(task?.target_name || '')
+    const createdAt = dayjs(task?.created_at).valueOf()
+    return taskType.startsWith(spec.typePrefix)
+      && taskTargetName === String(spec.targetName || '')
+      && Number.isFinite(createdAt)
+      && createdAt >= spec.startedAtMs - 5000
+  }) || null
+}
+
+async function fetchFixMonitorLogs(taskId, { silent = false } = {}) {
+  if (!taskId) return
+  if (!silent) {
+    fixMonitorLogsLoading.value = true
+  }
+  try {
+    const { data } = await tasksApi.getLogs(taskId)
+    fixMonitorLogs.value = data?.logs || []
+    fixMonitorLastRefreshedAt.value = dayjs().format('HH:mm:ss')
+  } catch {
+    if (!silent) {
+      fixMonitorLogs.value = ['加载日志失败']
+    }
+  } finally {
+    if (!silent) {
+      fixMonitorLogsLoading.value = false
+    }
+  }
+}
+
+async function refreshFixMonitorTask({ silent = false } = {}) {
+  if (!fixMonitorVisible.value) return
+  try {
+    const { data } = await tasksApi.list({ limit: 30, offset: 0 })
+    const tasks = data || []
+    if (!fixMonitorTaskId.value) {
+      const matched = findMatchingFixMonitorTask(tasks)
+      if (matched) {
+        fixMonitorTaskId.value = matched.id
+        fixMonitorTaskStatus.value = String(matched.status || 'running')
+        fixMonitorWaitingForTask.value = false
+        await fetchFixMonitorLogs(matched.id, { silent })
+        return
+      }
+      fixMonitorWaitingForTask.value = true
+      return
+    }
+
+    const matched = tasks.find((task) => Number(task?.id) === Number(fixMonitorTaskId.value))
+    if (matched) {
+      fixMonitorTaskStatus.value = String(matched.status || fixMonitorTaskStatus.value || 'running')
+    }
+  } catch {
+    if (!fixMonitorTaskId.value) {
+      fixMonitorWaitingForTask.value = true
+    }
+  }
+}
+
+function restartFixMonitorAutoRefresh() {
+  clearFixMonitorTimer()
+  if (!fixMonitorVisible.value || !fixMonitorAutoRefresh.value) return
+  fixMonitorTimer = setInterval(async () => {
+    await refreshFixMonitorTask({ silent: true })
+    if (fixMonitorTaskId.value) {
+      await fetchFixMonitorLogs(fixMonitorTaskId.value, { silent: true })
+    }
+    if (!fixMonitorRequestPending.value && isTerminalTaskStatus(fixMonitorTaskStatus.value)) {
+      clearFixMonitorTimer()
+    }
+  }, 2000)
+}
+
+function onFixMonitorAutoRefreshChange() {
+  restartFixMonitorAutoRefresh()
+}
+
+async function manualRefreshFixMonitor() {
+  await refreshFixMonitorTask()
+  if (fixMonitorTaskId.value) {
+    await fetchFixMonitorLogs(fixMonitorTaskId.value)
+  }
+}
+
+function openFixMonitor(spec) {
+  resetFixMonitorState()
+  fixMonitorMatchSpec.value = spec
+  fixMonitorTargetLabel.value = spec.targetLabel || spec.targetName || ''
+  fixMonitorVisible.value = true
+  fixMonitorWaitingForTask.value = true
+  fixMonitorRequestPending.value = true
+  restartFixMonitorAutoRefresh()
+}
+
+async function attachFixMonitorTask(taskId) {
+  if (!taskId) return
+  fixMonitorTaskId.value = Number(taskId)
+  fixMonitorWaitingForTask.value = false
+  await refreshFixMonitorTask({ silent: true })
+  await fetchFixMonitorLogs(fixMonitorTaskId.value)
+  restartFixMonitorAutoRefresh()
+}
+
 function posterUrl(posterPath) {
   if (!posterPath) return ''
   if (String(posterPath).startsWith('http')) return posterPath
   return `https://image.tmdb.org/t/p/w500${posterPath}`
+}
+
+function extractResourceTitleAndYear(resource) {
+  const rawName = String(resource?.resource_name || '').trim()
+  if (!rawName) {
+    return { title: '', year: undefined }
+  }
+  const match = rawName.match(/^(.*?)(?:\s*\((\d{4})\))?$/)
+  const title = String(match?.[1] || rawName).trim() || rawName
+  const year = match?.[2] ? Number(match[2]) : undefined
+  return { title, year }
 }
 
 function activeSearchMediaType() {
@@ -831,7 +1076,7 @@ async function onDeleteResourceCommand(row, command) {
     await mediaApi.batchDelete({ ids: [row.sample_id], delete_files: deleteFiles, delete_resource_scope: true })
     ElMessage.success('资源删除完成')
     if (drawerVisible.value && drawerResource.value?.key === row.key) {
-      drawerVisible.value = false
+      closeAllMediaOverlays()
     }
     await loadResources()
   } catch (error) {
@@ -851,7 +1096,7 @@ async function onDeleteDrawerResourceCommand(command) {
     await confirmScopeDelete(`删除资源 ${drawerResource.value.resource_name}`, scope, displayNodes.value.reduce((sum, node) => sum + node.visibleCount, 0), deleteFiles)
     await deleteMediaScope(scope, deleteFiles)
     ElMessage.success('资源删除完成')
-    drawerVisible.value = false
+    closeAllMediaOverlays()
     await loadResources()
   } catch (error) {
     if (error === 'cancel') return
@@ -939,6 +1184,13 @@ async function submitFix() {
     return
   }
   fixing.value = true
+  openFixMonitor(
+    buildFixMonitorMatchSpec({
+      typePrefix: 'reidentify:item:',
+      targetName: extractFilename(currentFixRow.value?.original_path),
+      targetLabel: `单文件修正 · ${extractFilename(currentFixRow.value?.original_path)}`,
+    }),
+  )
   try {
     const { data } = await mediaApi.reidentify(currentFixRow.value.id, {
       media_type: fixForm.media_type,
@@ -949,14 +1201,24 @@ async function submitFix() {
       episode: fixForm.media_type === 'tv' ? (fixForm.episode ?? undefined) : undefined,
       episode_offset: fixForm.media_type === 'tv' ? (fixForm.episode_offset ?? undefined) : undefined,
     })
-    const taskSuffix = data?.task_id ? `，任务 #${data.task_id} 日志可在首页查看` : ''
-    ElMessage.success((data?.message || '修正成功') + taskSuffix)
+    await attachFixMonitorTask(data?.task_id)
+    ElMessage.success(data?.message || '修正成功')
     fixDialogVisible.value = false
     await Promise.all([loadResources(), reloadDrawer()])
   } catch (error) {
+    await refreshFixMonitorTask()
+    if (fixMonitorTaskId.value) {
+      await fetchFixMonitorLogs(fixMonitorTaskId.value)
+    }
+    if (!fixMonitorTaskId.value) {
+      resetFixMonitorState()
+      fixMonitorVisible.value = false
+    }
     ElMessage.error(error?.response?.data?.detail || error?.message || '修正失败')
   } finally {
     fixing.value = false
+    fixMonitorRequestPending.value = false
+    restartFixMonitorAutoRefresh()
   }
 }
 
@@ -965,8 +1227,9 @@ function openDirFixDialog() {
   dirFixScope.value = drawerResource.value?.scope || null
   dirFixForm.media_type = drawerResource.value?.type === 'movie' ? 'movie' : 'tv'
   dirFixForm.tmdb_id = drawerResource.value?.tmdb_id || ''
-  dirFixForm.title = ''
-  dirFixForm.year = undefined
+  const { title, year } = extractResourceTitleAndYear(drawerResource.value)
+  dirFixForm.title = title
+  dirFixForm.year = year
   dirFixForm.season = undefined
   dirFixForm.episode_offset = undefined
   tmdbSearchResults.value = []
@@ -978,8 +1241,9 @@ function openSeasonFixDialog(node) {
   dirFixScope.value = node?.scope || null
   dirFixForm.media_type = drawerResource.value?.type === 'movie' ? 'movie' : 'tv'
   dirFixForm.tmdb_id = drawerResource.value?.tmdb_id || ''
-  dirFixForm.title = ''
-  dirFixForm.year = undefined
+  const { title, year } = extractResourceTitleAndYear(drawerResource.value)
+  dirFixForm.title = title
+  dirFixForm.year = year
   dirFixForm.season = node?.season ?? currentNode.value?.season ?? 1
   dirFixForm.episode_offset = undefined
   tmdbSearchResults.value = []
@@ -996,13 +1260,24 @@ async function submitDirFix() {
     return
   }
   dirFixing.value = true
+  openFixMonitor(
+    buildFixMonitorMatchSpec({
+      typePrefix: dirFixMode.value === 'season' ? 'reidentify:season:' : 'reidentify:resource:',
+      targetName: dirFixMode.value === 'season'
+        ? String(dirFixScope.value?.group_label || currentNode.value?.label || '')
+        : extractFilename(drawerResource.value?.resource_dir),
+      targetLabel: dirFixMode.value === 'season'
+        ? `Season 修正 · ${String(dirFixScope.value?.group_label || currentNode.value?.label || '')}`
+        : `整组修正 · ${extractFilename(drawerResource.value?.resource_dir)}`,
+    }),
+  )
   try {
     const payload = {
       media_type: dirFixForm.media_type,
       tmdb_id: Number(dirFixForm.tmdb_id),
       title: dirFixForm.title,
       year: dirFixForm.year ? Number(dirFixForm.year) : undefined,
-      season: dirFixForm.media_type === 'tv' ? (dirFixForm.season ?? undefined) : undefined,
+      season_override: dirFixForm.media_type === 'tv' ? (dirFixForm.season ?? undefined) : undefined,
       episode_offset: dirFixForm.media_type === 'tv' ? (dirFixForm.episode_offset ?? undefined) : undefined,
     }
     const { data } = dirFixMode.value === 'season'
@@ -1015,14 +1290,24 @@ async function submitDirFix() {
           target_dir: drawerResource.value.resource_dir,
           ...payload,
         })
-    const taskSuffix = data?.task_id ? `，任务 #${data.task_id} 日志可在首页查看` : ''
-    ElMessage.success((data?.message || (dirFixMode.value === 'season' ? 'Season 修正成功' : '整组修正成功')) + taskSuffix)
+    await attachFixMonitorTask(data?.task_id)
+    ElMessage.success(data?.message || (dirFixMode.value === 'season' ? 'Season 修正成功' : '整组修正成功'))
     dirFixDialogVisible.value = false
     await Promise.all([loadResources(), reloadDrawer()])
   } catch (error) {
+    await refreshFixMonitorTask()
+    if (fixMonitorTaskId.value) {
+      await fetchFixMonitorLogs(fixMonitorTaskId.value)
+    }
+    if (!fixMonitorTaskId.value) {
+      resetFixMonitorState()
+      fixMonitorVisible.value = false
+    }
     ElMessage.error(error?.response?.data?.detail || error?.message || (dirFixMode.value === 'season' ? 'Season 修正失败' : '整组修正失败'))
   } finally {
     dirFixing.value = false
+    fixMonitorRequestPending.value = false
+    restartFixMonitorAutoRefresh()
   }
 }
 
@@ -1040,6 +1325,25 @@ async function deduplicateRecords() {
 
 onMounted(() => {
   loadResources()
+})
+
+watch(fixMonitorVisible, (visible) => {
+  if (!visible) {
+    resetFixMonitorState()
+    return
+  }
+  restartFixMonitorAutoRefresh()
+})
+
+watch(drawerVisible, (visible) => {
+  if (!visible && fixMonitorVisible.value) {
+    fixMonitorVisible.value = false
+    resetFixMonitorState()
+  }
+})
+
+onBeforeUnmount(() => {
+  clearFixMonitorTimer()
 })
 </script>
 
@@ -1169,6 +1473,60 @@ onMounted(() => {
   color: #475569;
   font-size: 13px;
   font-weight: 600;
+}
+
+.logs-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+}
+
+.log-toolbar,
+.log-toolbar-left,
+.log-toolbar-right,
+.log-monitor-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.log-toolbar {
+  justify-content: space-between;
+}
+
+.log-meta,
+.log-monitor-waiting,
+.log-monitor-running,
+.log-monitor-finished {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.log-container {
+  min-height: 340px;
+  flex: 1;
+  padding: 16px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #0f172a, #172033);
+  color: #e2e8f0;
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.12);
+  overflow: auto;
+}
+
+.log-container pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.empty-logs {
+  color: #cbd5e1;
+  font-size: 13px;
 }
 
 .pagination-container {
@@ -1420,6 +1778,10 @@ onMounted(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+:deep(.fix-monitor-drawer .el-drawer__body) {
+  padding-top: 8px;
 }
 
 :deep(.row-actions .el-dropdown) {

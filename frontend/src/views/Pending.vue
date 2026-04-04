@@ -109,7 +109,7 @@
           <el-input-number v-model="form.season" :min="0" />
         </el-form-item>
         <el-form-item v-if="form.media_type === 'tv'" label="集号偏移">
-          <el-input-number v-model="form.episode_offset" :min="0" />
+          <el-input-number v-model="form.episode_offset" />
         </el-form-item>
       </el-form>
 
@@ -117,19 +117,15 @@
         <div ref="pendingFilesHeaderRef" class="pending-files-header">
           <div>
             <div class="pending-files-title">目录文件</div>
-            <div class="pending-files-subtitle">不勾选则整理整个目录；勾选后仅整理选中文件。</div>
+            <div class="pending-files-subtitle">这里只展示正片视频；不勾选则整理整个目录，勾选后会自动补齐对应附件。</div>
           </div>
           <div class="pending-files-actions">
             <el-button-group class="pending-filter-group">
               <el-button plain :type="pendingFileView === 'all' ? 'primary' : 'default'" @click="pendingFileView = 'all'">全部 {{ pendingFileItems.length }}</el-button>
-              <el-button plain :type="pendingFileView === 'video' ? 'primary' : 'default'" @click="pendingFileView = 'video'">视频 {{ pendingVideoCount }}</el-button>
-              <el-button plain :type="pendingFileView === 'attachment' ? 'primary' : 'default'" @click="pendingFileView = 'attachment'">附件 {{ pendingAttachmentCount }}</el-button>
               <el-button plain :type="pendingFileView === 'selected' ? 'warning' : 'default'" @click="pendingFileView = 'selected'">已选 {{ selectedPendingPaths.length }}</el-button>
             </el-button-group>
             <el-button-group class="pending-select-group">
               <el-button plain @click="selectAllPendingFiles" :disabled="pendingFilesLoading || !pendingFileItems.length">全选</el-button>
-              <el-button plain @click="selectVideoPendingFiles" :disabled="pendingFilesLoading || !pendingVideoCount">选视频</el-button>
-              <el-button plain @click="selectAttachmentPendingFiles" :disabled="pendingFilesLoading || !pendingAttachmentCount">选附件</el-button>
               <el-button plain @click="clearPendingFileSelection" :disabled="pendingFilesLoading || !selectedPendingPaths.length">清空</el-button>
             </el-button-group>
           </div>
@@ -162,20 +158,13 @@
                 {{ row.parent_dir === '.' ? '根目录' : row.parent_dir }}
               </template>
             </el-table-column>
-            <el-table-column label="类型" width="100" align="center">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.file_type === 'video' ? 'primary' : 'info'">
-                  {{ row.file_type === 'video' ? '视频' : '附件' }}
-                </el-tag>
-              </template>
-            </el-table-column>
             <el-table-column label="大小" width="120" align="right">
               <template #default="{ row }">
                 {{ formatFileSize(row.size) }}
               </template>
             </el-table-column>
             <template #empty>
-              <el-empty description="目录下没有可整理媒体文件" />
+              <el-empty description="目录下没有可整理视频文件" />
             </template>
           </el-table>
         </div>
@@ -310,15 +299,7 @@ const form = reactive({
   episode_offset: undefined,
 })
 
-const pendingVideoCount = computed(() => pendingFileItems.value.filter((item) => item.file_type === 'video').length)
-const pendingAttachmentCount = computed(() => pendingFileItems.value.filter((item) => item.file_type === 'attachment').length)
 const filteredPendingFileItems = computed(() => {
-  if (pendingFileView.value === 'video') {
-    return pendingFileItems.value.filter((item) => item.file_type === 'video')
-  }
-  if (pendingFileView.value === 'attachment') {
-    return pendingFileItems.value.filter((item) => item.file_type === 'attachment')
-  }
   if (pendingFileView.value === 'selected') {
     const selected = new Set(selectedPendingPaths.value)
     return pendingFileItems.value.filter((item) => selected.has(item.relative_path))
@@ -393,7 +374,7 @@ async function loadPendingFiles(row) {
   pendingFileView.value = 'all'
   try {
     const { data } = await mediaApi.pendingFiles(row.id)
-    pendingFileItems.value = data.items || []
+    pendingFileItems.value = (data.items || []).filter((item) => item.file_type === 'video' && item.content_role === 'mainline')
     await nextTick()
     pendingFilesTable.value?.clearSelection?.()
     updatePendingFilesTableHeight()
@@ -430,14 +411,6 @@ function selectPendingFiles(predicate) {
 
 function selectAllPendingFiles() {
   selectPendingFiles(() => true)
-}
-
-function selectVideoPendingFiles() {
-  selectPendingFiles((item) => item.file_type === 'video')
-}
-
-function selectAttachmentPendingFiles() {
-  selectPendingFiles((item) => item.file_type === 'attachment')
 }
 
 async function submitOrganize() {

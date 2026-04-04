@@ -59,6 +59,7 @@ from .target_path_resolver import (
     apply_readable_suffix_for_unnumbered_extra as resolver_apply_readable_suffix_for_unnumbered_extra,
     build_attachment_target_from_anchor as resolver_build_attachment_target_from_anchor,
     deduplicate_target_or_raise as resolver_deduplicate_target_or_raise,
+    _normalize_attachment_stem,
     resolve_attachment_follow_target as resolver_resolve_attachment_follow_target,
     resolve_attachment_follow_target_details as resolver_resolve_attachment_follow_target_details,
     resolve_final_target,
@@ -665,15 +666,21 @@ def _run_manual_organize_core(
         if not stable_ok:
             raise DirectoryProcessError(f"目录稳定决策失败: {stable_reason}")
 
-    include = group.include or ""
-    exclude = group.exclude or ""
-    source_root = Path(group.source)
+    include = str(getattr(group, "include", "") or "")
+    exclude = str(getattr(group, "exclude", "") or "")
+    source_value = getattr(group, "source", None)
+    source_root = Path(str(source_value)) if source_value else root_dir
     all_media_files = _collect_media_files_under_dir(root_dir, include, exclude, source_root)
     if not all_media_files:
         raise DirectoryProcessError("待办目录中没有可处理媒体")
 
     selection_mode = bool(selected_relative_paths)
-    media_files = _select_manual_media_files(all_media_files, root_dir, selected_relative_paths)
+    media_files, auto_selected_specials, auto_selected_attachments = _expand_manual_selected_media_files(
+        all_media_files,
+        root_dir,
+        selected_relative_paths,
+        media_type=media_type,
+    )
     if selection_mode and not media_files:
         raise DirectoryProcessError("未选择可处理媒体文件")
     if not selection_mode:
@@ -681,7 +688,10 @@ def _run_manual_organize_core(
 
     manual_scope_complete = (not selection_mode) or (len(media_files) == len(all_media_files))
 
-    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=_video_sort_key)
+    video_files = sorted(
+        [p for p in media_files if p.suffix.lower() in VIDEO_EXTS],
+        key=lambda path: (0 if _classify_manual_video_role(path, media_type) == "mainline" else 1, *_video_sort_key(path)),
+    )
     attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
     seen_targets: dict[Path, Path] = {}
     op_log = OperationLog()
@@ -693,7 +703,8 @@ def _run_manual_organize_core(
 
     append_log(
         f"{action_label}进入扫描主流程: group={group.name}, dir={root_dir}, media_type={media_type}, "
-        f"tmdb_id={tmdb_id}, title={resolved_title}, files={len(media_files)}, selection_mode={selection_mode}"
+        f"tmdb_id={tmdb_id}, title={resolved_title}, files={len(media_files)}, selection_mode={selection_mode}, "
+        f"auto_selected_specials={int(auto_selected_specials)}, auto_selected_attachments={int(auto_selected_attachments)}"
     )
 
     processed = 0
@@ -1299,21 +1310,6 @@ def _classify_attachment_route(src_path: Path, parse_result: ParseResult) -> Att
     if category in ALL_EXTRA_LIKE_CATEGORIES:
         return AttachmentRoutePlan(parse_result=parse_result, follow_mode="extra-follow", reason="explicit-extra-category")
 
-    variant_category, variant_label, _from_bracket = _detect_bracket_variant_as_special(src_path.name)
-    if variant_category is not None:
-        updated = parse_result._replace(
-            extra_category=variant_category,
-            extra_label=variant_label,
-            is_special=variant_category in SPECIAL_CATEGORIES,
-            episode=None,
-        )
-        follow_mode = "special-follow" if variant_category in SPECIAL_ANCHOR_CATEGORIES else "extra-follow"
-        return AttachmentRoutePlan(
-            parse_result=updated,
-            follow_mode=follow_mode,
-            reason="variant-bracket-special",
-        )
-
     if _should_ignore_zero_episode(
         src_path.name,
         parse_result=parse_result,
@@ -1550,6 +1546,8 @@ def _process_file(
     if is_attachment:
         attachment_plan = _classify_attachment_route(src_path, parse_result)
         parse_result = attachment_plan.parse_result
+        if media_type == "tv" and (not extra_context) and parse_result.extra_category is None:
+            parse_result = _apply_tv_mainline_context_overrides(parse_result, src_path, context)
 
         # 中文说明：
         # 附件现在先完成“语义分流”，再进入 resolver 查锚点。
@@ -1716,43 +1714,14 @@ def _process_file(
         resolved_season = context.get("resolved_season")
         season_from_path = _extract_season_from_path(src_path)
         has_explicit = _has_explicit_season_token(src_path.name)
-        if season_from_path is not None:
-            season = season_from_path
-        elif not has_explicit and resolved_season is not None:
-            # 中文说明：
-            # resolved_season 代表目录级稳定化后的默认季号，通常比 parser 的弱提示更可信。
-            # 但若 parser 已明确从罗马季名推导出季号（如 `PSYCHO-PASS II`），
-            # 再强行覆盖成目录默认季就会把续作打回 S01。
-            if getattr(parse_result, "season_hint_strength", None) == "roman":
-                season = parse_result.season
-            else:
-                season = resolved_season
-        else:
-            # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
-            if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season is not None:
-                append_log(
-                    f"INFO: [season] bang 候选覆盖: file={src_path.name!r}, "
-                    f"candidate={parse_result.season} → resolved={resolved_season} (source=resolved_season)"
-                )
-                season = resolved_season
-            else:
-                season = parse_result.season or resolved_season or 1
-        parse_result = parse_result._replace(season=season)
-
-        # AI 剧集映射覆盖（外挂功能）：仅覆盖普通剧集（extra_category 为 None）
-        _ai_ep_mapping = context.get("ai_episode_mapping") or {}
-        if str(src_path) in _ai_ep_mapping and parse_result.extra_category is None:
-            _ai_season, _ai_episode = _ai_ep_mapping[str(src_path)]
-            append_log(
-                f"INFO: [AI识别] 覆盖集数映射: {src_path.name} "
-                f"→ S{_ai_season:02d}E{_ai_episode:02d}"
-            )
-            parse_result = parse_result._replace(season=_ai_season, episode=_ai_episode)
-
-        offset = context.get("episode_offset")
-        if offset is not None and parse_result.episode is not None and parse_result.extra_category is None:
-            adjusted = parse_result.episode - int(offset)
-            parse_result = parse_result._replace(episode=max(1, adjusted))
+        parse_result = _apply_tv_mainline_context_overrides(
+            parse_result,
+            src_path,
+            context,
+            resolved_season=resolved_season,
+            season_from_path=season_from_path,
+            has_explicit=has_explicit,
+        )
         parse_result = resolver_apply_readable_suffix_for_unnumbered_extra(parse_result, src_path, dir_runtime)
 
     # Phase 2: 特典继承目录已解析季号（仅当文件无显式季号标记时）
@@ -1940,6 +1909,65 @@ def _has_explicit_season_token(name: str) -> bool:
     return False
 
 
+def _apply_tv_mainline_context_overrides(
+    parse_result: ParseResult,
+    src_path: Path,
+    context: dict,
+    *,
+    resolved_season: int | None = None,
+    season_from_path: int | None = None,
+    has_explicit: bool | None = None,
+) -> ParseResult:
+    if parse_result.extra_category is not None:
+        return parse_result
+
+    if resolved_season is None:
+        resolved_season = context.get("resolved_season")
+    if season_from_path is None:
+        season_from_path = _extract_season_from_path(src_path)
+    if has_explicit is None:
+        has_explicit = _has_explicit_season_token(src_path.name)
+
+    if season_from_path is not None:
+        season = season_from_path
+    elif not has_explicit and resolved_season is not None:
+        # 中文说明：
+        # resolved_season 代表目录级稳定化后的默认季号，通常比 parser 的弱提示更可信。
+        # 但若 parser 已明确从罗马季名推导出季号（如 `PSYCHO-PASS II`），
+        # 再强行覆盖成目录默认季就会把续作打回 S01。
+        if getattr(parse_result, "season_hint_strength", None) == "roman":
+            season = parse_result.season
+        else:
+            season = resolved_season
+    else:
+        # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
+        if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season is not None:
+            append_log(
+                f"INFO: [season] bang 候选覆盖: file={src_path.name!r}, "
+                f"candidate={parse_result.season} → resolved={resolved_season} (source=resolved_season)"
+            )
+            season = resolved_season
+        else:
+            season = parse_result.season or resolved_season or 1
+    parse_result = parse_result._replace(season=season)
+
+    ai_episode_mapping = context.get("ai_episode_mapping") or {}
+    if str(src_path) in ai_episode_mapping:
+        ai_season, ai_episode = ai_episode_mapping[str(src_path)]
+        append_log(
+            f"INFO: [AI识别] 覆盖集数映射: {src_path.name} "
+            f"→ S{ai_season:02d}E{ai_episode:02d}"
+        )
+        parse_result = parse_result._replace(season=ai_season, episode=ai_episode)
+
+    offset = context.get("episode_offset")
+    if offset is not None and parse_result.episode is not None:
+        adjusted = parse_result.episode + int(offset)
+        parse_result = parse_result._replace(episode=max(1, adjusted))
+
+    return parse_result
+
+
 def detect_special_dir_context(path: Path) -> tuple[bool, str | None]:
     nodes = [path] + list(path.parents)
     for node in nodes:
@@ -2114,9 +2142,11 @@ def _build_source_diff_token(source_text: str, category: str | None) -> str:
         if normalized_scene:
             token_parts.append(normalized_scene)
     if not token_parts:
-        normalized = _normalize_special_anchor_token(source_text, category)
+        normalized = _normalize_attachment_stem(source_text)
+        if not normalized:
+            normalized = _normalize_special_anchor_token(source_text, category)
         if normalized:
-            token_parts.append(normalized[:24])
+            token_parts.append(normalized)
     if not token_parts:
         return ""
     joined = "|".join(x for x in token_parts if x)
@@ -2463,6 +2493,137 @@ def _select_manual_media_files(media_files: list[Path], root_dir: Path, selected
         if file_path is not None:
             selected.append(file_path)
     return selected
+
+
+def _classify_manual_video_role(src_path: Path, media_type: str) -> str:
+    ext = src_path.suffix.lower()
+    if ext not in VIDEO_EXTS:
+        return "non-video"
+
+    if detect_special_dir_context(src_path)[0]:
+        return "special"
+
+    forced_category, _forced_label, _from_bracket = classify_extra_from_text(src_path.name)
+    if forced_category:
+        return "special"
+
+    parse_result = parse_tv_filename(str(src_path)) if media_type == "tv" else parse_movie_filename(str(src_path))
+    if parse_result is None:
+        fallback_parse = parse_movie_filename(str(src_path)) if media_type == "tv" else parse_tv_filename(str(src_path))
+        parse_result = fallback_parse
+    if parse_result is None:
+        return "mainline"
+    return "special" if parse_result.extra_category in ALL_EXTRA_LIKE_CATEGORIES else "mainline"
+
+
+def _collect_manual_selected_special_videos(
+    media_files: list[Path],
+    selected_files: list[Path],
+    *,
+    media_type: str,
+) -> list[Path]:
+    has_selected_mainline = any(
+        _classify_manual_video_role(path, media_type) == "mainline"
+        for path in selected_files
+        if path.suffix.lower() in VIDEO_EXTS
+    )
+    if not has_selected_mainline:
+        return []
+
+    seen_paths = set(selected_files)
+    auto_selected: list[Path] = []
+    for file_path in sorted(media_files or [], key=lambda value: value.as_posix()):
+        if file_path in seen_paths or file_path.suffix.lower() not in VIDEO_EXTS:
+            continue
+        if _classify_manual_video_role(file_path, media_type) != "special":
+            continue
+        auto_selected.append(file_path)
+        seen_paths.add(file_path)
+    return auto_selected
+
+
+def _build_manual_selected_video_match_keys(
+    selected_files: list[Path],
+    media_type: str,
+) -> tuple[set[tuple[str, str]], set[tuple[str, int, int]]]:
+    stem_keys: set[tuple[str, str]] = set()
+    episode_keys: set[tuple[str, int, int]] = set()
+
+    for file_path in selected_files:
+        if file_path.suffix.lower() not in VIDEO_EXTS:
+            continue
+        parent_key = str(file_path.parent)
+        stem_key = _normalize_attachment_stem(file_path.stem)
+        if stem_key:
+            stem_keys.add((parent_key, stem_key))
+        if media_type != "tv":
+            continue
+        parse_result = parse_tv_filename(str(file_path))
+        if parse_result is None or parse_result.extra_category is not None or parse_result.episode is None:
+            continue
+        episode_keys.add((parent_key, int(parse_result.season or 1), int(parse_result.episode)))
+
+    return stem_keys, episode_keys
+
+
+def _should_auto_include_manual_attachment(
+    attachment_path: Path,
+    *,
+    media_type: str,
+    selected_stem_keys: set[tuple[str, str]],
+    selected_episode_keys: set[tuple[str, int, int]],
+) -> bool:
+    parent_key = str(attachment_path.parent)
+    stem_key = _normalize_attachment_stem(attachment_path.stem)
+    if stem_key and (parent_key, stem_key) in selected_stem_keys:
+        return True
+    if media_type != "tv":
+        return False
+    parse_result = parse_tv_filename(str(attachment_path))
+    if parse_result is None or parse_result.extra_category is not None or parse_result.episode is None:
+        return False
+    return (parent_key, int(parse_result.season or 1), int(parse_result.episode)) in selected_episode_keys
+
+
+def _expand_manual_selected_media_files(
+    media_files: list[Path],
+    root_dir: Path,
+    selected_relative_paths: list[str] | None,
+    *,
+    media_type: str,
+) -> tuple[list[Path], int, int]:
+    selected_files = _select_manual_media_files(media_files, root_dir, selected_relative_paths)
+    if not selected_relative_paths:
+        return selected_files, 0, 0
+
+    auto_selected_specials = _collect_manual_selected_special_videos(
+        media_files,
+        selected_files,
+        media_type=media_type,
+    )
+    selected_files = list(selected_files) + auto_selected_specials
+
+    selected_stem_keys, selected_episode_keys = _build_manual_selected_video_match_keys(selected_files, media_type)
+    if not selected_stem_keys and not selected_episode_keys:
+        return selected_files, len(auto_selected_specials), 0
+
+    expanded = list(selected_files)
+    seen_paths = {path for path in selected_files}
+    auto_included = 0
+    for file_path in sorted(media_files or [], key=lambda value: value.as_posix()):
+        if file_path in seen_paths or file_path.suffix.lower() not in ATTACHMENT_EXTS:
+            continue
+        if not _should_auto_include_manual_attachment(
+            file_path,
+            media_type=media_type,
+            selected_stem_keys=selected_stem_keys,
+            selected_episode_keys=selected_episode_keys,
+        ):
+            continue
+        expanded.append(file_path)
+        seen_paths.add(file_path)
+        auto_included += 1
+    return expanded, len(auto_selected_specials), auto_included
 
 
 def _extract_first_dir_name(dirs: list[Path], source_root: Path) -> str | None:

@@ -6,6 +6,16 @@ const client = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+const LONG_TASK_TIMEOUT = 0
+
+function postLongTask(url, data) {
+  return client.post(url, data, { timeout: LONG_TASK_TIMEOUT })
+}
+
+function deleteLongTask(url) {
+  return client.delete(url, { timeout: LONG_TASK_TIMEOUT })
+}
+
 client.interceptors.request.use((config) => {
   const token = localStorage.getItem('amm_token')
   if (token) {
@@ -52,14 +62,14 @@ export const mediaApi = {
   poster: (params) => client.get('/media/poster', { params }),
   seasonPoster: (params) => client.get('/media/season-poster', { params }),
   stats: () => client.get('/media/stats'),
-  deleteAll: () => client.delete('/media/all'),
-  batchDelete: (data) => client.post('/media/batch-delete', data),
-  deleteScope: (data) => client.post('/media/delete-scope', data),
-  deduplicate: () => client.post('/media/deduplicate'),
-  reidentify: (id, data) => client.post(`/media/${id}/reidentify`, data),
-  reidentifyByTargetDir: (data) => client.post('/media/reidentify-by-target-dir', data),
-  reidentifyScope: (data) => client.post('/media/reidentify-scope', data),
-  manualOrganize: (id, data) => client.post(`/media/${id}/manual-organize`, data),
+  deleteAll: () => deleteLongTask('/media/all'),
+  batchDelete: (data) => postLongTask('/media/batch-delete', data),
+  deleteScope: (data) => postLongTask('/media/delete-scope', data),
+  deduplicate: () => postLongTask('/media/deduplicate'),
+  reidentify: (id, data) => postLongTask(`/media/${id}/reidentify`, data),
+  reidentifyByTargetDir: (data) => postLongTask('/media/reidentify-by-target-dir', data),
+  reidentifyScope: (data) => postLongTask('/media/reidentify-scope', data),
+  manualOrganize: (id, data) => postLongTask(`/media/${id}/manual-organize`, data),
 }
 
 export const inodesApi = {
@@ -67,26 +77,26 @@ export const inodesApi = {
   resources: (params) => client.get('/inodes/resources', { params }),
   resourceTree: (params) => client.get('/inodes/resource-tree', { params }),
   delete: (id) => client.delete(`/inodes/${id}`),
-  batchDelete: (data) => client.post('/inodes/batch-delete', data),
-  deleteScope: (data) => client.post('/inodes/delete-scope', data),
-  deleteAll: () => client.delete('/inodes/all'),
-  cleanup: () => client.delete('/inodes/cleanup'),
+  batchDelete: (data) => postLongTask('/inodes/batch-delete', data),
+  deleteScope: (data) => postLongTask('/inodes/delete-scope', data),
+  deleteAll: () => deleteLongTask('/inodes/all'),
+  cleanup: () => deleteLongTask('/inodes/cleanup'),
 }
 
 export const scanApi = {
-  run: () => client.post('/scan/run'),
-  runGroup: (groupId) => client.post(`/scan/run/${groupId}`),
+  run: () => postLongTask('/scan/run'),
+  runGroup: (groupId) => postLongTask(`/scan/run/${groupId}`),
 }
 
 export const embyApi = {
   libraries: () => client.get('/emby/libraries'),
-  refresh: () => client.post('/emby/refresh'),
+  refresh: () => postLongTask('/emby/refresh'),
 }
 
 export const configApi = {
   get: () => client.get('/config'),
   update: (data) => client.put('/config', data),
-  restart: () => client.post('/config/restart'),
+  restart: () => postLongTask('/config/restart'),
   testConnection: (data) => client.post('/config/test-connection', data),
   changePassword: (data) => client.post('/config/change-password', data),
 }
