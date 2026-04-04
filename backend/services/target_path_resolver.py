@@ -8,7 +8,7 @@ from pathlib import Path
 from ..api.logs import append_log
 from .linker import is_same_inode
 from .media_content_types import EXTRA_CATEGORIES, SPECIAL_CATEGORIES
-from .parser import ParseResult, extract_strong_extra_fallback_label
+from .parser import ParseResult, _looks_like_technical_extra_label, _looks_title_like_fallback_label, extract_strong_extra_fallback_label
 from .renamer import compute_movie_target_path, compute_tv_target_path
 
 SPECIAL_ANCHOR_CATEGORIES = {
@@ -170,11 +170,26 @@ def resolve_attachment_follow_target_details(
                     return _result(None, f"{layer_prefix}:prefix-ambiguous")
                 if prefix_value != "__missing__":
                     return _result(prefix_value, f"{layer_prefix}:prefix")
-        special_key = _build_special_anchor_key(parse_result, src_path, original_label=parse_result.extra_label)
-        if special_key is not None:
+        special_token = _special_anchor_token(parse_result, src_path, original_label=parse_result.extra_label)
+        category = str(parse_result.extra_category or "")
+        seen_special_keys: set[tuple[str, str, str, str]] = set()
+        special_keys: list[tuple[tuple[str, str, str, str], str]] = []
+        if special_token and category in SPECIAL_ANCHOR_CATEGORIES:
+            for stem_key, stem_layer in (
+                (_normalize_media_stem(src_path.stem), "token"),
+                (_normalize_attachment_stem(src_path.stem), "token-attachment-stem"),
+            ):
+                if not stem_key:
+                    continue
+                special_key = (parent_key, stem_key, category, special_token)
+                if special_key in seen_special_keys:
+                    continue
+                seen_special_keys.add(special_key)
+                special_keys.append((special_key, stem_layer))
+        for special_key, stem_layer in special_keys:
             candidates = list(by_parent_special.get(special_key) or [])
             if len(candidates) == 1:
-                return _result(candidates[0], f"{layer_prefix}:token")
+                return _result(candidates[0], f"{layer_prefix}:{stem_layer}")
             if len(candidates) > 1:
                 append_log(f"WARNING: 特典附件锚点冲突: {src_path.name} -> {len(candidates)} 个候选")
                 return _result(None, f"{layer_prefix}:ambiguous")
@@ -991,12 +1006,34 @@ def _apply_variant_label_hint(parse_result: ParseResult, src_path: Path) -> Pars
 def _needs_readable_suffix(parse_result: ParseResult) -> bool:
     if parse_result.extra_category not in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
         return False
+    label = re.sub(r"\s+", " ", str(parse_result.extra_label or "")).strip()
+    if label and _has_explicit_descriptive_extra_label(label, parse_result.title):
+        return False
     stable_idx = _extract_stable_label_index(parse_result.extra_label)
     if stable_idx is not None:
         return False
     if parse_result.episode is None:
         return True
     return int(parse_result.episode) == 1
+
+
+def _has_explicit_descriptive_extra_label(label: str, parsed_title: str | None) -> bool:
+    normalized = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not normalized:
+        return False
+    if _looks_like_technical_extra_label(normalized):
+        return False
+    if _looks_title_like_fallback_label(normalized, parsed_title):
+        return False
+    if re.fullmatch(
+        r"(?:SP|SPECIAL|OVA|OAD|OAV|OP|ED|NCOP|NCED|PV|TRAILER|PREVIEW|CM|BDEXTRA|MAKING|INTERVIEW)(?:\s*\d{0,3})?",
+        normalized,
+        re.I,
+    ):
+        return False
+    if len(normalized) < 3 and re.search(r"[\u4e00-\u9fff]", normalized) is None:
+        return False
+    return True
 
 
 def _normalize_suffix_text(text: str) -> str:

@@ -1339,6 +1339,38 @@ def _classify_attachment_route(src_path: Path, parse_result: ParseResult) -> Att
         return AttachmentRoutePlan(parse_result=parse_result, follow_mode="special-follow", reason="explicit-special-category")
     if category in ALL_EXTRA_LIKE_CATEGORIES:
         return AttachmentRoutePlan(parse_result=parse_result, follow_mode="extra-follow", reason="explicit-extra-category")
+
+    variant_category, variant_label, _from_bracket = _detect_bracket_variant_as_special(src_path.name)
+    if variant_category is not None:
+        updated = parse_result._replace(
+            extra_category=variant_category,
+            extra_label=variant_label,
+            is_special=variant_category in SPECIAL_CATEGORIES,
+            episode=None,
+        )
+        follow_mode = "special-follow" if variant_category in SPECIAL_ANCHOR_CATEGORIES else "extra-follow"
+        return AttachmentRoutePlan(
+            parse_result=updated,
+            follow_mode=follow_mode,
+            reason="variant-bracket-special",
+        )
+
+    if _should_ignore_zero_episode(
+        src_path.name,
+        parse_result=parse_result,
+        context_title=parse_result.title,
+    ):
+        updated = parse_result._replace(
+            extra_category="special",
+            extra_label=_extract_zero_episode_attachment_label(src_path.name),
+            is_special=True,
+            episode=None,
+        )
+        return AttachmentRoutePlan(
+            parse_result=updated,
+            follow_mode="special-follow",
+            reason="zero-episode-special-attachment",
+        )
     return AttachmentRoutePlan(parse_result=parse_result, follow_mode="mainline-follow", reason="default-mainline-follow")
 
 
@@ -2846,6 +2878,36 @@ def _should_ignore_zero_episode(
     return False
 
 
+def _extract_zero_episode_attachment_label(filename: str) -> str:
+    stem = Path(filename).stem
+    match = re.search(r"[\[\(]\s*(0{1,2})\s*[\]\)]", stem)
+    if match:
+        return match.group(1)
+    match = re.search(r"\bEP?\s*(0+)\b", stem, re.I)
+    if match:
+        return match.group(1)
+    match = re.search(r"第\s*(0+)\s*[集话話]", stem)
+    if match:
+        return match.group(1)
+    return "00"
+
+
+def _infer_curated_season_from_dir_name(dir_name: str, valid_seasons: list[int]) -> tuple[int, str] | None:
+    normalized = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", " ", str(dir_name or ""))
+    normalized = re.sub(r"[._\-]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+    if not normalized:
+        return None
+
+    curated_patterns = [
+        (re.compile(r"\bmotto\s+to\s+love\s*ru\b", re.I), 2, "motto-to-love-ru"),
+    ]
+    for pattern, season, reason in curated_patterns:
+        if season in valid_seasons and pattern.search(normalized):
+            return season, reason
+    return None
+
+
 def _has_explicit_nonzero_episode_signal(stem: str) -> bool:
     if _extract_episode_from_filename_loose(stem) is not None:
         return True
@@ -4088,22 +4150,31 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     )
 
     # 无稳定季号时：先尝试 TMDB 季名称匹配推导，否则默认第一季
+    chosen_from_curated_alias = False
     if chosen is None and len(valid_seasons) > 1 and not is_final:
-        inferred = infer_season_from_tmdb_seasons(media_dir.name, tmdb_season_list)
-        if inferred is not None:
-            chosen = inferred[0]
+        curated = _infer_curated_season_from_dir_name(media_dir.name, valid_seasons)
+        if curated is not None:
+            chosen, curated_reason = curated
+            chosen_from_curated_alias = True
             append_log(
-                f"INFO: TMDB季名匹配推导季号: season={chosen}, ratio={inferred[1]:.2f}"
+                f"INFO: 目录续作别名推导季号: season={chosen}, rule={curated_reason}"
             )
         else:
-            append_log("INFO: 多季作品且无稳定季号信息，默认使用第一季")
-            chosen = 1
+            inferred = infer_season_from_tmdb_seasons(media_dir.name, tmdb_season_list)
+            if inferred is not None:
+                chosen = inferred[0]
+                append_log(
+                    f"INFO: TMDB季名匹配推导季号: season={chosen}, ratio={inferred[1]:.2f}"
+                )
+            else:
+                append_log("INFO: 多季作品且无稳定季号信息，默认使用第一季")
+                chosen = 1
 
     # 「季名先行匹配」：无论是否有 chosen，若季号来源不可靠（非路径/显式指定/高置信度），
     # 都先用 TMDB 季名相似度匹配一次，有更优答案时覆盖 chosen。
     # 这解决了 Kakegurui×× / Tokyo Ghoul √A 等全部默认 Season 1 的问题。
     # chosen=0（已被 OVA/-hen 检测设置）不参与季名匹配覆盖。
-    if chosen != 0 and not is_final and season_from_path is None and season_hint_source not in ("explicit", "final") and season_hint_confidence != "high":
+    if chosen != 0 and not chosen_from_curated_alias and not is_final and season_from_path is None and season_hint_source not in ("explicit", "final") and season_hint_confidence != "high":
         inferred_early = infer_season_from_tmdb_seasons(media_dir.name, tmdb_season_list)
         if inferred_early is not None:
             inferred_num, inferred_ratio = inferred_early
