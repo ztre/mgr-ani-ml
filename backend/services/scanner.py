@@ -596,23 +596,25 @@ def run_scan(
         current_task_id.reset(token)
 
 
-def run_manual_organize(
+def _run_manual_organize_core(
     db: Session,
-    pending: MediaRecord,
+    *,
     group: SyncGroup,
     media_type: str,
     tmdb_id: int,
+    root_dir: Path,
     title_override: str | None = None,
     year_override: int | None = None,
     season_override: int | None = None,
     episode_offset: int | None = None,
     selected_relative_paths: list[str] | None = None,
+    pending: MediaRecord | None = None,
+    action_label: str = "手动整理",
 ) -> tuple[int, int, bool]:
     task_id = current_task_id.get()
 
-    root_dir = Path(pending.original_path or "")
     if not root_dir.exists() or not root_dir.is_dir():
-        raise DirectoryProcessError("待办目录不存在或不是目录")
+        raise DirectoryProcessError("待处理目录不存在或不是目录")
 
     if media_type not in {"tv", "movie"}:
         raise DirectoryProcessError("media_type 必须是 tv 或 movie")
@@ -690,7 +692,7 @@ def run_manual_organize(
     }
 
     append_log(
-        f"手动整理进入扫描主流程: group={group.name}, dir={root_dir}, media_type={media_type}, "
+        f"{action_label}进入扫描主流程: group={group.name}, dir={root_dir}, media_type={media_type}, "
         f"tmdb_id={tmdb_id}, title={resolved_title}, files={len(media_files)}, selection_mode={selection_mode}"
     )
 
@@ -700,7 +702,7 @@ def run_manual_organize(
         _log_cancel_phase(phase, detail or f"dir={root_dir}")
         db.rollback()
         _rollback_operations(op_log)
-        raise TaskCancelledError("手动整理任务已取消")
+        raise TaskCancelledError(f"{action_label}任务已取消")
 
     try:
         if is_scan_cancel_requested(task_id):
@@ -741,10 +743,11 @@ def run_manual_organize(
         if is_scan_cancel_requested(task_id):
             _cancel_manual_task("manual-finalize")
 
-        if manual_scope_complete:
-            db.delete(pending)
-        else:
-            pending.updated_at = datetime.now(timezone.utc)
+        if pending is not None:
+            if manual_scope_complete:
+                db.delete(pending)
+            else:
+                pending.updated_at = datetime.now(timezone.utc)
         db.commit()
         return processed, 0, bool(context.get("_has_issues"))
     except TaskCancelledError:
@@ -759,6 +762,34 @@ def run_manual_organize(
         raise
 
 
+def run_manual_organize(
+    db: Session,
+    pending: MediaRecord,
+    group: SyncGroup,
+    media_type: str,
+    tmdb_id: int,
+    title_override: str | None = None,
+    year_override: int | None = None,
+    season_override: int | None = None,
+    episode_offset: int | None = None,
+    selected_relative_paths: list[str] | None = None,
+) -> tuple[int, int, bool]:
+    return _run_manual_organize_core(
+        db,
+        pending=pending,
+        group=group,
+        media_type=media_type,
+        tmdb_id=tmdb_id,
+        root_dir=Path(pending.original_path or ""),
+        title_override=title_override,
+        year_override=year_override,
+        season_override=season_override,
+        episode_offset=episode_offset,
+        selected_relative_paths=selected_relative_paths,
+        action_label="手动整理",
+    )
+
+
 def reidentify_by_target_dir(
     db: Session,
     group: SyncGroup,
@@ -770,57 +801,8 @@ def reidentify_by_target_dir(
     episode_offset: int | None,
     records: list[MediaRecord],
 ) -> tuple[int, int, bool]:
-    if media_type not in {"tv", "movie"}:
-        raise DirectoryProcessError("media_type 必须是 tv 或 movie")
-
-    if not settings.tmdb_api_key:
-        raise DirectoryProcessError("未配置 TMDB API Key")
-
     if not records:
         raise DirectoryProcessError("未找到可修正的媒体记录")
-
-    tmdb_data = _get_tmdb_item_by_id(media_type, tmdb_id)
-    if not tmdb_data:
-        raise DirectoryProcessError(f"TMDB 条目不存在: {tmdb_id}")
-
-    tv_target_root = Path(group.target)
-    movie_target_root, movie_route_reason = resolve_movie_target_root(db, group)
-    if media_type == "movie" and movie_target_root is None:
-        raise DirectoryProcessError(f"电影目标路径不可决策: {movie_route_reason}")
-
-    target_root = tv_target_root if media_type == "tv" else movie_target_root
-    year_from_tmdb = _extract_year_from_tmdb_item(media_type, tmdb_data)
-    year = year_override if year_override is not None else year_from_tmdb
-    fallback_title = str(tmdb_data.get("name") or tmdb_data.get("title") or "Unknown")
-    resolved_title = (title_override or "").strip() or _resolve_chinese_title_by_tmdb(
-        media_type=media_type,
-        tmdb_id=tmdb_id,
-        fallback_title=fallback_title,
-    )
-
-    context = {
-        "media_type": media_type,
-        "sync_group_id": group.id,
-        "tmdb_id": tmdb_id,
-        "tmdb_data": tmdb_data,
-        "title": resolved_title,
-        "year": year,
-        "target_root": str(target_root),
-        "score": 1.0,
-        "fallback_round": 0,
-        "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
-        "season_hint_confidence": "high" if (season_override is not None and season_override > 0) else None,
-        "season_hint_source": "manual_override" if (season_override is not None and season_override > 0) else None,
-        "resolved_season": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
-        "final_resolved_season": None,
-        "special_hint": False,
-        "record_status": "manual_fixed",
-        "extra_context": False,
-        "strong_extra_context": False,
-        "_has_issues": False,
-        "episode_offset": int(episode_offset) if episode_offset is not None else None,
-    }
-
     media_files: list[Path] = []
     for row in records:
         if not row.original_path:
@@ -834,60 +816,25 @@ def reidentify_by_target_dir(
 
     if not media_files:
         raise DirectoryProcessError("没有可处理的媒体文件")
-    context["extra_context"] = bool(any(detect_special_dir_context(p)[0] for p in media_files))
-    context["strong_extra_context"] = bool(any(detect_strong_special_dir_context(p)[0] for p in media_files))
 
-    video_files = sorted([p for p in media_files if p.suffix.lower() in VIDEO_EXTS], key=_video_sort_key)
-    attachment_files = sorted([p for p in media_files if p.suffix.lower() in ATTACHMENT_EXTS], key=lambda p: p.as_posix())
-    seen_targets: dict[Path, Path] = {}
-    op_log = OperationLog()
-    dir_runtime: dict = {
-        "video_anchor_by_parent": {},
-        "video_anchor_by_parent_episode": {},
-        "video_anchor_by_parent_stem": {},
-    }
+    root_candidates = sorted({str(path.parent) for path in media_files})
+    root_dir = Path(os.path.commonpath(root_candidates)) if root_candidates else media_files[0].parent
+    selected_relative_paths = sorted({path.relative_to(root_dir).as_posix() for path in media_files})
 
-    append_log(
-        f"整组修正: group={group.name}, media_type={media_type}, tmdb_id={tmdb_id}, "
-        f"title={resolved_title}, files={len(media_files)}"
+    return _run_manual_organize_core(
+        db,
+        group=group,
+        media_type=media_type,
+        tmdb_id=tmdb_id,
+        root_dir=root_dir,
+        title_override=title_override,
+        year_override=year_override,
+        season_override=season_override,
+        episode_offset=episode_offset,
+        selected_relative_paths=selected_relative_paths,
+        pending=None,
+        action_label="修正重整",
     )
-
-    processed = 0
-    try:
-        for src_path in video_files:
-            if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
-                continue
-            _process_file(
-                db=db,
-                src_path=src_path,
-                sync_group_id=group.id,
-                context=context,
-                seen_targets=seen_targets,
-                op_log=op_log,
-                dir_runtime=dir_runtime,
-            )
-            processed += 1
-
-        for src_path in attachment_files:
-            if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
-                continue
-            _process_file(
-                db=db,
-                src_path=src_path,
-                sync_group_id=group.id,
-                context=context,
-                seen_targets=seen_targets,
-                op_log=op_log,
-                dir_runtime=dir_runtime,
-            )
-            processed += 1
-
-        db.commit()
-        return processed, 0, bool(context.get("_has_issues"))
-    except DirectoryProcessError:
-        db.rollback()
-        _rollback_operations(op_log)
-        raise
 
 
 def _process_sync_group(
@@ -1280,6 +1227,24 @@ def _rollback_dir_context(
 
     # 物理文件回滚：删除该目录已创建的硬链接及空目录
     if op_log is not None:
+        def _prune_created_dir_chain(start_dir: Path) -> None:
+            current = start_dir
+            while True:
+                if current not in op_log.created_dirs:
+                    break
+                try:
+                    if current.exists() and current.is_dir() and not any(current.iterdir()):
+                        current.rmdir()
+                        op_log.created_dirs.discard(current)
+                    else:
+                        break
+                except OSError:
+                    break
+                parent = current.parent
+                if parent == current:
+                    break
+                current = parent
+
         conflict_dst_paths = {dst for dst, src in seen_targets.items() if src.parent == conflict_dir}
         links_to_remove = conflict_dst_paths & op_log.created_links
         removed_count = 0
@@ -1294,13 +1259,7 @@ def _rollback_dir_context(
                 append_log(f"WARNING: 无法删除硬链接残留: {link} ({_e})")
             op_log.created_links.discard(link)
         for d in sorted(dirs_to_check, key=lambda p: len(p.parts), reverse=True):
-            if d in op_log.created_dirs:
-                try:
-                    if d.exists() and d.is_dir() and not any(d.iterdir()):
-                        d.rmdir()
-                        op_log.created_dirs.discard(d)
-                except OSError:
-                    pass
+            _prune_created_dir_chain(d)
         if removed_count:
             append_log(f"INFO: 目录级物理回滚: {removed_count} 个硬链接已删除 ({conflict_dir.name})")
 

@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -71,6 +71,7 @@ class DeleteScopeRequest(BaseModel):
 
 
 class ReidentifyRequest(BaseModel):
+    media_type: Literal["tv", "movie"] | None = None
     tmdb_id: int
     title: str | None = None
     year: int | None = None
@@ -81,6 +82,7 @@ class ReidentifyRequest(BaseModel):
 
 class ReidentifyDirRequest(BaseModel):
     target_dir: str
+    media_type: Literal["tv", "movie"] | None = None
     tmdb_id: int
     title: str | None = None
     year: int | None = None
@@ -93,6 +95,7 @@ class ReidentifyScopeRequest(BaseModel):
     item_ids: list[int]
     resource_dir: str
     type: Literal["tv", "movie"]
+    media_type: Literal["tv", "movie"] | None = None
     sync_group_id: int | None = None
     scope_tmdb_id: int | None = None
     season: int | None = None
@@ -558,6 +561,87 @@ def _resolve_reidentify_group(rows: list[MediaRecord], db: Session) -> tuple[Syn
     return group, media_type
 
 
+def _create_media_task(
+    db: Session,
+    *,
+    task_type: str,
+    target_id: int | None,
+    target_name: str | None,
+) -> ScanTask:
+    task = ScanTask(
+        type=task_type,
+        target_id=target_id,
+        target_name=target_name,
+        status="running",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def _finalize_media_task(db: Session, task: ScanTask, *, status: str, has_issues: bool = False) -> None:
+    task.status = status
+    if has_issues:
+        task.type = tag_task_type_with_issue(task.type)
+    task.finished_at = datetime.now(timezone.utc)
+    task.log_file = f"task_{task.id}.log"
+    db.commit()
+
+
+def _fail_media_task(db: Session, task: ScanTask, detail: str, *, status_code: int) -> None:
+    db.rollback()
+    task.status = "cancelled" if status_code == 409 else "failed"
+    task.finished_at = datetime.now(timezone.utc)
+    task.log_file = f"task_{task.id}.log"
+    append_log(f"修正任务失败: {detail}")
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _run_logged_media_task(
+    db: Session,
+    *,
+    task_type: str,
+    target_id: int | None,
+    target_name: str | None,
+    start_message: str,
+    success_message_factory: Callable[[dict], str],
+    runner: Callable[[], dict],
+) -> dict:
+    task = _create_media_task(
+        db,
+        task_type=task_type,
+        target_id=target_id,
+        target_name=target_name,
+    )
+    token = current_task_id.set(task.id)
+    try:
+        append_log(start_message)
+        result = runner()
+        has_issues = bool(result.get("has_issues"))
+        failed = int(result.get("failed") or 0)
+        if has_issues:
+            append_log("修正任务完成但存在问题项")
+        append_log(success_message_factory(result))
+        _finalize_media_task(db, task, status=("completed" if failed == 0 else "failed"), has_issues=has_issues)
+        return {
+            **result,
+            "task_id": task.id,
+            "log_file": task.log_file,
+        }
+    except HTTPException as exc:
+        _fail_media_task(db, task, str(exc.detail), status_code=exc.status_code)
+        raise
+    except Exception as exc:
+        _fail_media_task(db, task, str(exc), status_code=500)
+        raise
+    finally:
+        current_task_id.reset(token)
+
+
 def _run_reidentify_scope(
     *,
     db: Session,
@@ -616,6 +700,75 @@ def _run_reidentify_scope(
         "pruned_dirs": staged.pruned_dirs,
         "pending_logs_removed": int(log_cleanup.get("pending_logs_removed") or 0),
         "unprocessed_logs_removed": int(log_cleanup.get("unprocessed_logs_removed") or 0),
+    }
+
+
+def _run_single_reidentify(
+    *,
+    db: Session,
+    row: MediaRecord,
+    group: SyncGroup,
+    data: ReidentifyRequest,
+) -> dict[str, int | str | bool]:
+    src = Path(row.original_path)
+    media_type = data.media_type or row.type
+    if media_type == "tv":
+        pr = parse_tv_filename(str(src)) or parse_movie_filename(str(src))
+    else:
+        pr = parse_movie_filename(str(src)) or parse_tv_filename(str(src))
+    if not pr:
+        raise HTTPException(status_code=400, detail="文件名解析失败")
+
+    title = (data.title or "").strip()
+    if title:
+        pr = pr._replace(title=title)
+    if data.year is not None:
+        pr = pr._replace(year=data.year)
+    if data.season is not None:
+        pr = pr._replace(season=max(0, data.season))
+    if data.episode is not None:
+        pr = pr._replace(episode=max(0, data.episode))
+    if data.episode_offset is not None and media_type == "tv" and pr.episode is not None and pr.extra_category is None:
+        adjusted = pr.episode - int(data.episode_offset)
+        pr = pr._replace(episode=max(1, adjusted))
+
+    target_root = Path(group.target)
+    if media_type == "movie":
+        movie_root, reason = resolve_movie_target_root(db, group)
+        if movie_root is None:
+            raise HTTPException(status_code=400, detail=f"电影目标路径不可决策: {reason}")
+        target_root = movie_root
+
+    ext = src.suffix.lower()
+    dst = (
+        compute_tv_target_path(target_root, pr, data.tmdb_id, ext, src_filename=src.name)
+        if media_type == "tv"
+        else compute_movie_target_path(target_root, pr, data.tmdb_id, ext)
+    )
+    _link_or_fail(src, dst)
+
+    row.tmdb_id = data.tmdb_id
+    row.type = media_type
+    row.target_path = str(dst)
+    row.status = "manual_fixed"
+    row.updated_at = datetime.now(timezone.utc)
+
+    ino = get_inode(src)
+    if ino:
+        inode_row = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
+        if inode_row:
+            inode_row.target_path = str(dst)
+            inode_row.sync_group_id = group.id
+
+    db.commit()
+    append_log(f"单文件修正完成: {src.name} -> {dst}")
+    return {
+        "message": "修正成功",
+        "new_path": str(dst),
+        "tmdb_id": data.tmdb_id,
+        "processed": 1,
+        "failed": 0,
+        "has_issues": False,
     }
 
 
@@ -1068,57 +1221,18 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
     group = db.query(SyncGroup).filter(SyncGroup.id == row.sync_group_id).first()
     if not group:
         raise HTTPException(status_code=400, detail="同步组不存在")
-
-    if row.type == "tv":
-        pr = parse_tv_filename(str(src)) or parse_movie_filename(str(src))
-    else:
-        pr = parse_movie_filename(str(src)) or parse_tv_filename(str(src))
-    if not pr:
-        raise HTTPException(status_code=400, detail="文件名解析失败")
-
-    title = (data.title or "").strip()
-    if title:
-        pr = pr._replace(title=title)
-    if data.year is not None:
-        pr = pr._replace(year=data.year)
-    if data.season is not None:
-        pr = pr._replace(season=max(0, data.season))
-    if data.episode is not None:
-        pr = pr._replace(episode=max(0, data.episode))
-    if data.episode_offset is not None and row.type == "tv" and pr.episode is not None and pr.extra_category is None:
-        adjusted = pr.episode - int(data.episode_offset)
-        pr = pr._replace(episode=max(1, adjusted))
-
-    target_root = Path(group.target)
-    media_type = row.type
-    if media_type == "movie":
-        movie_root, reason = resolve_movie_target_root(db, group)
-        if movie_root is None:
-            raise HTTPException(status_code=400, detail=f"电影目标路径不可决策: {reason}")
-        target_root = movie_root
-
-    ext = src.suffix.lower()
-    dst = (
-        compute_tv_target_path(target_root, pr, data.tmdb_id, ext, src_filename=src.name)
-        if media_type == "tv"
-        else compute_movie_target_path(target_root, pr, data.tmdb_id, ext)
+    return _run_logged_media_task(
+        db,
+        task_type=f"reidentify:item:{group.name}",
+        target_id=group.id,
+        target_name=src.name,
+        start_message=(
+            f"单文件修正任务启动: media_id={media_id}, group={group.name}, "
+            f"file={src.name}, media_type={data.media_type or row.type}, tmdb_id={data.tmdb_id}"
+        ),
+        success_message_factory=lambda result: f"单文件修正任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
+        runner=lambda: _run_single_reidentify(db=db, row=row, group=group, data=data),
     )
-    _link_or_fail(src, dst)
-
-    row.tmdb_id = data.tmdb_id
-    row.target_path = str(dst)
-    row.status = "manual_fixed"
-    row.updated_at = datetime.now(timezone.utc)
-
-    ino = get_inode(src)
-    if ino:
-        inode_row = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
-        if inode_row:
-            inode_row.target_path = str(dst)
-            inode_row.sync_group_id = group.id
-
-    db.commit()
-    return {"message": "修正成功", "new_path": str(dst), "tmdb_id": data.tmdb_id}
 
 
 @router.post("/{media_id}/manual-organize")
@@ -1216,24 +1330,41 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
         .all()
     )
     group, media_type = _resolve_reidentify_group(rows, db)
-    result = _run_reidentify_scope(
-        db=db,
-        rows=rows,
-        group=group,
-        media_type=media_type,
-        tmdb_id=data.tmdb_id,
-        title=data.title,
-        year=data.year,
-        season=data.season,
-        episode_offset=data.episode_offset,
+    media_type = data.media_type or media_type
+    return _run_logged_media_task(
+        db,
+        task_type=f"reidentify:resource:{group.name}",
+        target_id=group.id,
+        target_name=Path(normalized).name or normalized,
+        start_message=(
+            f"整组修正任务启动: group={group.name}, target_dir={normalized}, "
+            f"media_type={media_type}, tmdb_id={data.tmdb_id}"
+        ),
+        success_message_factory=lambda result: (
+            f"整组修正任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}"
+        ),
+        runner=lambda: {
+            **(lambda scoped_result: {
+                "message": (
+                    f"整组修正完成: 成功 {int(scoped_result['processed'])}，失败 {int(scoped_result['failed'])}"
+                    + ("（存在问题项）" if bool(scoped_result['has_issues']) else "")
+                ),
+                **scoped_result,
+            })(
+                _run_reidentify_scope(
+                    db=db,
+                    rows=rows,
+                    group=group,
+                    media_type=media_type,
+                    tmdb_id=data.tmdb_id,
+                    title=data.title,
+                    year=data.year,
+                    season=data.season,
+                    episode_offset=data.episode_offset,
+                )
+            )
+        },
     )
-    processed = int(result["processed"])
-    failed = int(result["failed"])
-    has_issues = bool(result["has_issues"])
-    msg = f"整组修正完成: 成功 {processed}，失败 {failed}"
-    if has_issues:
-        msg += "（存在问题项）"
-    return {"message": msg, **result}
 
 
 @router.post("/reidentify-scope")
@@ -1252,25 +1383,40 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
     )
     rows = _load_scope_media_rows(db, scope)
     group, media_type = _resolve_reidentify_group(rows, db)
-    result = _run_reidentify_scope(
-        db=db,
-        rows=rows,
-        group=group,
-        media_type=media_type,
-        tmdb_id=data.tmdb_id,
-        title=data.title,
-        year=data.year,
-        season=data.season,
-        episode_offset=data.episode_offset,
-    )
-    processed = int(result["processed"])
-    failed = int(result["failed"])
-    has_issues = bool(result["has_issues"])
+    media_type = data.media_type or media_type
     label = "Season 修正" if data.scope_level == "season" else "作用域修正"
-    msg = f"{label}完成: 成功 {processed}，失败 {failed}"
-    if has_issues:
-        msg += "（存在问题项）"
-    return {"message": msg, **result}
+    return _run_logged_media_task(
+        db,
+        task_type=(f"reidentify:season:{group.name}" if data.scope_level == "season" else f"reidentify:scope:{group.name}"),
+        target_id=group.id,
+        target_name=(data.group_label or Path(data.resource_dir).name or data.resource_dir),
+        start_message=(
+            f"{label}任务启动: group={group.name}, scope={data.scope_level}, "
+            f"target={data.group_label or data.resource_dir}, media_type={media_type}, tmdb_id={data.tmdb_id}"
+        ),
+        success_message_factory=lambda result: f"{label}任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
+        runner=lambda: {
+            **(lambda scoped_result: {
+                "message": (
+                    f"{label}完成: 成功 {int(scoped_result['processed'])}，失败 {int(scoped_result['failed'])}"
+                    + ("（存在问题项）" if bool(scoped_result['has_issues']) else "")
+                ),
+                **scoped_result,
+            })(
+                _run_reidentify_scope(
+                    db=db,
+                    rows=rows,
+                    group=group,
+                    media_type=media_type,
+                    tmdb_id=data.tmdb_id,
+                    title=data.title,
+                    year=data.year,
+                    season=data.season,
+                    episode_offset=data.episode_offset,
+                )
+            )
+        },
+    )
 
 
 @router.post("/batch-delete")

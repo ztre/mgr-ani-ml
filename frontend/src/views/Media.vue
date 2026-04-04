@@ -110,7 +110,7 @@
             <el-button :loading="drawerLoading" @click="reloadDrawer">
               <el-icon><Refresh /></el-icon>
             </el-button>
-            <el-button type="primary" plain :disabled="!drawerResource?.resource_dir" @click="openDirFixDialog">
+            <el-button v-if="drawerResource?.type === 'movie'" type="primary" plain :disabled="!drawerResource?.resource_dir" @click="openDirFixDialog">
               修正整个资源
             </el-button>
           </div>
@@ -294,28 +294,40 @@
       </transition>
     </teleport>
 
-    <el-dialog v-model="fixDialogVisible" title="手动修正识别" width="500px">
-      <el-form :model="fixForm" label-width="100px">
-        <el-form-item label="文件名">
-          <div class="text-ellipsis" :title="currentFixRow?.original_path">{{ extractFilename(currentFixRow?.original_path) }}</div>
+    <el-dialog v-model="fixDialogVisible" title="手动修正识别" width="540px" append-to-body destroy-on-close>
+      <el-form ref="fixFormRef" :model="fixForm" label-width="110px">
+        <el-form-item label="待处理文件">
+          <div class="path-preview" :title="currentFixRow?.original_path">{{ currentFixRow?.original_path || '-' }}</div>
+        </el-form-item>
+        <el-form-item label="媒体类型" required>
+          <el-select v-model="fixForm.media_type" style="width: 180px">
+            <el-option label="TV" value="tv" />
+            <el-option label="电影" value="movie" />
+          </el-select>
         </el-form-item>
         <el-form-item label="TMDB ID" required>
-          <el-input v-model.number="fixForm.tmdb_id" placeholder="例如: 45782" />
+          <el-input v-model="fixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
+            <template #append>
+              <el-button @click="openTmdbSearchDialog('fix')">
+                <el-icon><Search /></el-icon>
+              </el-button>
+            </template>
+          </el-input>
         </el-form-item>
         <el-form-item label="标题" required>
-          <el-input v-model="fixForm.title" placeholder="TMDB 标准标题" />
+          <el-input v-model="fixForm.title" placeholder="例如：刀剑神域：序列之争" />
         </el-form-item>
-        <el-form-item label="年份" required>
-          <el-input v-model.number="fixForm.year" placeholder="首播年份或上映年份" />
+        <el-form-item label="年份">
+          <el-input-number v-model="fixForm.year" :min="1900" :max="2100" />
         </el-form-item>
-        <el-form-item label="季号">
+        <el-form-item v-if="fixForm.media_type === 'tv'" label="强制季号">
           <el-input-number v-model="fixForm.season" :min="0" />
         </el-form-item>
-        <el-form-item label="集号">
+        <el-form-item v-if="fixForm.media_type === 'tv'" label="集号">
           <el-input-number v-model="fixForm.episode" :min="0" />
         </el-form-item>
-        <el-form-item label="集号偏移">
-          <el-input-number v-model="fixForm.episode_offset" />
+        <el-form-item v-if="fixForm.media_type === 'tv'" label="集号偏移">
+          <el-input-number v-model="fixForm.episode_offset" :min="0" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -324,27 +336,45 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="dirFixDialogVisible" :title="dirFixMode === 'season' ? 'Season 修正重整' : '整组资源修正'" width="520px">
-      <el-form :model="dirFixForm" label-width="110px">
-        <el-form-item :label="dirFixMode === 'season' ? 'Season 范围' : '资源目录'">
-          <div class="text-ellipsis" :title="dirFixMode === 'season' ? currentNode?.label : drawerResource?.resource_dir">
+    <el-dialog
+      v-model="dirFixDialogVisible"
+      :title="dirFixMode === 'season' ? 'Season 修正重整' : '整组资源修正'"
+      width="560px"
+      append-to-body
+      destroy-on-close
+    >
+      <el-form ref="dirFixFormRef" :model="dirFixForm" label-width="110px">
+        <el-form-item label="待办目录">
+          <div class="path-preview" :title="dirFixMode === 'season' ? currentNode?.label : drawerResource?.resource_dir">
             {{ dirFixMode === 'season' ? `${drawerResource?.resource_dir || '-'} / ${currentNode?.label || '-'}` : (drawerResource?.resource_dir || '-') }}
           </div>
         </el-form-item>
+        <el-form-item label="媒体类型" required>
+          <el-select v-model="dirFixForm.media_type" style="width: 180px">
+            <el-option label="TV" value="tv" />
+            <el-option label="电影" value="movie" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="TMDB ID" required>
-          <el-input v-model.number="dirFixForm.tmdb_id" placeholder="例如: 45782" />
+          <el-input v-model="dirFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
+            <template #append>
+              <el-button @click="openTmdbSearchDialog('dir')">
+                <el-icon><Search /></el-icon>
+              </el-button>
+            </template>
+          </el-input>
         </el-form-item>
         <el-form-item label="标题" required>
-          <el-input v-model="dirFixForm.title" placeholder="TMDB 标准标题" />
+          <el-input v-model="dirFixForm.title" placeholder="例如：刀剑神域：序列之争" />
         </el-form-item>
-        <el-form-item label="年份" required>
-          <el-input v-model.number="dirFixForm.year" placeholder="首播年份或上映年份" />
+        <el-form-item label="年份">
+          <el-input-number v-model="dirFixForm.year" :min="1900" :max="2100" />
         </el-form-item>
-        <el-form-item label="季号 (Season)">
+        <el-form-item v-if="dirFixForm.media_type === 'tv'" label="强制季号">
           <el-input-number v-model="dirFixForm.season" :min="0" :disabled="dirFixMode === 'season'" />
         </el-form-item>
-        <el-form-item label="Episode Offset">
-          <el-input-number v-model="dirFixForm.episode_offset" />
+        <el-form-item v-if="dirFixForm.media_type === 'tv'" label="集号偏移">
+          <el-input-number v-model="dirFixForm.episode_offset" :min="0" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -352,13 +382,88 @@
         <el-button type="primary" :loading="dirFixing" @click="submitDirFix">提交修正</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="tmdbSearchDialogVisible"
+      title="搜索 TMDB 条目"
+      width="860px"
+      class="tmdb-search-dialog"
+      append-to-body
+      destroy-on-close
+    >
+      <div class="search-bar">
+        <el-input
+          v-model="tmdbSearchKeyword"
+          placeholder="电影或电视剧名称 / 直接输入 TMDB ID"
+          clearable
+          @keyup.enter="runTmdbSearch"
+        >
+          <template #prepend>
+            <el-icon><Search /></el-icon>
+          </template>
+          <template #append>
+            <el-button :loading="tmdbSearchLoading" @click="runTmdbSearch">搜索</el-button>
+          </template>
+        </el-input>
+      </div>
+
+      <div class="search-list" v-loading="tmdbSearchLoading">
+        <el-scrollbar max-height="560px">
+          <div v-if="tmdbSearchResults.length" class="search-items">
+            <div
+              v-for="item in tmdbSearchResults"
+              :key="`${item.media_type}:${item.tmdb_id}`"
+              class="search-item"
+              @click="selectTmdbSearchItem(item)"
+            >
+              <div class="poster-wrap">
+                <img
+                  v-if="posterUrl(item.poster_path)"
+                  class="poster"
+                  :src="posterUrl(item.poster_path)"
+                  :alt="item.title || 'poster'"
+                  loading="lazy"
+                />
+                <div v-else class="poster-placeholder">No Image</div>
+              </div>
+              <div class="meta">
+                <div class="title-row">
+                  <span class="title">{{ item.title || '-' }}</span>
+                  <span v-if="item.year" class="year">({{ item.year }})</span>
+                  <el-tag size="small" effect="plain" :type="item.media_type === 'tv' ? 'primary' : 'success'">
+                    {{ item.media_type === 'tv' ? '电视剧' : '电影' }}
+                  </el-tag>
+                </div>
+                <div class="overview">{{ item.overview || '暂无简介' }}</div>
+                <div class="id-line">
+                  TMDB ID:
+                  <a
+                    class="tmdb-link"
+                    :href="tmdbLink(item)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    @click.stop
+                  >
+                    {{ item.tmdb_id }}
+                  </a>
+                </div>
+              </div>
+              <div class="choose">
+                <el-button type="primary" link>选择</el-button>
+              </div>
+            </div>
+          </div>
+          <el-empty v-else description="输入关键词后点击搜索" />
+        </el-scrollbar>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Film, Monitor, Refresh } from '@element-plus/icons-vue'
+import { Film, Monitor, Refresh, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { mediaApi } from '../api/client'
 import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
@@ -390,13 +495,20 @@ const { ensurePosterForResource, hydrateCachedPosterMeta, resourcePosterUrl, res
 const fixDialogVisible = ref(false)
 const fixing = ref(false)
 const currentFixRow = ref(null)
-const fixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode: 1, episode_offset: undefined })
+const fixFormRef = ref(null)
+const fixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: 1, episode: 1, episode_offset: undefined })
 
 const dirFixDialogVisible = ref(false)
 const dirFixing = ref(false)
 const dirFixMode = ref('resource')
 const dirFixScope = ref(null)
-const dirFixForm = reactive({ tmdb_id: '', title: '', year: '', season: 1, episode_offset: undefined })
+const dirFixFormRef = ref(null)
+const dirFixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: 1, episode_offset: undefined })
+const tmdbSearchDialogVisible = ref(false)
+const tmdbSearchLoading = ref(false)
+const tmdbSearchKeyword = ref('')
+const tmdbSearchResults = ref([])
+const tmdbSearchTarget = ref('fix')
 
 function extractFilename(path) {
   return String(path || '').split(/[/\\]/).pop() || ''
@@ -432,6 +544,64 @@ function formatSize(size) {
     index += 1
   }
   return `${next.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+}
+
+function posterUrl(posterPath) {
+  if (!posterPath) return ''
+  if (String(posterPath).startsWith('http')) return posterPath
+  return `https://image.tmdb.org/t/p/w500${posterPath}`
+}
+
+function activeSearchMediaType() {
+  if (tmdbSearchTarget.value === 'dir') {
+    return dirFixForm.media_type === 'movie' ? 'movie' : 'tv'
+  }
+  return fixForm.media_type === 'movie' ? 'movie' : 'tv'
+}
+
+function openTmdbSearchDialog(target) {
+  tmdbSearchTarget.value = target === 'dir' ? 'dir' : 'fix'
+  tmdbSearchKeyword.value = String(tmdbSearchTarget.value === 'dir' ? (dirFixForm.title || '') : (fixForm.title || '')).trim()
+  tmdbSearchResults.value = []
+  tmdbSearchDialogVisible.value = true
+}
+
+async function runTmdbSearch() {
+  const keyword = String(tmdbSearchKeyword.value || '').trim()
+  if (!keyword) {
+    ElMessage.warning('请输入关键词或 TMDB ID')
+    return
+  }
+  tmdbSearchLoading.value = true
+  try {
+    const { data } = await mediaApi.searchTmdb({
+      q: keyword,
+      media_type: activeSearchMediaType(),
+      limit: 20,
+    })
+    tmdbSearchResults.value = data?.items || []
+    if (!tmdbSearchResults.value.length) {
+      ElMessage.info('未找到匹配结果')
+    }
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '搜索失败')
+  } finally {
+    tmdbSearchLoading.value = false
+  }
+}
+
+function selectTmdbSearchItem(item) {
+  const targetForm = tmdbSearchTarget.value === 'dir' ? dirFixForm : fixForm
+  targetForm.tmdb_id = item?.tmdb_id ? String(item.tmdb_id) : ''
+  targetForm.title = item?.title || ''
+  targetForm.year = item?.year ?? undefined
+  tmdbSearchDialogVisible.value = false
+}
+
+function tmdbLink(item) {
+  if (!item?.tmdb_id) return '#'
+  const type = item.media_type === 'tv' ? 'tv' : 'movie'
+  return `https://www.themoviedb.org/${type}/${item.tmdb_id}`
 }
 
 function bucketLabel(bucket) {
@@ -752,12 +922,14 @@ async function deleteSelectedItems(command) {
 
 function openFixDialog(row) {
   currentFixRow.value = row
+  fixForm.media_type = row?.type === 'movie' ? 'movie' : 'tv'
   fixForm.tmdb_id = row.tmdb_id || drawerResource.value?.tmdb_id || ''
   fixForm.title = ''
-  fixForm.year = ''
+  fixForm.year = undefined
   fixForm.season = row.tree_season || currentNode.value?.season || 1
   fixForm.episode = 1
   fixForm.episode_offset = undefined
+  tmdbSearchResults.value = []
   fixDialogVisible.value = true
 }
 
@@ -769,14 +941,16 @@ async function submitFix() {
   fixing.value = true
   try {
     const { data } = await mediaApi.reidentify(currentFixRow.value.id, {
+      media_type: fixForm.media_type,
       tmdb_id: Number(fixForm.tmdb_id),
       title: fixForm.title,
       year: fixForm.year ? Number(fixForm.year) : undefined,
-      season: fixForm.season ?? undefined,
-      episode: fixForm.episode ?? undefined,
-      episode_offset: fixForm.episode_offset ?? undefined,
+      season: fixForm.media_type === 'tv' ? (fixForm.season ?? undefined) : undefined,
+      episode: fixForm.media_type === 'tv' ? (fixForm.episode ?? undefined) : undefined,
+      episode_offset: fixForm.media_type === 'tv' ? (fixForm.episode_offset ?? undefined) : undefined,
     })
-    ElMessage.success(data?.message || '修正成功')
+    const taskSuffix = data?.task_id ? `，任务 #${data.task_id} 日志可在首页查看` : ''
+    ElMessage.success((data?.message || '修正成功') + taskSuffix)
     fixDialogVisible.value = false
     await Promise.all([loadResources(), reloadDrawer()])
   } catch (error) {
@@ -789,22 +963,26 @@ async function submitFix() {
 function openDirFixDialog() {
   dirFixMode.value = 'resource'
   dirFixScope.value = drawerResource.value?.scope || null
+  dirFixForm.media_type = drawerResource.value?.type === 'movie' ? 'movie' : 'tv'
   dirFixForm.tmdb_id = drawerResource.value?.tmdb_id || ''
   dirFixForm.title = ''
-  dirFixForm.year = ''
+  dirFixForm.year = undefined
   dirFixForm.season = undefined
   dirFixForm.episode_offset = undefined
+  tmdbSearchResults.value = []
   dirFixDialogVisible.value = true
 }
 
 function openSeasonFixDialog(node) {
   dirFixMode.value = 'season'
   dirFixScope.value = node?.scope || null
+  dirFixForm.media_type = drawerResource.value?.type === 'movie' ? 'movie' : 'tv'
   dirFixForm.tmdb_id = drawerResource.value?.tmdb_id || ''
   dirFixForm.title = ''
-  dirFixForm.year = ''
+  dirFixForm.year = undefined
   dirFixForm.season = node?.season ?? currentNode.value?.season ?? 1
   dirFixForm.episode_offset = undefined
+  tmdbSearchResults.value = []
   dirFixDialogVisible.value = true
 }
 
@@ -813,14 +991,19 @@ async function submitDirFix() {
     ElMessage.warning('请填写完整的修正信息')
     return
   }
+  if (dirFixMode.value === 'resource' && drawerResource.value?.type === 'tv') {
+    ElMessage.warning('TV 资源仅保留 Season 级修正，请在具体 Season 节点执行')
+    return
+  }
   dirFixing.value = true
   try {
     const payload = {
+      media_type: dirFixForm.media_type,
       tmdb_id: Number(dirFixForm.tmdb_id),
       title: dirFixForm.title,
       year: dirFixForm.year ? Number(dirFixForm.year) : undefined,
-      season: dirFixForm.season ?? undefined,
-      episode_offset: dirFixForm.episode_offset ?? undefined,
+      season: dirFixForm.media_type === 'tv' ? (dirFixForm.season ?? undefined) : undefined,
+      episode_offset: dirFixForm.media_type === 'tv' ? (dirFixForm.episode_offset ?? undefined) : undefined,
     }
     const { data } = dirFixMode.value === 'season'
       ? await mediaApi.reidentifyScope({
@@ -832,7 +1015,8 @@ async function submitDirFix() {
           target_dir: drawerResource.value.resource_dir,
           ...payload,
         })
-    ElMessage.success(data?.message || (dirFixMode.value === 'season' ? 'Season 修正成功' : '整组修正成功'))
+    const taskSuffix = data?.task_id ? `，任务 #${data.task_id} 日志可在首页查看` : ''
+    ElMessage.success((data?.message || (dirFixMode.value === 'season' ? 'Season 修正成功' : '整组修正成功')) + taskSuffix)
     dirFixDialogVisible.value = false
     await Promise.all([loadResources(), reloadDrawer()])
   } catch (error) {
@@ -955,6 +1139,12 @@ onMounted(() => {
   word-break: break-all;
 }
 
+.path-preview {
+  font-size: 12px;
+  color: #64748b;
+  word-break: break-all;
+}
+
 .drawer-header-sticky {
   position: sticky;
   top: -20px;
@@ -985,6 +1175,119 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+.search-bar {
+  margin-bottom: 24px;
+}
+
+.search-list {
+  border-top: 1px solid var(--amm-border, #e5e7eb);
+  padding-top: 16px;
+}
+
+.search-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-item {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.search-item:hover {
+  background: rgba(148, 163, 184, 0.08);
+  border-color: var(--amm-border, #e5e7eb);
+}
+
+.poster-wrap {
+  width: 56px;
+  min-width: 56px;
+  height: 84px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(100, 116, 139, 0.12);
+}
+
+.poster {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.poster-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 10px;
+}
+
+.meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: #111827;
+}
+
+.year {
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.overview {
+  color: #4b5563;
+  font-size: 14px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.id-line {
+  margin-top: 6px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.tmdb-link {
+  color: #3b82f6;
+  text-decoration: none;
+}
+
+.tmdb-link:hover {
+  text-decoration: underline;
+}
+
+.choose {
+  width: 60px;
+  min-width: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .node-nav {
@@ -1090,7 +1393,7 @@ onMounted(() => {
   top: clamp(92px, 11vh, 148px);
   right: calc(64% + 24px);
   transform: none;
-  z-index: 2100;
+  z-index: 1900;
   width: min(340px, calc(36vw - 32px));
   aspect-ratio: 2 / 3;
   pointer-events: none;
