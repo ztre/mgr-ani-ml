@@ -1416,17 +1416,6 @@ def _process_file(
             return
 
     tmdb_id = context.get("tmdb_id")
-    if _should_ignore_fractional_episode(str(src_path), context_title=context.get("title")):
-        append_log(f"跳过半集文件: {src_path.name}")
-        _record_unhandled_item(
-            original_path=src_path,
-            reason="fractional episode skipped",
-            file_type="video" if ext in VIDEO_EXTS else "attachment",
-            sync_group_id=sync_group_id,
-            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-        )
-        return
-
     skip_variant_label = _detect_skip_mainline_variant_label(src_path.name)
     if skip_variant_label:
         skip_reason = "NC Ver skip" if skip_variant_label in {"NC Ver", "NCOPED"} else "mainline variant skip"
@@ -1760,6 +1749,27 @@ def _process_file(
 
     if parse_result.extra_category is not None:
         _log_special_classification(parse_result.extra_category, parse_result.extra_label)
+
+    if (
+        ext in VIDEO_EXTS
+        and _should_ignore_fractional_episode(
+            str(src_path),
+            parse_result=parse_result,
+            context_title=str(context.get("title") or ""),
+        )
+    ):
+        append_log(f"跳过半集文件: {src_path.name}")
+        _record_unhandled_item(
+            original_path=src_path,
+            reason="fractional episode skipped",
+            file_type="video",
+            sync_group_id=sync_group_id,
+            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+            season=parse_result.season,
+            episode=parse_result.episode,
+            extra_category=parse_result.extra_category,
+        )
+        return
 
     assignments = context.get("allocator_assignments") or {}
     item_map = context.get("allocator_items") or {}
@@ -3172,6 +3182,8 @@ def _should_ignore_fractional_episode(
     parse_result: ParseResult | None = None,
     context_title: str | None = None,
 ) -> bool:
+    if parse_result is not None and parse_result.extra_category is not None:
+        return False
     stem = Path(filename).stem
     matches = list(re.finditer(r"\d{1,3}\.5\b", stem, re.I))
     if not matches:
