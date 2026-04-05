@@ -150,17 +150,6 @@ class Settings:
   anilist_fallback_enabled: bool = True
   anilist_fallback_timeout_seconds: float = 8.0
 
-  # AI 识别外挂功能（默认关闭，不影响原有识别流程）
-  ai_enabled: bool = False
-  ai_provider: str = 'openai'          # 'openai' | 'gemini'
-  ai_api_key: str = ''                 # OpenAI 兼容 API Key
-  ai_base_url: str = ''                # OpenAI 兼容 API 地址（留空使用官方）
-  ai_model: str = ''                   # OpenAI 模型，留空默认 gpt-4o-mini
-  ai_confidence_threshold: str = 'Medium'  # 'High' | 'Medium' | 'Low'
-  ai_gemini_api_key: str = ''          # Google Gemini API Key
-  ai_gemini_base_url: str = ''         # Gemini 自定义地址（留空使用官方）
-  ai_gemini_model: str = 'gemini-2.5-flash'
-
   debug: bool = False
   scan_threads: int = max(1, (os.cpu_count() or 1) * 2)
 
@@ -268,15 +257,6 @@ class Settings:
       data.get(f'{p}ANILIST_FALLBACK_TIMEOUT_SECONDS'),
       self.anilist_fallback_timeout_seconds,
     )
-    self.ai_enabled = _parse_bool(data.get(f'{p}AI_ENABLED'), self.ai_enabled)
-    self.ai_provider = data.get(f'{p}AI_PROVIDER', self.ai_provider)
-    self.ai_api_key = data.get(f'{p}AI_API_KEY', self.ai_api_key)
-    self.ai_base_url = data.get(f'{p}AI_BASE_URL', self.ai_base_url)
-    self.ai_model = data.get(f'{p}AI_MODEL', self.ai_model)
-    self.ai_confidence_threshold = data.get(f'{p}AI_CONFIDENCE_THRESHOLD', self.ai_confidence_threshold)
-    self.ai_gemini_api_key = data.get(f'{p}AI_GEMINI_API_KEY', self.ai_gemini_api_key)
-    self.ai_gemini_base_url = data.get(f'{p}AI_GEMINI_BASE_URL', self.ai_gemini_base_url)
-    self.ai_gemini_model = data.get(f'{p}AI_GEMINI_MODEL', self.ai_gemini_model)
 
   def save_to_env(self) -> None:
     env_path = self.env_file
@@ -330,15 +310,17 @@ class Settings:
       f'{prefix}RECOGNITION_FAIL_SCORE': str(float(self.recognition_fail_score)),
       f'{prefix}ANILIST_FALLBACK_ENABLED': str(bool(self.anilist_fallback_enabled)).lower(),
       f'{prefix}ANILIST_FALLBACK_TIMEOUT_SECONDS': str(float(self.anilist_fallback_timeout_seconds)),
-      f'{prefix}AI_ENABLED': str(bool(self.ai_enabled)).lower(),
-      f'{prefix}AI_PROVIDER': self.ai_provider,
-      f'{prefix}AI_API_KEY': self.ai_api_key,
-      f'{prefix}AI_BASE_URL': self.ai_base_url,
-      f'{prefix}AI_MODEL': self.ai_model,
-      f'{prefix}AI_CONFIDENCE_THRESHOLD': self.ai_confidence_threshold,
-      f'{prefix}AI_GEMINI_API_KEY': self.ai_gemini_api_key,
-      f'{prefix}AI_GEMINI_BASE_URL': self.ai_gemini_base_url,
-      f'{prefix}AI_GEMINI_MODEL': self.ai_gemini_model,
+    }
+    legacy_removed_keys = {
+      f'{prefix}AI_ENABLED',
+      f'{prefix}AI_PROVIDER',
+      f'{prefix}AI_API_KEY',
+      f'{prefix}AI_BASE_URL',
+      f'{prefix}AI_MODEL',
+      f'{prefix}AI_CONFIDENCE_THRESHOLD',
+      f'{prefix}AI_GEMINI_API_KEY',
+      f'{prefix}AI_GEMINI_BASE_URL',
+      f'{prefix}AI_GEMINI_MODEL',
     }
 
     out: list[str] = []
@@ -349,6 +331,8 @@ class Settings:
         out.append(line)
         continue
       k = line.split('=', 1)[0].strip()
+      if k in legacy_removed_keys:
+        continue
       if k in updates:
         out.append(f'{k}={updates[k]}\n')
         seen.add(k)
