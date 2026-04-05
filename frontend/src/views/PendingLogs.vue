@@ -149,6 +149,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Refresh, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { mediaApi } from '../api/client'
 

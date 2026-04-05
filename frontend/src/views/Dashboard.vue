@@ -199,37 +199,36 @@
       </el-table>
     </el-card>
 
-    <!-- 日志抽屉 -->
-    <el-drawer v-model="drawerVisible" title="任务日志" size="50%" class="logs-drawer">
-      <div class="logs-drawer-body">
-        <div class="log-toolbar">
-          <div class="log-toolbar-left">
-            <el-switch
-              v-model="logAutoRefresh"
-              active-text="实时刷新"
-              inactive-text="暂停刷新"
-              @change="onLogAutoRefreshChange"
-            />
-            <span class="log-meta" v-if="currentLogTaskId">任务 #{{ currentLogTaskId }}</span>
-            <span class="log-meta" v-if="lastLogRefreshedAt">上次刷新 {{ lastLogRefreshedAt }}</span>
-          </div>
-          <el-button size="small" @click="manualRefreshLogs">手动刷新</el-button>
-        </div>
-        <div v-loading="logsLoading" class="log-container">
-          <pre v-if="currentLogs.length">{{ [...currentLogs].reverse().join('\n') }}</pre>
-          <div v-else class="empty-logs">暂无日志</div>
-        </div>
-      </div>
-    </el-drawer>
+    <TaskLogMonitorDrawer
+      v-model="drawerVisible"
+      title="任务日志"
+      size="46%"
+      drawer-class="logs-drawer"
+      :task-id="currentLogTaskId"
+      :task-status="currentLogTaskStatus"
+      :target-label="currentLogTargetLabel"
+      :last-refreshed-at="lastLogRefreshedAt"
+      :auto-refresh="logAutoRefresh"
+      :logs="currentLogs"
+      :logs-loading="logsLoading"
+      :manual-refresh-disabled="!currentLogTaskId"
+      waiting-text="正在等待任务写入日志..."
+      running-text="任务进行中，可实时查看日志进度。"
+      finished-text="任务已结束，日志面板保持打开，可继续查看输出。"
+      @update:autoRefresh="logAutoRefresh = $event"
+      @refresh="manualRefreshLogs"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
+import { defineAsyncComponent, ref, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MoonNight, Sunny } from '@element-plus/icons-vue'
+import { DataLine, Film, Monitor, MoonNight, Refresh, Setting, Sunny, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
 import { syncGroupsApi, scanApi, embyApi, tasksApi, mediaApi } from '../api/client'
 import dayjs from 'dayjs'
+
+const TaskLogMonitorDrawer = defineAsyncComponent(() => import('../components/TaskLogMonitorDrawer.vue'))
 
 const groups = ref([])
 const tasks = ref([])
@@ -255,10 +254,18 @@ const drawerVisible = ref(false)
 const logsLoading = ref(false)
 const currentLogs = ref([])
 const currentLogTaskId = ref(null)
+const currentLogTaskStatus = ref('pending')
+const currentLogTargetLabel = ref('')
 const logAutoRefresh = ref(true)
 const lastLogRefreshedAt = ref('')
 let logTimer = null
 let tasksTimer = null
+
+function syncCurrentLogTaskMeta(task) {
+  if (!task) return
+  currentLogTaskStatus.value = String(task?.status || currentLogTaskStatus.value || 'pending')
+  currentLogTargetLabel.value = String(task?.target_name || currentLogTargetLabel.value || '')
+}
 
 async function loadStats() {
   try {
@@ -290,6 +297,10 @@ async function loadTasks() {
   try {
     const { data } = await tasksApi.list({ limit: 10 })
     tasks.value = data
+    if (currentLogTaskId.value) {
+      const matched = tasks.value.find((task) => Number(task?.id) === Number(currentLogTaskId.value))
+      syncCurrentLogTaskMeta(matched)
+    }
   } catch {
     ElMessage.error('加载任务历史失败')
   } finally {
@@ -409,6 +420,7 @@ async function refreshEmby() {
 
 async function viewLogs(task) {
   currentLogTaskId.value = task.id
+  syncCurrentLogTaskMeta(task)
   drawerVisible.value = true
   currentLogs.value = []
   await fetchLogs(task.id)
@@ -662,61 +674,7 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
-.log-container {
-  flex: 1;
-  min-height: 0;
-  padding: 16px;
-  background: #f8fafc;
-  overflow: auto;
-  border-radius: 10px;
-}
-.log-container pre {
-  color: #334155;
-  font-family: "IBM Plex Mono", "Fira Code", monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin: 0;
-}
-.empty-logs {
-  color: #94a3b8;
-  text-align: center;
-  margin-top: 40px;
-}
-
-.log-toolbar {
-  display: flex;
-  flex: 0 0 auto;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.log-toolbar-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.log-meta {
-  color: #64748b;
-  font-size: 12px;
-}
-
 .theme-switch {
   margin-right: 4px;
-}
-
-.logs-drawer-body {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-:deep(.logs-drawer .el-drawer__body) {
-  overflow: hidden;
 }
 </style>

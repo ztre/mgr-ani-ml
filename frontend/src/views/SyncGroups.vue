@@ -79,7 +79,9 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus } from '@element-plus/icons-vue'
 import { syncGroupsApi } from '../api/client'
+import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 
 const groups = ref([])
 const dialogVisible = ref(false)
@@ -150,7 +152,11 @@ async function updateGroup(row) {
 }
 
 async function deleteGroup(row) {
-  await ElMessageBox.confirm(`确定删除同步组「${row.name}」？`, '确认')
+  await ElMessageBox.confirm(
+    buildConfirmMessage([`确定删除同步组「${row.name}」？`]),
+    '确认',
+    buildConfirmDialogOptions(),
+  )
   try {
     await syncGroupsApi.delete(row.id)
     ElMessage.success('已删除')

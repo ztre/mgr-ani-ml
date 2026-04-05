@@ -246,6 +246,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { RefreshRight } from '@element-plus/icons-vue'
 import { configApi, embyApi, inodesApi, mediaApi, tasksApi } from '../api/client'
 
 const form = ref({

@@ -653,6 +653,8 @@ def _run_manual_organize_core(
         "score": 1.0,
         "fallback_round": 0,
         "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
+        "season_hint_source": "explicit" if (season_override is not None and season_override > 0) else None,
+        "season_hint_confidence": "high" if (season_override is not None and season_override > 0) else None,
         "special_hint": False,
         "record_status": "manual_fixed",
         "extra_context": bool(detect_special_dir_context(root_dir)[0]),
@@ -755,7 +757,15 @@ def _run_manual_organize_core(
             _cancel_manual_task("manual-finalize")
 
         if pending is not None:
-            if manual_scope_complete:
+            pending_resolved = manual_scope_complete
+            if not pending_resolved:
+                pending_resolved = not _has_unprocessed_manual_mainline_files(
+                    db,
+                    sync_group_id=group.id,
+                    file_paths=all_media_files,
+                    media_type=media_type,
+                )
+            if pending_resolved:
                 db.delete(pending)
             else:
                 pending.updated_at = datetime.now(timezone.utc)
@@ -1329,6 +1339,71 @@ def _classify_attachment_route(src_path: Path, parse_result: ParseResult) -> Att
     return AttachmentRoutePlan(parse_result=parse_result, follow_mode="mainline-follow", reason="default-mainline-follow")
 
 
+def _build_variant_special_attachment_parse_result(src_path: Path, parse_result: ParseResult) -> ParseResult | None:
+    """为 bracket-variant 附件构造 special-follow 候选，但不做盲目降级。
+
+    只有在后续确实命中已注册的 special 锚点时，才会采用这个候选；
+    否则宁可停止回退，也不要把 `[Mystery Camp]` 这类附件猜成 E02 主线字幕。
+    """
+    if parse_result.extra_category is not None:
+        return None
+    if parse_result.episode is None:
+        return None
+    variant_category, variant_label, _from_bracket = _detect_attachment_variant_as_special(src_path.name)
+    if variant_category is None:
+        return None
+    return parse_result._replace(
+        extra_category=variant_category,
+        extra_label=variant_label,
+        is_special=variant_category in SPECIAL_CATEGORIES,
+        episode=None,
+    )
+
+
+def _detect_attachment_variant_as_special(filename: str) -> tuple[str | None, str | None, bool]:
+    """附件侧的 variant 候选检测。
+
+    与主视频不同，附件更容易在首个发布组 bracket 或技术 bracket 上误触发，
+    这里只保留更保守的候选：跳过起始 bracket，并排除 `Main10` 这类技术标签。
+    """
+    bracket_matches = list(re.finditer(r"\[([^\]]+)\]|\(([^)]+)\)", filename or ""))
+    token_count = len(bracket_matches)
+    starts_with_bracket = bool(re.match(r"\s*[\[(]", filename or ""))
+    for idx, match in enumerate(bracket_matches):
+        raw = next((group for group in match.groups() if group), "")
+        if not raw:
+            continue
+        if idx == 0 and starts_with_bracket:
+            continue
+        if _is_noise_or_group_bracket_token(raw):
+            continue
+
+        m = re.search(r"\bPreview\s*0*(\d*)(?:[_\-\s]+(\d{1,3}))?", raw, re.I)
+        if m:
+            idx_text = m.group(1)
+            label = _format_prefix_number("Preview", int(idx_text)) if idx_text else "Preview"
+            if m.group(2):
+                label = f"{label} {int(m.group(2))}"
+            return "preview", label, True
+
+        if re.search(r"\bOn\s*Air\s*Ver\.?\b", raw, re.I):
+            return "special", "On Air Ver", True
+
+        credit_match = re.search(r"((?:\w+\s+)*Staff\s+Credit\s+Ver\.?|Credit\s+Ver\.?)", raw, re.I)
+        if credit_match:
+            label = re.sub(r"\s+", " ", str(credit_match.group(1) or "")).strip().rstrip(".")[:60] or "Credit Ver"
+            return "special", label, True
+
+        label = _normalize_generic_variant_bracket_label(raw)
+        if not _is_generic_variant_bracket_label(label, token_count):
+            continue
+        if re.fullmatch(r"(?:main|high|low|profile)\s*\d{1,3}", label, re.I):
+            continue
+        return "special", label, True
+
+    return None, None, False
+
+
 def _process_file(
     db: Session,
     src_path: Path,
@@ -1549,16 +1624,45 @@ def _process_file(
         if media_type == "tv" and (not extra_context) and parse_result.extra_category is None:
             parse_result = _apply_tv_mainline_context_overrides(parse_result, src_path, context)
 
+        variant_special_parse_result = None
+        variant_special_anchor_result = None
+        if attachment_plan.follow_mode == "mainline-follow":
+            variant_special_parse_result = _build_variant_special_attachment_parse_result(src_path, parse_result)
+            if variant_special_parse_result is not None:
+                variant_special_anchor_result = _resolve_attachment_follow_target_details(
+                    src_path,
+                    variant_special_parse_result,
+                    dir_runtime,
+                    follow_mode="special-follow",
+                )
+                if variant_special_anchor_result.anchor_dst is not None:
+                    parse_result = variant_special_parse_result
+                    attachment_plan = AttachmentRoutePlan(
+                        parse_result=parse_result,
+                        follow_mode="special-follow",
+                        reason="registered-variant-special-anchor",
+                    )
+
         # 中文说明：
         # 附件现在先完成“语义分流”，再进入 resolver 查锚点。
         # 这样日志能直接反映当前附件是按主视频、extra 还是 special 逻辑在找目标，
         # 也避免了旧实现里“附件先被错误降级，再在错误语义上继续查找”的连锁问题。
-        anchor_result = _resolve_attachment_follow_target_details(
-            src_path,
-            parse_result,
-            dir_runtime,
-            follow_mode=attachment_plan.follow_mode,
-        )
+        if variant_special_parse_result is not None and variant_special_anchor_result is not None:
+            if variant_special_anchor_result.anchor_dst is not None:
+                anchor_result = variant_special_anchor_result
+            else:
+                # 中文说明：
+                # `[Mystery Camp]` / `[Tabisuru Shima Rin]` 这类附件若已经命中 variant-special
+                # 候选，但目录里并没有对应的已注册 special 视频，就不能再回退去猜 E02。
+                # 否则 parser 从 `Season 2` 派生出的弱 episode=2 会把附件误绑到主线正片。
+                anchor_result = variant_special_anchor_result
+        else:
+            anchor_result = _resolve_attachment_follow_target_details(
+                src_path,
+                parse_result,
+                dir_runtime,
+                follow_mode=attachment_plan.follow_mode,
+            )
         anchor_dst = anchor_result.anchor_dst
         if anchor_dst is not None:
             dst_path = resolver_build_attachment_target_from_anchor(anchor_dst, parse_result, ext, src_path=src_path)
@@ -1684,18 +1788,22 @@ def _process_file(
             context_title=str(context.get("title") or ""),
         )
     ):
-        append_log(f"INFO: 跳过第0集/00集文件: {src_path.name}")
-        _record_unhandled_item(
-            original_path=src_path,
-            reason="zero episode skipped",
-            file_type="video",
-            sync_group_id=sync_group_id,
-            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
-            season=parse_result.season,
-            episode=parse_result.episode,
-            extra_category=parse_result.extra_category,
-        )
-        return
+        if _is_bracket_zero_episode_marker(src_path.name):
+            append_log(f"INFO: [00] 零集文件按特典处理: {src_path.name}")
+            parse_result = _promote_zero_episode_parse_result(parse_result, src_path.name)
+        else:
+            append_log(f"INFO: 跳过第0集/00集文件: {src_path.name}")
+            _record_unhandled_item(
+                original_path=src_path,
+                reason="zero episode skipped",
+                file_type="video",
+                sync_group_id=sync_group_id,
+                tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+                season=parse_result.season,
+                episode=parse_result.episode,
+                extra_category=parse_result.extra_category,
+            )
+            return
 
     if media_type == "tv" and (not extra_context):
         if _is_missing_or_invalid_episode(parse_result.episode) and parse_result.extra_category is None:
@@ -2626,6 +2734,52 @@ def _expand_manual_selected_media_files(
     return expanded, len(auto_selected_specials), auto_included
 
 
+def _collect_remaining_manual_mainline_files(
+    root_dir: Path,
+    *,
+    include: str,
+    exclude: str,
+    source_root: Path,
+    media_type: str,
+) -> list[Path]:
+    if not root_dir.exists() or not root_dir.is_dir():
+        return []
+
+    remaining_files = _collect_media_files_under_dir(root_dir, include, exclude, source_root)
+    return [
+        path
+        for path in remaining_files
+        if path.suffix.lower() in VIDEO_EXTS and _classify_manual_video_role(path, media_type) == "mainline"
+    ]
+
+
+def _has_unprocessed_manual_mainline_files(
+    db: Session,
+    *,
+    sync_group_id: int,
+    file_paths: list[Path],
+    media_type: str,
+) -> bool:
+    mainline_paths = [
+        str(path)
+        for path in file_paths
+        if path.suffix.lower() in VIDEO_EXTS and _classify_manual_video_role(path, media_type) == "mainline"
+    ]
+    if not mainline_paths:
+        return False
+
+    rows = db.query(MediaRecord.original_path, MediaRecord.status, MediaRecord.target_path).filter(
+        MediaRecord.sync_group_id == sync_group_id,
+        MediaRecord.original_path.in_(mainline_paths),
+    ).all()
+    processed_paths = {
+        str(original_path)
+        for original_path, status, target_path in rows
+        if str(status or "") in {"scraped", "manual_fixed"} and str(target_path or "").strip()
+    }
+    return any(path not in processed_paths for path in mainline_paths)
+
+
 def _extract_first_dir_name(dirs: list[Path], source_root: Path) -> str | None:
     if not dirs:
         return None
@@ -2998,6 +3152,20 @@ def _should_ignore_zero_episode(
     return False
 
 
+def _is_bracket_zero_episode_marker(filename: str) -> bool:
+    stem = Path(filename).stem
+    return re.search(r"[\[\(]\s*0{1,2}\s*[\]\)]", stem) is not None
+
+
+def _promote_zero_episode_parse_result(parse_result: ParseResult, filename: str) -> ParseResult:
+    return parse_result._replace(
+        extra_category="special",
+        extra_label=_extract_zero_episode_attachment_label(filename),
+        is_special=True,
+        episode=None,
+    )
+
+
 def _extract_zero_episode_attachment_label(filename: str) -> str:
     stem = Path(filename).stem
     match = re.search(r"[\[\(]\s*(0{1,2})\s*[\]\)]", stem)
@@ -3280,6 +3448,19 @@ def _build_allocation_items(
                 )
             else:
                 continue
+        if (
+            media_type == "tv"
+            and ext in VIDEO_EXTS
+            and parse_result.extra_category is None
+            and _is_missing_or_invalid_episode(parse_result.episode)
+            and _should_ignore_zero_episode(
+                src_path.name,
+                parse_result=parse_result,
+                context_title=str(context.get("title") or parse_result.title or ""),
+            )
+            and _is_bracket_zero_episode_marker(src_path.name)
+        ):
+            parse_result = _promote_zero_episode_parse_result(parse_result, src_path.name)
         if special_ctx:
             forced_category, forced_label, _from_bracket = classify_extra_from_text(src_path.name)
             if forced_category:
@@ -3306,21 +3487,14 @@ def _build_allocation_items(
             season_from_path = _extract_season_from_path(src_path)
             has_explicit = _has_explicit_season_token(src_path.name)
             resolved_season = context.get("resolved_season")
-            if season_from_path is not None:
-                season = season_from_path
-            elif not has_explicit and resolved_season is not None:
-                season = resolved_season
-            else:
-                # !! 弱季号提示：有 resolved_season 时优先使用，不信任 bang 派生的季号
-                if getattr(parse_result, "season_hint_strength", None) == "bang" and resolved_season is not None:
-                    append_log(
-                        f"INFO: [season] bang 候选覆盖: file={src_path.name!r}, "
-                        f"candidate={parse_result.season} → resolved={resolved_season} (source=resolved_season)"
-                    )
-                    season = resolved_season
-                else:
-                    season = parse_result.season or resolved_season or 1
-            parse_result = parse_result._replace(season=season)
+            parse_result = _apply_tv_mainline_context_overrides(
+                parse_result,
+                src_path,
+                context,
+                resolved_season=resolved_season,
+                season_from_path=season_from_path,
+                has_explicit=has_explicit,
+            )
         parse_result = _apply_parallel_variant_suffix(parse_result, src_path)
         if ext in ATTACHMENT_EXTS and parse_result.extra_category in ALL_EXTRA_LIKE_CATEGORIES:
             # 附件始终通过 follow-anchor 绑定到已落定的视频目标，不应参与特典编号分配。

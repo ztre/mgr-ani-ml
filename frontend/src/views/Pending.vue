@@ -78,8 +78,15 @@
       </div>
     </el-card>
 
-    <el-drawer v-model="dialogVisible" title="手动识别整理" direction="rtl" size="820px" destroy-on-close class="organize-drawer">
-      <div ref="organizeDrawerBodyRef" class="organize-drawer-body">
+    <el-dialog
+      v-model="dialogVisible"
+      title="手动识别整理"
+      width="980px"
+      append-to-body
+      destroy-on-close
+      class="organize-dialog"
+    >
+      <div ref="organizeDrawerBodyRef" class="organize-dialog-body">
       <el-form ref="organizeFormRef" :model="form" label-width="110px">
         <el-form-item label="待办目录">
           <div class="path-preview" :title="currentRow?.original_path">{{ currentRow?.original_path || '-' }}</div>
@@ -120,14 +127,14 @@
             <div class="pending-files-subtitle">这里只展示正片视频；不勾选则整理整个目录，勾选后会自动补齐对应附件。</div>
           </div>
           <div class="pending-files-actions">
-            <el-button-group class="pending-filter-group">
+            <div class="pending-filter-group" role="group" aria-label="目录文件过滤">
               <el-button plain :type="pendingFileView === 'all' ? 'primary' : 'default'" @click="pendingFileView = 'all'">全部 {{ pendingFileItems.length }}</el-button>
               <el-button plain :type="pendingFileView === 'selected' ? 'warning' : 'default'" @click="pendingFileView = 'selected'">已选 {{ selectedPendingPaths.length }}</el-button>
-            </el-button-group>
-            <el-button-group class="pending-select-group">
+            </div>
+            <div class="pending-select-group" role="group" aria-label="目录文件选择操作">
               <el-button plain @click="selectAllPendingFiles" :disabled="pendingFilesLoading || !pendingFileItems.length">全选</el-button>
               <el-button plain @click="clearPendingFileSelection" :disabled="pendingFilesLoading || !selectedPendingPaths.length">清空</el-button>
-            </el-button-group>
+            </div>
           </div>
         </div>
 
@@ -177,7 +184,31 @@
           {{ selectedPendingPaths.length ? '整理选中文件' : '开始整理' }}
         </el-button>
       </template>
-    </el-drawer>
+    </el-dialog>
+
+    <TaskLogMonitorDrawer
+      v-model="organizeMonitorVisible"
+      title="整理任务日志"
+      direction="rtl"
+      size="46%"
+      append-to-body
+      destroy-on-close
+      drawer-class="organize-monitor-drawer"
+      :task-id="organizeMonitorTaskId"
+      :task-status="organizeMonitorTaskStatus"
+      :target-label="organizeMonitorTargetLabel"
+      :last-refreshed-at="organizeMonitorLastRefreshedAt"
+      :auto-refresh="organizeMonitorAutoRefresh"
+      :logs="organizeMonitorLogs"
+      :logs-loading="organizeMonitorLogsLoading"
+      :waiting-for-task="organizeMonitorWaitingForTask"
+      :manual-refresh-disabled="!organizeMonitorTaskId"
+      waiting-text="正在等待整理任务写入日志..."
+      running-text="整理进行中，可实时查看日志进度。"
+      finished-text="整理已结束，日志面板保持打开，可继续查看输出。"
+      @update:autoRefresh="organizeMonitorAutoRefresh = $event"
+      @refresh="manualRefreshOrganizeMonitor"
+    />
 
     <el-dialog
       v-model="searchDialogVisible"
@@ -258,9 +289,12 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { mediaApi } from '../api/client'
+import { mediaApi, tasksApi } from '../api/client'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Document, Refresh, Search } from '@element-plus/icons-vue'
+import TaskLogMonitorDrawer from '../components/TaskLogMonitorDrawer.vue'
+import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 import dayjs from 'dayjs'
 
 const route = useRoute()
@@ -290,6 +324,17 @@ const pendingFilesSectionRef = ref(null)
 const pendingFilesHeaderRef = ref(null)
 const pendingFilesAlertRef = ref(null)
 const pendingFilesTableHeight = ref(360)
+const organizeMonitorVisible = ref(false)
+const organizeMonitorLogsLoading = ref(false)
+const organizeMonitorLogs = ref([])
+const organizeMonitorTaskId = ref(null)
+const organizeMonitorTaskStatus = ref('pending')
+const organizeMonitorTargetLabel = ref('')
+const organizeMonitorLastRefreshedAt = ref('')
+const organizeMonitorWaitingForTask = ref(false)
+const organizeMonitorAutoRefresh = ref(true)
+const organizeMonitorRequestPending = ref(false)
+const organizeMonitorMatchSpec = ref(null)
 const form = reactive({
   media_type: 'tv',
   tmdb_id: '',
@@ -308,6 +353,135 @@ const filteredPendingFileItems = computed(() => {
 })
 
 let pendingLayoutFrame = null
+let organizeMonitorTimer = null
+
+function isTerminalTaskStatus(status) {
+  return ['completed', 'failed', 'cancelled'].includes(String(status || ''))
+}
+
+function clearOrganizeMonitorTimer() {
+  if (organizeMonitorTimer) {
+    clearInterval(organizeMonitorTimer)
+    organizeMonitorTimer = null
+  }
+}
+
+function resetOrganizeMonitorState() {
+  clearOrganizeMonitorTimer()
+  organizeMonitorLogsLoading.value = false
+  organizeMonitorLogs.value = []
+  organizeMonitorTaskId.value = null
+  organizeMonitorTaskStatus.value = 'pending'
+  organizeMonitorTargetLabel.value = ''
+  organizeMonitorLastRefreshedAt.value = ''
+  organizeMonitorWaitingForTask.value = false
+  organizeMonitorAutoRefresh.value = true
+  organizeMonitorRequestPending.value = false
+  organizeMonitorMatchSpec.value = null
+}
+
+function buildOrganizeMonitorMatchSpec({ typePrefix, targetName, targetLabel }) {
+  return {
+    typePrefix,
+    targetName,
+    targetLabel,
+    startedAtMs: Date.now(),
+  }
+}
+
+function findMatchingOrganizeMonitorTask(tasks) {
+  const spec = organizeMonitorMatchSpec.value
+  if (!spec) return null
+  return (tasks || []).find((task) => {
+    const taskType = String(task?.type || '')
+    const taskTargetName = String(task?.target_name || '')
+    const createdAt = dayjs(task?.created_at).valueOf()
+    return taskType.startsWith(spec.typePrefix)
+      && taskTargetName === String(spec.targetName || '')
+      && Number.isFinite(createdAt)
+      && createdAt >= spec.startedAtMs - 5000
+  }) || null
+}
+
+async function fetchOrganizeMonitorLogs(taskId, { silent = false } = {}) {
+  if (!taskId) return
+  if (!silent) {
+    organizeMonitorLogsLoading.value = true
+  }
+  try {
+    const { data } = await tasksApi.getLogs(taskId)
+    organizeMonitorLogs.value = data?.logs || []
+    organizeMonitorLastRefreshedAt.value = dayjs().format('HH:mm:ss')
+  } catch {
+    if (!silent) {
+      organizeMonitorLogs.value = ['加载日志失败']
+    }
+  } finally {
+    if (!silent) {
+      organizeMonitorLogsLoading.value = false
+    }
+  }
+}
+
+async function refreshOrganizeMonitorTask({ silent = false } = {}) {
+  if (!organizeMonitorVisible.value) return
+  try {
+    const { data } = await tasksApi.list({ limit: 30, offset: 0 })
+    const tasks = data || []
+    if (!organizeMonitorTaskId.value) {
+      const matched = findMatchingOrganizeMonitorTask(tasks)
+      if (matched) {
+        organizeMonitorTaskId.value = matched.id
+        organizeMonitorTaskStatus.value = String(matched.status || 'running')
+        organizeMonitorWaitingForTask.value = false
+        await fetchOrganizeMonitorLogs(matched.id, { silent })
+        return
+      }
+      organizeMonitorWaitingForTask.value = true
+      return
+    }
+
+    const matched = tasks.find((task) => Number(task?.id) === Number(organizeMonitorTaskId.value))
+    if (matched) {
+      organizeMonitorTaskStatus.value = String(matched.status || organizeMonitorTaskStatus.value || 'running')
+    }
+  } catch {
+    if (!organizeMonitorTaskId.value) {
+      organizeMonitorWaitingForTask.value = true
+    }
+  }
+}
+
+function restartOrganizeMonitorAutoRefresh() {
+  clearOrganizeMonitorTimer()
+  if (!organizeMonitorVisible.value || !organizeMonitorAutoRefresh.value) return
+  organizeMonitorTimer = setInterval(async () => {
+    await refreshOrganizeMonitorTask({ silent: true })
+    if (organizeMonitorTaskId.value) {
+      await fetchOrganizeMonitorLogs(organizeMonitorTaskId.value, { silent: true })
+    }
+    if (!organizeMonitorRequestPending.value && isTerminalTaskStatus(organizeMonitorTaskStatus.value)) {
+      clearOrganizeMonitorTimer()
+    }
+  }, 2000)
+}
+
+async function manualRefreshOrganizeMonitor() {
+  await refreshOrganizeMonitorTask()
+  if (organizeMonitorTaskId.value) {
+    await fetchOrganizeMonitorLogs(organizeMonitorTaskId.value)
+  }
+}
+
+function openOrganizeMonitor(spec) {
+  resetOrganizeMonitorState()
+  organizeMonitorMatchSpec.value = spec
+  organizeMonitorTargetLabel.value = spec.targetLabel || spec.targetName || ''
+  organizeMonitorVisible.value = true
+  organizeMonitorWaitingForTask.value = true
+  organizeMonitorRequestPending.value = true
+  restartOrganizeMonitorAutoRefresh()
+}
 
 function updatePendingFilesTableHeight() {
   if (pendingLayoutFrame !== null) {
@@ -413,13 +587,58 @@ function selectAllPendingFiles() {
   selectPendingFiles(() => true)
 }
 
+function removePendingRowLocally(pendingId) {
+  if (!pendingId) return
+  const nextItems = items.value.filter((item) => Number(item?.id) !== Number(pendingId))
+  const removedCount = items.value.length - nextItems.length
+  if (!removedCount) return
+  items.value = nextItems
+  total.value = Math.max(0, total.value - removedCount)
+}
+
+function applyOrganizeSuccess(result) {
+  const processedPathSet = new Set(
+    (result?.processed_mainline_paths || [])
+      .map((path) => String(path || '').replace(/\\/g, '/'))
+      .filter(Boolean),
+  )
+
+  if (processedPathSet.size) {
+    pendingFileItems.value = pendingFileItems.value.filter(
+      (item) => !processedPathSet.has(String(item?.relative_path || '').replace(/\\/g, '/')),
+    )
+    selectedPendingPaths.value = selectedPendingPaths.value.filter(
+      (path) => !processedPathSet.has(String(path || '').replace(/\\/g, '/')),
+    )
+    pendingFilesTable.value?.clearSelection?.()
+    if (pendingFileView.value === 'selected' && !selectedPendingPaths.value.length) {
+      pendingFileView.value = 'all'
+    }
+  }
+
+  const pendingRemoved = Boolean(result?.pending_removed) || pendingFileItems.value.length === 0
+  if (pendingRemoved && currentRow.value?.id) {
+    removePendingRowLocally(currentRow.value.id)
+  }
+}
+
 async function submitOrganize() {
   if (!currentRow.value) return
   if (!form.tmdb_id) {
     ElMessage.warning('请填写 TMDB ID，或先用搜索选择条目')
     return
   }
+  const targetName = extractDirName(currentRow.value?.original_path)
   submitting.value = true
+  openOrganizeMonitor(
+    buildOrganizeMonitorMatchSpec({
+      typePrefix: 'manual:',
+      targetName,
+      targetLabel: selectedPendingPaths.value.length
+        ? `手动整理 · ${targetName} · ${selectedPendingPaths.value.length} 项`
+        : `手动整理 · ${targetName}`,
+    }),
+  )
   try {
     const payload = {
       tmdb_id: Number(form.tmdb_id),
@@ -431,14 +650,28 @@ async function submitOrganize() {
       selected_paths: selectedPendingPaths.value.length ? [...selectedPendingPaths.value] : null,
     }
     dialogVisible.value = false
-    ElMessage.info('任务已提交，请关注首页日志记录')
     const { data } = await mediaApi.manualOrganize(currentRow.value.id, payload)
+    await refreshOrganizeMonitorTask()
+    if (organizeMonitorTaskId.value) {
+      await fetchOrganizeMonitorLogs(organizeMonitorTaskId.value)
+    }
+    applyOrganizeSuccess(data)
     ElMessage.success(data.message || '整理完成')
     await loadPending()
   } catch (e) {
+    await refreshOrganizeMonitorTask()
+    if (organizeMonitorTaskId.value) {
+      await fetchOrganizeMonitorLogs(organizeMonitorTaskId.value)
+    }
+    if (!organizeMonitorTaskId.value) {
+      resetOrganizeMonitorState()
+      organizeMonitorVisible.value = false
+    }
     ElMessage.error(e.response?.data?.detail || '整理失败')
   } finally {
     submitting.value = false
+    organizeMonitorRequestPending.value = false
+    restartOrganizeMonitorAutoRefresh()
   }
 }
 
@@ -446,13 +679,12 @@ async function deletePending(row) {
   if (!row?.id) return
   try {
     await ElMessageBox.confirm(
-      `确认删除该待办记录？\n${extractDirName(row.original_path) || '-'}`,
+      buildConfirmMessage([
+        '确认删除该待办记录？',
+        extractDirName(row.original_path) || '-',
+      ]),
       '删除待办',
-      {
-        type: 'warning',
-        confirmButtonText: '删除',
-        cancelButtonText: '取消',
-      },
+      buildConfirmDialogOptions({ confirmButtonText: '删除' }),
     )
   } catch {
     return
@@ -571,12 +803,21 @@ onUnmounted(() => {
   if (pendingLayoutFrame !== null) {
     cancelAnimationFrame(pendingLayoutFrame)
   }
+  clearOrganizeMonitorTimer()
 })
 
 watch(dialogVisible, async (visible) => {
   if (!visible) return
   await nextTick()
   updatePendingFilesTableHeight()
+})
+
+watch(organizeMonitorVisible, (visible) => {
+  if (!visible) {
+    resetOrganizeMonitorState()
+    return
+  }
+  restartOrganizeMonitorAutoRefresh()
 })
 
 watch([pendingFilesError, filteredPendingFileItems], async () => {
@@ -614,11 +855,11 @@ watch([pendingFilesError, filteredPendingFileItems], async () => {
   color: #64748b;
   word-break: break-all;
 }
-.organize-drawer-body {
+.organize-dialog-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  height: 100%;
+  height: min(64vh, 680px);
   min-height: 0;
   overflow: hidden;
 }
@@ -661,6 +902,13 @@ watch([pendingFilesError, filteredPendingFileItems], async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.pending-filter-group :deep(.el-button),
+.pending-select-group :deep(.el-button) {
+  margin-left: 0;
+  min-width: 74px;
+  border-radius: 10px;
 }
 .pending-files-alert {
   margin-bottom: 12px;
@@ -776,8 +1024,25 @@ watch([pendingFilesError, filteredPendingFileItems], async () => {
   max-width: 92vw;
 }
 
-:deep(.organize-drawer .el-drawer__body) {
+:deep(.organize-dialog .el-dialog) {
+  max-width: 96vw;
+  max-height: calc(100vh - 96px);
+  margin: 48px auto !important;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+}
+
+:deep(.organize-dialog .el-dialog__header),
+:deep(.organize-dialog .el-dialog__footer) {
+  flex: 0 0 auto;
+}
+
+:deep(.organize-dialog .el-dialog__body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding-top: 12px;
 }
 
 @media (max-width: 900px) {

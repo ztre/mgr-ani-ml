@@ -606,9 +606,13 @@ def _build_source_diff_token(source_text: str, category: str | None) -> str:
         if normalized_scene:
             token_parts.append(normalized_scene)
     if not token_parts:
-        normalized = _normalize_special_anchor_token(source_text, category)
+        normalized = ""
+        if category in SPECIAL_CATEGORIES:
+            normalized = _normalize_attachment_stem(source_text)
+        if not normalized:
+            normalized = _normalize_special_anchor_token(source_text, category)
         if normalized:
-            token_parts.append(normalized[:24])
+            token_parts.append(normalized)
     if not token_parts:
         return ""
     joined = "|".join(x for x in token_parts if x)

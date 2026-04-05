@@ -209,6 +209,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Film, Monitor, Refresh } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { inodesApi, mediaApi, syncGroupsApi } from '../api/client'
+import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
 import { useResourcePoster } from '../utils/resourcePosterStore'
 
@@ -414,7 +415,14 @@ function toggleGroupCollapse(group) {
 async function confirmDelete(label, scope, visibleCount) {
   const actualCount = Number(scope?.item_ids?.length || 0)
   const visibleText = visibleCount !== actualCount ? `当前筛选可见 ${visibleCount} 条，实际会处理 ${actualCount} 条。` : `将处理 ${actualCount} 条记录。`
-  await ElMessageBox.confirm(`${label}\n${visibleText}`, '确认删除', { type: 'warning' })
+  await ElMessageBox.confirm(
+    buildConfirmMessage([
+      label,
+      visibleText,
+    ]),
+    '确认删除',
+    buildConfirmDialogOptions(),
+  )
 }
 
 async function deleteScope(scope, visibleCount) {
@@ -433,7 +441,11 @@ async function deleteResourceRow(row) {
     return
   }
   try {
-    await ElMessageBox.confirm('将删除该资源关联的 inode 记录，是否继续？', '确认删除', { type: 'warning' })
+    await ElMessageBox.confirm(
+      buildConfirmMessage(['将删除该资源关联的 inode 记录，是否继续？']),
+      '确认删除',
+      buildConfirmDialogOptions(),
+    )
     await inodesApi.batchDelete({ ids: [row.sample_id] })
     ElMessage.success('删除完成')
     await loadResources()

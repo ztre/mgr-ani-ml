@@ -27,6 +27,7 @@ from ..services.resource_tree import build_resource_summaries, build_resource_tr
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
 from ..services.scanner import (
     _collect_media_files_under_dir,
+    _normalize_manual_selected_path,
     DirectoryProcessError,
     TaskCancelledError,
     detect_special_dir_context,
@@ -41,6 +42,58 @@ router = APIRouter()
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
 ATTACHMENT_EXTS = (".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub")
 PRUNABLE_METADATA_FILENAMES = {"tvshow.nfo", "movie.nfo", "poster.jpg", "fanart.jpg"}
+
+
+def _build_pending_mainline_relative_paths(
+    root_dir: Path,
+    *,
+    group: SyncGroup,
+    media_type: str | None = None,
+) -> list[str]:
+    include = str(getattr(group, "include", "") or "")
+    exclude = str(getattr(group, "exclude", "") or "")
+    source_value = getattr(group, "source", None)
+    source_root = Path(str(source_value)) if source_value else root_dir
+    items = _build_pending_file_items(
+        root_dir,
+        include=include,
+        exclude=exclude,
+        source_root=source_root,
+        media_type=media_type,
+    )
+    return [
+        str(item.get("relative_path") or "")
+        for item in items
+        if item.get("file_type") == "video" and item.get("content_role") == "mainline"
+    ]
+
+
+def _load_visible_pending_file_items(
+    db: Session,
+    pending: MediaRecord,
+    group: SyncGroup,
+) -> list[dict]:
+    root_dir = Path(str(pending.original_path or ""))
+    if not _safe_is_dir(root_dir):
+        return []
+    source_root = Path(str(group.source or ""))
+    items = _build_pending_file_items(
+        root_dir,
+        include=group.include or "",
+        exclude=group.exclude or "",
+        source_root=source_root,
+        media_type=pending.type,
+    )
+    return _filter_processed_pending_file_items(db, pending, items)
+
+
+def _pending_has_visible_mainline_files(
+    db: Session,
+    pending: MediaRecord,
+    group: SyncGroup,
+) -> bool:
+    items = _load_visible_pending_file_items(db, pending, group)
+    return any(item.get("file_type") == "video" and item.get("content_role") == "mainline" for item in items)
 
 
 class PendingOrganizeRequest(BaseModel):
@@ -1006,9 +1059,19 @@ def list_pending(
     if search:
         q = q.filter(MediaRecord.original_path.contains(search))
 
-    total = q.count()
-    rows = q.order_by(MediaRecord.updated_at.desc()).offset(offset).limit(limit).all()
-    items = [_media_to_dict(x) for x in rows]
+    rows = q.order_by(MediaRecord.updated_at.desc()).all()
+    visible_rows: list[MediaRecord] = []
+    for row in rows:
+        group = db.query(SyncGroup).filter(SyncGroup.id == row.sync_group_id).first()
+        if not group:
+            visible_rows.append(row)
+            continue
+        if not _pending_has_visible_mainline_files(db, row, group):
+            continue
+        visible_rows.append(row)
+
+    total = len(visible_rows)
+    items = [_media_to_dict(x) for x in visible_rows[offset: offset + limit]]
     return {"total": total, "items": items, "offset": offset, "limit": limit}
 
 
@@ -1070,6 +1133,25 @@ def _build_pending_file_items(root_dir: Path, *, include: str, exclude: str, sou
     return items
 
 
+def _filter_processed_pending_file_items(db: Session, pending: MediaRecord, items: list[dict]) -> list[dict]:
+    candidate_paths = [str(item.get("absolute_path") or "") for item in items if item.get("absolute_path")]
+    if not candidate_paths:
+        return items
+
+    rows = db.query(MediaRecord.original_path, MediaRecord.status, MediaRecord.target_path).filter(
+        MediaRecord.sync_group_id == pending.sync_group_id,
+        MediaRecord.original_path.in_(candidate_paths),
+    ).all()
+    processed_paths = {
+        str(original_path)
+        for original_path, status, target_path in rows
+        if str(status or "") in {"scraped", "manual_fixed"} and str(target_path or "").strip()
+    }
+    if not processed_paths:
+        return items
+    return [item for item in items if str(item.get("absolute_path") or "") not in processed_paths]
+
+
 @router.get("/pending/{media_id}/files")
 def list_pending_files(media_id: int, db: Session = Depends(get_db)):
     pending = db.query(MediaRecord).filter(MediaRecord.id == media_id).first()
@@ -1086,14 +1168,7 @@ def list_pending_files(media_id: int, db: Session = Depends(get_db)):
     if not group:
         raise HTTPException(status_code=400, detail="同步组不存在")
 
-    source_root = Path(str(group.source or ""))
-    items = _build_pending_file_items(
-        root_dir,
-        include=group.include or "",
-        exclude=group.exclude or "",
-        source_root=source_root,
-        media_type=pending.type,
-    )
+    items = _load_visible_pending_file_items(db, pending, group)
     return {
         "pending": _media_to_dict(pending),
         "root_dir": str(root_dir),
@@ -1405,7 +1480,7 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
         start_message=(
             f"单文件修正任务启动: media_id={media_id}, group={group.name}, "
             f"file={src.name}, media_type={data.media_type or row.type}, tmdb_id={data.tmdb_id}, "
-            f"episode_offset={data.episode_offset}"
+            f"season={data.season}, episode={data.episode}, episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: f"单文件修正任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
         runner=lambda: _run_single_reidentify(db=db, row=row, group=group, data=data),
@@ -1427,6 +1502,25 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
     group = db.query(SyncGroup).filter(SyncGroup.id == pending.sync_group_id).first()
     if not group:
         raise HTTPException(status_code=400, detail="同步组不存在")
+
+    pending_mainline_paths = _build_pending_mainline_relative_paths(
+        root_dir,
+        group=group,
+        media_type=data.media_type,
+    )
+    if data.selected_paths:
+        selected_path_set = {
+            normalized
+            for normalized in (_normalize_manual_selected_path(path_value) for path_value in data.selected_paths)
+            if normalized
+        }
+        processed_mainline_paths = [
+            relative_path
+            for relative_path in pending_mainline_paths
+            if _normalize_manual_selected_path(relative_path) in selected_path_set
+        ]
+    else:
+        processed_mainline_paths = list(pending_mainline_paths)
 
     task = ScanTask(
         type=f"manual:{group.name}",
@@ -1464,11 +1558,19 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
         task.finished_at = datetime.now(timezone.utc)
         append_log(f"手动整理完成: 成功 {processed}，失败 {failed}")
         db.commit()
+        pending_after = db.query(MediaRecord).filter(MediaRecord.id == media_id).first()
+        if pending_after is not None and not _pending_has_visible_mainline_files(db, pending_after, group):
+            db.delete(pending_after)
+            db.commit()
+            pending_after = None
+        pending_removed = pending_after is None
 
         return {
             "message": f"手动整理完成: 成功 {processed}，失败 {failed}",
             "processed": processed,
             "failed": failed,
+            "processed_mainline_paths": processed_mainline_paths,
+            "pending_removed": pending_removed,
         }
     except TaskCancelledError as e:
         task.status = "cancelled"
@@ -1570,6 +1672,7 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
         start_message=(
             f"{label}任务启动: group={group.name}, scope={data.scope_level}, "
             f"target={data.group_label or data.resource_dir}, media_type={media_type}, tmdb_id={data.tmdb_id}, "
+            f"season_override={data.season_override if data.season_override is not None else data.season}, "
             f"episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: f"{label}任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
@@ -1589,7 +1692,7 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
                     tmdb_id=data.tmdb_id,
                     title=data.title,
                     year=data.year,
-                    season_override=data.season_override,
+                    season_override=(data.season_override if data.season_override is not None else data.season),
                     episode_offset=data.episode_offset,
                 )
             )

@@ -58,6 +58,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
+import { Document, Files, FolderOpened, Monitor, Setting, SwitchButton, VideoPlay, WarningFilled } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -163,6 +164,67 @@ body {
   font-family: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--text-main);
   background: var(--app-bg);
+}
+
+.page-shell :is(
+  .actions,
+  .header-actions,
+  .card-footer,
+  .card-header-flex,
+  .drawer-toolbar,
+  .drawer-toolbar-left,
+  .drawer-toolbar-right,
+  .node-header-actions,
+  .group-actions,
+  .row-actions,
+  .pending-files-actions,
+  .pending-filter-group,
+  .pending-select-group,
+  .kind-switch,
+  .danger-zone
+) {
+  flex-wrap: wrap;
+}
+
+.page-shell :is(
+  .actions,
+  .header-actions,
+  .card-footer,
+  .card-header-flex,
+  .drawer-toolbar,
+  .drawer-toolbar-left,
+  .drawer-toolbar-right,
+  .node-header-actions,
+  .group-actions,
+  .row-actions,
+  .pending-files-actions,
+  .pending-filter-group,
+  .pending-select-group,
+  .kind-switch,
+  .danger-zone
+) > * {
+  min-width: 0;
+}
+
+.page-shell :is(
+  .actions,
+  .header-actions,
+  .card-footer,
+  .card-header-flex,
+  .drawer-toolbar,
+  .drawer-toolbar-left,
+  .drawer-toolbar-right,
+  .node-header-actions,
+  .group-actions,
+  .row-actions,
+  .pending-files-actions,
+  .pending-filter-group,
+  .pending-select-group,
+  .kind-switch,
+  .danger-zone
+) :is(.el-button, .el-dropdown) {
+  max-width: 100%;
+  flex-shrink: 1;
 }
 
 .app-container {
@@ -374,5 +436,38 @@ body.theme-dark .el-dialog {
 body.theme-dark .el-overlay-dialog,
 body.theme-dark .el-overlay {
   backdrop-filter: none;
+}
+
+.amm-confirm-box {
+  width: min(520px, calc(100vw - 32px)) !important;
+  max-width: calc(100vw - 32px);
+  direction: ltr;
+}
+
+.amm-confirm-box .el-message-box__header {
+  padding-bottom: 8px;
+}
+
+.amm-confirm-box .el-message-box__container {
+  align-items: flex-start;
+}
+
+.amm-confirm-box .el-message-box__content {
+  padding-top: 4px;
+}
+
+.amm-confirm-box .el-message-box__message {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.amm-confirm-box .el-message-box__status {
+  position: relative;
+  top: 2px;
+  flex: 0 0 auto;
+}
+
+.amm-confirm-box .el-message-box__btns {
+  gap: 12px;
 }
 </style>

@@ -282,45 +282,30 @@
       </template>
     </el-drawer>
 
-    <el-drawer
+    <TaskLogMonitorDrawer
       v-model="fixMonitorVisible"
+      title="修正任务日志"
       direction="rtl"
       size="46%"
-      title="修正任务日志"
       append-to-body
       destroy-on-close
-      class="fix-monitor-drawer"
+      drawer-class="fix-monitor-drawer"
       :before-close="handleOverlayBeforeClose"
-    >
-      <div class="logs-drawer-body">
-        <div class="log-toolbar">
-          <div class="log-toolbar-left">
-            <el-tag size="small" :type="taskStatusTagType(fixMonitorTaskStatus)">{{ taskStatusText(fixMonitorTaskStatus) }}</el-tag>
-            <span class="log-meta" v-if="fixMonitorTaskId">任务 #{{ fixMonitorTaskId }}</span>
-            <span class="log-meta" v-if="fixMonitorTargetLabel">{{ fixMonitorTargetLabel }}</span>
-            <span class="log-meta" v-if="fixMonitorLastRefreshedAt">上次刷新 {{ fixMonitorLastRefreshedAt }}</span>
-          </div>
-          <div class="log-toolbar-right">
-            <el-switch
-              v-model="fixMonitorAutoRefresh"
-              active-text="实时刷新"
-              inactive-text="暂停刷新"
-              @change="onFixMonitorAutoRefreshChange"
-            />
-            <el-button size="small" :disabled="!fixMonitorTaskId" @click="manualRefreshFixMonitor">手动刷新</el-button>
-          </div>
-        </div>
-        <div class="log-monitor-summary">
-          <span v-if="fixMonitorWaitingForTask" class="log-monitor-waiting">正在等待修正任务写入日志...</span>
-          <span v-else-if="isTerminalTaskStatus(fixMonitorTaskStatus)" class="log-monitor-finished">修正已结束，日志面板保持打开，关闭时会一并收起下层抽屉。</span>
-          <span v-else class="log-monitor-running">修正进行中，可实时查看日志进度。</span>
-        </div>
-        <div v-loading="fixMonitorLogsLoading" class="log-container">
-          <pre v-if="fixMonitorLogs.length">{{ [...fixMonitorLogs].reverse().join('\n') }}</pre>
-          <div v-else class="empty-logs">{{ fixMonitorWaitingForTask ? '等待任务启动...' : '暂无日志' }}</div>
-        </div>
-      </div>
-    </el-drawer>
+      :task-id="fixMonitorTaskId"
+      :task-status="fixMonitorTaskStatus"
+      :target-label="fixMonitorTargetLabel"
+      :last-refreshed-at="fixMonitorLastRefreshedAt"
+      :auto-refresh="fixMonitorAutoRefresh"
+      :logs="fixMonitorLogs"
+      :logs-loading="fixMonitorLogsLoading"
+      :waiting-for-task="fixMonitorWaitingForTask"
+      :manual-refresh-disabled="!fixMonitorTaskId"
+      waiting-text="正在等待修正任务写入日志..."
+      running-text="修正进行中，可实时查看日志进度。"
+      finished-text="修正已结束，日志面板保持打开，关闭时会一并收起下层抽屉。"
+      @update:autoRefresh="fixMonitorAutoRefresh = $event"
+      @refresh="manualRefreshFixMonitor"
+    />
 
     <teleport to="body">
       <transition
@@ -508,13 +493,16 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Film, Monitor, Refresh, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { mediaApi, tasksApi } from '../api/client'
+import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
 import { useResourcePoster } from '../utils/resourcePosterStore'
+
+const TaskLogMonitorDrawer = defineAsyncComponent(() => import('../components/TaskLogMonitorDrawer.vue'))
 
 const loading = ref(false)
 const resources = ref([])
@@ -642,26 +630,6 @@ function handleOverlayBeforeClose(done) {
 
 function isTerminalTaskStatus(status) {
   return ['completed', 'failed', 'cancelled'].includes(String(status || ''))
-}
-
-function taskStatusText(status) {
-  const value = String(status || '')
-  if (value === 'running') return '运行中'
-  if (value === 'completed') return '已完成'
-  if (value === 'failed') return '失败'
-  if (value === 'cancelled') return '已取消'
-  if (value === 'cancelling') return '取消中'
-  return fixMonitorWaitingForTask.value ? '启动中' : '待确认'
-}
-
-function taskStatusTagType(status) {
-  const value = String(status || '')
-  if (value === 'running') return 'primary'
-  if (value === 'completed') return 'success'
-  if (value === 'failed') return 'danger'
-  if (value === 'cancelled') return 'info'
-  if (value === 'cancelling') return 'warning'
-  return 'warning'
 }
 
 function buildFixMonitorMatchSpec({ typePrefix, targetName, targetLabel }) {
@@ -1056,7 +1024,15 @@ async function confirmScopeDelete(label, scope, visibleCount, deleteFiles) {
   const actualCount = Number(scope?.item_ids?.length || 0)
   const visibleText = visibleCount !== actualCount ? `当前筛选可见 ${visibleCount} 条，实际会处理 ${actualCount} 条。` : `将处理 ${actualCount} 条记录。`
   const actionText = deleteFiles ? '并删除硬链接文件' : '仅删除记录'
-  await ElMessageBox.confirm(`${label}\n${visibleText}\n操作：${actionText}`, '确认删除', { type: 'warning' })
+  await ElMessageBox.confirm(
+    buildConfirmMessage([
+      label,
+      visibleText,
+      `操作：${actionText}`,
+    ]),
+    '确认删除',
+    buildConfirmDialogOptions(),
+  )
 }
 
 async function deleteMediaScope(scope, deleteFiles) {
@@ -1072,7 +1048,13 @@ async function onDeleteResourceCommand(row, command) {
   }
   const deleteFiles = command === 'records_and_links'
   try {
-    await ElMessageBox.confirm(deleteFiles ? '将删除该资源记录及硬链接文件，是否继续？' : '将删除该资源记录，是否继续？', '确认删除', { type: 'warning' })
+    await ElMessageBox.confirm(
+      buildConfirmMessage([
+        deleteFiles ? '将删除该资源记录及硬链接文件，是否继续？' : '将删除该资源记录，是否继续？',
+      ]),
+      '确认删除',
+      buildConfirmDialogOptions(),
+    )
     await mediaApi.batchDelete({ ids: [row.sample_id], delete_files: deleteFiles, delete_resource_scope: true })
     ElMessage.success('资源删除完成')
     if (drawerVisible.value && drawerResource.value?.key === row.key) {
@@ -1152,9 +1134,11 @@ async function deleteSelectedItems(command) {
   }
   try {
     await ElMessageBox.confirm(
-      deleteFiles ? `将删除选中的 ${ids.length} 条记录及硬链接，是否继续？` : `将删除选中的 ${ids.length} 条记录，是否继续？`,
+      buildConfirmMessage([
+        deleteFiles ? `将删除选中的 ${ids.length} 条记录及硬链接，是否继续？` : `将删除选中的 ${ids.length} 条记录，是否继续？`,
+      ]),
       '删除选中记录',
-      { type: 'warning' },
+      buildConfirmDialogOptions(),
     )
     await mediaApi.batchDelete({ ids, delete_files: deleteFiles })
     ElMessage.success('选中记录删除完成')
