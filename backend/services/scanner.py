@@ -27,6 +27,7 @@ from .emby import refresh_emby_library
 from .group_routing import resolve_movie_target_root
 from .linker import get_inode, is_same_inode, path_excluded
 from .metadata import scrape_movie_metadata, scrape_tv_metadata
+from .search_name_builder import build_search_name
 from .parser import (
     ParseResult,
     SPECIAL_TYPE_MAP,
@@ -3108,6 +3109,36 @@ def _build_flexible_title_pattern(text: str) -> re.Pattern[str] | None:
     return re.compile(r"(?<!\w)" + r"[\s._\-]*".join(tokens) + r"(?!\w)", re.I)
 
 
+def _build_fractional_title_candidates(
+    filename: str,
+    *,
+    parse_result: ParseResult | None = None,
+    context_title: str | None = None,
+) -> list[str]:
+    path = Path(filename)
+    raw_candidates = [
+        str(path.parent.name or "").strip(),
+        str(context_title or "").strip(),
+        str(parse_result.title if parse_result else "").strip(),
+    ]
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_candidates:
+        if not raw or re.search(r"\d{1,3}\.5\b", raw, re.I) is None:
+            continue
+        normalized_options = [raw, build_search_name(raw)]
+        for item in normalized_options:
+            norm = re.sub(r"\s+", " ", str(item or "")).strip()
+            if not norm:
+                continue
+            key = norm.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(norm)
+    return candidates
+
+
 def _collect_fractional_title_protected_spans(
     filename: str,
     *,
@@ -3116,16 +3147,14 @@ def _collect_fractional_title_protected_spans(
 ) -> list[tuple[int, int]]:
     path = Path(filename)
     stem = path.stem
-    candidates = [
-        str(path.parent.name or "").strip(),
-        str(context_title or "").strip(),
-        str(parse_result.title if parse_result else "").strip(),
-    ]
+    candidates = _build_fractional_title_candidates(
+        filename,
+        parse_result=parse_result,
+        context_title=context_title,
+    )
     spans: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
     for cand in candidates:
-        if not cand or re.search(r"\d{1,3}\.5\b", cand, re.I) is None:
-            continue
         pattern = _build_flexible_title_pattern(cand)
         if pattern is None:
             continue
