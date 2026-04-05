@@ -229,6 +229,15 @@ class ReidentifyScopeRequest(BaseModel):
     episode_offset: int | None = None
 
 
+def _build_scoped_reidentify_target_name(resource_dir: str, group_label: str | None = None) -> str:
+    normalized_dir = str(resource_dir or "").replace("\\", "/").rstrip("/")
+    resource_name = Path(normalized_dir).name or normalized_dir
+    label = str(group_label or "").strip()
+    if label and label != resource_name:
+        return f"{resource_name} / {label}"
+    return resource_name or label or "-"
+
+
 class PendingLogReviewRequest(BaseModel):
     source_kind: Literal["pending", "unprocessed", "review"]
     source_original_path: str | None = None
@@ -1853,17 +1862,18 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
     rows = _load_scope_media_rows(db, scope)
     group, media_type = _resolve_reidentify_group(rows, db)
     media_type = data.media_type or media_type
-    label = "Season 修正" if data.scope_level == "season" else "作用域修正"
+    label = "季度修正" if data.scope_level == "season" else "作用域修正"
+    target_name = _build_scoped_reidentify_target_name(data.resource_dir, data.group_label)
     payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
     return _enqueue_logged_media_task(
         db,
         task_type=(f"reidentify:season:{group.name}" if data.scope_level == "season" else f"reidentify:scope:{group.name}"),
         target_id=group.id,
-        target_name=(data.group_label or Path(data.resource_dir).name or data.resource_dir),
-        queued_message=f"{label}任务已进入队列，等待执行: {data.group_label or Path(data.resource_dir).name or data.resource_dir}",
+        target_name=target_name,
+        queued_message=f"{label}任务已进入队列，等待执行: {target_name}",
         start_message=(
             f"{label}任务启动: group={group.name}, scope={data.scope_level}, "
-            f"target={data.group_label or data.resource_dir}, media_type={media_type}, tmdb_id={data.tmdb_id}, "
+            f"target={target_name}, media_type={media_type}, tmdb_id={data.tmdb_id}, "
             f"season_override={data.season_override if data.season_override is not None else data.season}, "
             f"episode_offset={data.episode_offset}"
         ),

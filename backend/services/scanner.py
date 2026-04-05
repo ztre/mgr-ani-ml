@@ -1630,6 +1630,8 @@ def _process_file(
     if is_attachment:
         attachment_plan = _classify_attachment_route(src_path, parse_result)
         parse_result = attachment_plan.parse_result
+        if media_type == "tv":
+            parse_result = _apply_forced_tv_item_season(parse_result, context)
         if media_type == "tv" and (not extra_context) and parse_result.extra_category is None:
             parse_result = _apply_tv_mainline_context_overrides(parse_result, src_path, context)
 
@@ -1869,6 +1871,9 @@ def _process_file(
             if parse_result.season in (None, 0, 1):
                 parse_result = parse_result._replace(season=_resolved_season_for_extra)
 
+    if media_type == "tv":
+        parse_result = _apply_forced_tv_item_season(parse_result, context)
+
     decision = resolve_final_target(
         src_path=src_path,
         parse_result=parse_result,
@@ -2100,6 +2105,17 @@ def _apply_tv_mainline_context_overrides(
         parse_result = parse_result._replace(episode=max(1, adjusted))
 
     return parse_result
+
+
+def _apply_forced_tv_item_season(parse_result: ParseResult, context: dict) -> ParseResult:
+    if not bool(context.get("force_resolved_season_on_tv_items")):
+        return parse_result
+    resolved_season = context.get("resolved_season")
+    if resolved_season is None:
+        return parse_result
+    if parse_result.season == resolved_season:
+        return parse_result
+    return parse_result._replace(season=int(resolved_season))
 
 
 def detect_special_dir_context(path: Path) -> tuple[bool, str | None]:

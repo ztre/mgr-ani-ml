@@ -485,28 +485,45 @@ function taskTypeText(row) {
   const rawType = String(row?.type || '')
   const issueTagged = rawType.startsWith('issue_sp:')
   const type = issueTagged ? rawType.slice('issue_sp:'.length) : rawType
+  const withIssueTag = (label) => issueTagged ? `${label} · SP问题` : label
 
   if (type.startsWith('manual:')) {
     const groupName = type.slice('manual:'.length) || '未知同步组'
-    return issueTagged ? `${groupName} · 手动整理 · SP问题` : `${groupName} · 手动整理`
+    return withIssueTag(`${groupName} · 手动整理`)
   }
   if (type.startsWith('manual_scan:')) {
     const groupName = type.slice('manual_scan:'.length) || '未知同步组'
-    return issueTagged ? `${groupName} · 扫描整理 · SP问题` : `${groupName} · 扫描整理`
+    return withIssueTag(`${groupName} · 扫描整理`)
   }
   if (type.startsWith('webhook_scan:')) {
     const groupName = type.slice('webhook_scan:'.length) || '未知同步组'
-    return issueTagged ? `${groupName} · webhook整理 · SP问题` : `${groupName} · webhook整理`
+    return withIssueTag(`${groupName} · 回调整理`)
+  }
+  if (type.startsWith('reidentify:item:')) {
+    const groupName = type.slice('reidentify:item:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · 单文件修正`)
+  }
+  if (type.startsWith('reidentify:resource:')) {
+    const groupName = type.slice('reidentify:resource:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · 整组修正`)
+  }
+  if (type.startsWith('reidentify:season:')) {
+    const groupName = type.slice('reidentify:season:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · 季度修正`)
+  }
+  if (type.startsWith('reidentify:scope:')) {
+    const groupName = type.slice('reidentify:scope:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · 作用域修正`)
   }
   if (type === 'group') {
     const group = groups.value.find((g) => g.id === row?.target_id)
     const text = group?.name || '单组扫描'
-    return issueTagged ? `${text} · SP问题` : text
+    return withIssueTag(text)
   }
   if (type === 'full') {
-    return issueTagged ? '全量扫描 · SP问题' : '全量扫描'
+    return withIssueTag('全量扫描')
   }
-  return issueTagged ? `${type || '-'} · SP问题` : (type || '-')
+  return withIssueTag(type || '-')
 }
 
 function taskTypeTag(row) {
@@ -517,6 +534,7 @@ function taskTypeTag(row) {
   if (type.startsWith('manual:')) return 'warning'
   if (type.startsWith('manual_scan:')) return 'primary'
   if (type.startsWith('webhook_scan:')) return 'primary'
+  if (type.startsWith('reidentify:')) return 'warning'
   if (type === 'full') return 'success'
   return 'info'
 }

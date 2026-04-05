@@ -646,15 +646,27 @@ function buildFixMonitorMatchSpec({ typePrefix, targetName, targetLabel }) {
 function findMatchingFixMonitorTask(tasks) {
   const spec = fixMonitorMatchSpec.value
   if (!spec) return null
+  const expectedTargetName = String(spec.targetName || '')
   return (tasks || []).find((task) => {
     const taskType = String(task?.type || '')
     const taskTargetName = String(task?.target_name || '')
     const createdAt = dayjs(task?.created_at).valueOf()
     return taskType.startsWith(spec.typePrefix)
-      && taskTargetName === String(spec.targetName || '')
+      && (!expectedTargetName
+        || taskTargetName === expectedTargetName
+        || taskTargetName.endsWith(` / ${expectedTargetName}`))
       && Number.isFinite(createdAt)
       && createdAt >= spec.startedAtMs - 5000
   }) || null
+}
+
+function buildScopedFixMonitorTargetName(resourceDir, groupLabel) {
+  const resourceName = extractFilename(resourceDir)
+  const label = String(groupLabel || '').trim()
+  if (resourceName && label && label !== resourceName) {
+    return `${resourceName} / ${label}`
+  }
+  return resourceName || label || ''
 }
 
 async function fetchFixMonitorLogs(taskId, { silent = false } = {}) {
@@ -1249,10 +1261,10 @@ async function submitDirFix() {
     buildFixMonitorMatchSpec({
       typePrefix: dirFixMode.value === 'season' ? 'reidentify:season:' : 'reidentify:resource:',
       targetName: dirFixMode.value === 'season'
-        ? String(dirFixScope.value?.group_label || currentNode.value?.label || '')
+        ? buildScopedFixMonitorTargetName(drawerResource.value?.resource_dir, dirFixScope.value?.group_label || currentNode.value?.label || '')
         : extractFilename(drawerResource.value?.resource_dir),
       targetLabel: dirFixMode.value === 'season'
-        ? `Season 修正 · ${String(dirFixScope.value?.group_label || currentNode.value?.label || '')}`
+        ? `季度修正 · ${buildScopedFixMonitorTargetName(drawerResource.value?.resource_dir, dirFixScope.value?.group_label || currentNode.value?.label || '')}`
         : `整组修正 · ${extractFilename(drawerResource.value?.resource_dir)}`,
     }),
   )
