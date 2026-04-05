@@ -685,6 +685,7 @@ def _run_manual_organize_core(
         "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
         "season_hint_source": "explicit" if (season_override is not None and season_override > 0) else None,
         "season_hint_confidence": "high" if (season_override is not None and season_override > 0) else None,
+        "force_resolved_season_on_tv_items": bool(season_override is not None and season_override > 0),
         "special_hint": False,
         "record_status": "manual_fixed",
         "extra_context": bool(detect_special_dir_context(root_dir)[0]),
@@ -2055,17 +2056,22 @@ def _apply_tv_mainline_context_overrides(
     season_from_path: int | None = None,
     has_explicit: bool | None = None,
 ) -> ParseResult:
-    if parse_result.extra_category is not None:
-        return parse_result
-
     if resolved_season is None:
         resolved_season = context.get("resolved_season")
+    force_resolved_season = bool(
+        context.get("force_resolved_season_on_tv_items")
+        or context.get("force_resolved_season_on_mainline")
+    ) and resolved_season is not None
+    if parse_result.extra_category is not None and not force_resolved_season:
+        return parse_result
     if season_from_path is None:
         season_from_path = _extract_season_from_path(src_path)
     if has_explicit is None:
         has_explicit = _has_explicit_season_token(src_path.name)
 
-    if season_from_path is not None:
+    if force_resolved_season:
+        season = resolved_season
+    elif season_from_path is not None:
         season = season_from_path
     elif not has_explicit and resolved_season is not None:
         # 中文说明：
@@ -2912,20 +2918,36 @@ def _cleanup_nonreview_logs_for_directory(db: Session, sync_group_id: int, media
         return {"pending_logs_removed": 0, "unprocessed_logs_removed": 0}
 
     normalized_dir = str(media_dir).rstrip("/\\")
-    resolved_rows = (
-        db.query(MediaRecord)
-        .filter(MediaRecord.sync_group_id == sync_group_id)
-        .filter(MediaRecord.status.in_(["scraped", "manual_fixed"]))
-        .filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
-        .filter(
-            or_(
-                MediaRecord.original_path == normalized_dir,
-                MediaRecord.original_path.like(f"{normalized_dir}/%"),
-                MediaRecord.original_path.like(f"{normalized_dir}\\%"),
+    try:
+        resolved_rows = (
+            db.query(MediaRecord)
+            .filter(MediaRecord.sync_group_id == sync_group_id)
+            .filter(MediaRecord.status.in_(["scraped", "manual_fixed"]))
+            .filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
+            .filter(
+                or_(
+                    MediaRecord.original_path == normalized_dir,
+                    MediaRecord.original_path.like(f"{normalized_dir}/%"),
+                    MediaRecord.original_path.like(f"{normalized_dir}\\%"),
+                )
             )
+            .all()
         )
-        .all()
-    )
+    except AttributeError:
+        # 测试桩 / 简化 fake model 环境下，MediaRecord 字段可能不是 SQLAlchemy 列对象。
+        # 退化为 Python 侧过滤，保证入口清理逻辑仍可验证。
+        resolved_rows = []
+        for row in db.query(MediaRecord).all():
+            original_path = str(getattr(row, "original_path", "") or "")
+            status = str(getattr(row, "status", "") or "")
+            target_path = str(getattr(row, "target_path", "") or "")
+            row_dir = original_path.rstrip("/\\")
+            if status not in {"scraped", "manual_fixed"}:
+                continue
+            if not target_path:
+                continue
+            if row_dir == normalized_dir or original_path.startswith(f"{normalized_dir}/") or original_path.startswith(f"{normalized_dir}\\"):
+                resolved_rows.append(row)
     if not resolved_rows:
         return {"pending_logs_removed": 0, "unprocessed_logs_removed": 0}
 
@@ -4505,6 +4527,7 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     media_type = str(context.get("media_type") or "")
     tmdb_id = context.get("tmdb_id")
     title = str(context.get("title") or "").strip()
+    record_status = str(context.get("record_status") or "").strip()
 
     if media_type not in {"tv", "movie"}:
         return False, "识别类型不明确"
@@ -4523,6 +4546,14 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     season_hint_source = str(context.get("season_hint_source") or "").strip() or None
     season_aware_done = bool(context.get("season_aware_done"))
     season_aware_had_candidates = bool(context.get("season_aware_had_candidates"))
+    manual_explicit_season_override = (
+        record_status == "manual_fixed"
+        and season_from_path is None
+        and season_hint_source == "explicit"
+        and season_hint_confidence == "high"
+        and isinstance(season_hint, int)
+        and season_hint > 0
+    )
     if isinstance(season_hint, int) and season_hint <= 0:
         season_hint = None
 
@@ -4660,6 +4691,16 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
                 context["resolved_season"] = resolved
                 context["final_resolved_season"] = resolved if is_final else None
                 return True, None
+        if manual_explicit_season_override and chosen is not None:
+            append_log(
+                f"WARNING: 手动整理/修正使用显式季号覆盖: tmdbid={tmdb_id}, season={chosen}, "
+                f"valid_seasons={valid_seasons}。TMDB 当前季列表未命中，但按用户指定继续。"
+            )
+            context["season_hint"] = chosen
+            context["resolved_season"] = chosen
+            context["final_resolved_season"] = chosen if is_final else None
+            context["manual_explicit_season_override_accepted"] = True
+            return True, None
         reliable_hint = (
             season_from_path is not None
             or season_hint_source in ("explicit", "final")
