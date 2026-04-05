@@ -1415,7 +1415,7 @@ def _process_file(
             return
 
     tmdb_id = context.get("tmdb_id")
-    if _should_ignore_fractional_episode(src_path.name):
+    if _should_ignore_fractional_episode(str(src_path), context_title=context.get("title")):
         append_log(f"跳过半集文件: {src_path.name}")
         _record_unhandled_item(
             original_path=src_path,
@@ -3101,11 +3101,62 @@ def _is_season_like_dir(path: Path) -> bool:
     return re.match(r"^season\s+\d{1,2}$", name, re.I) is not None
 
 
-def _should_ignore_fractional_episode(filename: str) -> bool:
+def _build_flexible_title_pattern(text: str) -> re.Pattern[str] | None:
+    tokens = [re.escape(tok) for tok in re.split(r"[\s._\-]+", str(text or "").strip()) if tok]
+    if not tokens:
+        return None
+    return re.compile(r"(?<!\w)" + r"[\s._\-]*".join(tokens) + r"(?!\w)", re.I)
+
+
+def _collect_fractional_title_protected_spans(
+    filename: str,
+    *,
+    parse_result: ParseResult | None = None,
+    context_title: str | None = None,
+) -> list[tuple[int, int]]:
+    path = Path(filename)
+    stem = path.stem
+    candidates = [
+        str(path.parent.name or "").strip(),
+        str(context_title or "").strip(),
+        str(parse_result.title if parse_result else "").strip(),
+    ]
+    spans: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for cand in candidates:
+        if not cand or re.search(r"\d{1,3}\.5\b", cand, re.I) is None:
+            continue
+        pattern = _build_flexible_title_pattern(cand)
+        if pattern is None:
+            continue
+        for match in pattern.finditer(stem):
+            span = match.span()
+            if span not in seen:
+                spans.append(span)
+                seen.add(span)
+    return spans
+
+
+def _should_ignore_fractional_episode(
+    filename: str,
+    *,
+    parse_result: ParseResult | None = None,
+    context_title: str | None = None,
+) -> bool:
     stem = Path(filename).stem
-    if re.search(r"\d{1,3}\.5\b", stem, re.I):
+    matches = list(re.finditer(r"\d{1,3}\.5\b", stem, re.I))
+    if not matches:
+        return False
+    protected_spans = _collect_fractional_title_protected_spans(
+        filename,
+        parse_result=parse_result,
+        context_title=context_title,
+    )
+    for match in matches:
+        if any(start <= match.start() and match.end() <= end for start, end in protected_spans):
+            continue
         return True
-    return re.search(r"(?:^|[\[\(\s\-_])\d{1,3}\.5(?:$|[\]\)\s\-_])", stem, re.I) is not None
+    return False
 
 
 def _should_ignore_zero_episode(
