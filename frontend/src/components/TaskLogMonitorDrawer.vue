@@ -29,13 +29,13 @@
         </div>
       </div>
       <div v-if="showSummary" class="log-monitor-summary">
-        <span v-if="waitingForTask" class="log-monitor-waiting">{{ waitingText }}</span>
+        <span v-if="waitingForTask || isWaitingTaskStatus(taskStatus)" class="log-monitor-waiting">{{ waitingText }}</span>
         <span v-else-if="isTerminalTaskStatus(taskStatus)" class="log-monitor-finished">{{ finishedText }}</span>
         <span v-else class="log-monitor-running">{{ runningText }}</span>
       </div>
       <div v-loading="logsLoading" class="log-container">
         <pre v-if="displayLogs.length">{{ displayLogs.join('\n') }}</pre>
-        <div v-else class="empty-logs">{{ waitingForTask ? waitingEmptyText : emptyText }}</div>
+        <div v-else class="empty-logs">{{ waitingForTask || isWaitingTaskStatus(taskStatus) ? waitingEmptyText : emptyText }}</div>
       </div>
     </div>
   </el-drawer>
@@ -78,8 +78,13 @@ function isTerminalTaskStatus(status) {
   return ['completed', 'failed', 'cancelled'].includes(String(status || ''))
 }
 
+function isWaitingTaskStatus(status) {
+  return ['queued'].includes(String(status || ''))
+}
+
 const resolvedTaskStatusText = computed(() => {
   const value = String(props.taskStatus || '')
+  if (value === 'queued') return '等待中'
   if (value === 'running') return '运行中'
   if (value === 'completed') return '已完成'
   if (value === 'failed') return '失败'
@@ -90,6 +95,7 @@ const resolvedTaskStatusText = computed(() => {
 
 const resolvedTaskStatusTagType = computed(() => {
   const value = String(props.taskStatus || '')
+  if (value === 'queued') return 'warning'
   if (value === 'running') return 'primary'
   if (value === 'completed') return 'success'
   if (value === 'failed') return 'danger'

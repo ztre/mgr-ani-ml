@@ -15,9 +15,10 @@ from contextlib import nullcontext
 from typing import Literal
 
 import httpx
+from sqlalchemy import or_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from ..api.logs import append_log, current_task_id
 from ..config import settings
@@ -77,6 +78,21 @@ _WORKER_THREAD = None
 _WORKER_LOCK = Lock()
 _WORKER_LOCK_FD = None
 SCAN_ISSUE_FLAGS: dict[int, bool] = {}
+
+
+def _task_session(task: ScanTask, fallback_db: Session) -> Session:
+    try:
+        session = object_session(task)
+    except Exception:
+        return fallback_db
+
+    if session is None:
+        return fallback_db
+    if type(session).__module__.startswith("unittest.mock"):
+        return fallback_db
+    if not hasattr(session, "commit") or not hasattr(session, "rollback"):
+        return fallback_db
+    return session
 SCAN_CANCEL_FLAGS: dict[int, bool] = {}
 
 IGNORED_TOKENS = {"bdmv", "menu", "sample", "scan", "disc", "iso", "font"}
@@ -417,6 +433,7 @@ def _media_task_worker() -> None:
             try:
                 task_has_issues = _handle_media_task(local_db, task, force_recompute_names=recompute_retry_used)
                 local_db.commit()
+                _cleanup_nonreview_logs_for_directory(local_db, task.sync_group_id, task.path)
                 append_log(f"INFO: 媒体任务完成: {task.path}\n")
                 break
             except Exception as e:
@@ -484,32 +501,44 @@ def run_scan(
     task_type_override: str | None = None,
     target_name_override: str | None = None,
     target_dir_override: str | None = None,
+    task: ScanTask | None = None,
+    task_id: int | None = None,
 ):
     """执行全量或单组扫描。"""
-    task = ScanTask(
-        type=task_type_override or ("group" if group_id else "full"),
-        target_id=group_id,
-        status="running",
-        target_name=None,
-    )
+    if task is None and task_id is not None:
+        task = db.query(ScanTask).filter(ScanTask.id == task_id).first()
+        if not task:
+            raise RuntimeError(f"扫描任务不存在: {task_id}")
+    elif task is None:
+        task = ScanTask(
+            type=task_type_override or ("group" if group_id else "full"),
+            target_id=group_id,
+            status="running",
+            target_name=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+    task_db = _task_session(task, db)
+
+    if task_type_override and task_id is not None:
+        task.type = task_type_override
     if target_name_override:
         task.target_name = target_name_override
-    elif group_id:
+    elif group_id and not task.target_name:
         group = db.query(SyncGroup).filter(SyncGroup.id == group_id).first()
         task.target_name = group.name if group else None
-    else:
+    elif not group_id and not task.target_name:
         task.target_name = "全量扫描"
 
-    db.add(task)
-    db.commit()
-    db.refresh(task)
     _init_scan_issue_flag(task.id)
     init_scan_cancel_flag(task.id)
 
     from ..api.logs import LOG_DIR
 
     log_file = LOG_DIR / f"task_{task.id}.log"
-    if log_file.exists():
+    if task_id is None and log_file.exists():
         try:
             log_file.unlink()
         except Exception:
@@ -522,7 +551,7 @@ def run_scan(
             append_log("已有扫描任务在运行，本次任务被拒绝以避免并发冲突")
             task.status = "failed"
             task.finished_at = datetime.now(timezone.utc)
-            db.commit()
+            task_db.commit()
             return
 
         append_log(f"任务启动: ID={task.id}, 类型={task.type}")
@@ -531,7 +560,7 @@ def run_scan(
             append_log("错误: 未配置 TMDB API Key，无法进行识别与刮削。")
             task.status = "failed"
             task.finished_at = datetime.now(timezone.utc)
-            db.commit()
+            task_db.commit()
             return
 
         q = db.query(SyncGroup).filter(SyncGroup.enabled == True)
@@ -581,7 +610,7 @@ def run_scan(
             import traceback
 
             append_log(f"扫描任务异常: {e}\n{traceback.format_exc()}")
-            db.rollback()
+            task_db.rollback()
             task.status = "failed"
     finally:
         _pop_scan_issue_flag(task.id)
@@ -589,10 +618,10 @@ def run_scan(
         task.finished_at = datetime.now(timezone.utc)
         task.log_file = f"task_{task.id}.log"
         try:
-            db.commit()
+            task_db.commit()
         except Exception as e:
             append_log(f"无法更新任务状态: {e}")
-            db.rollback()
+            task_db.rollback()
         if acquired:
             SCAN_LOCK.release()
         current_task_id.reset(token)
@@ -2876,6 +2905,48 @@ def _has_media_records_for_directory(db: Session, sync_group_id: int, media_dir:
         if _normalize_path(candidate) == dir_norm:
             return True
     return False
+
+
+def _cleanup_nonreview_logs_for_directory(db: Session, sync_group_id: int, media_dir: Path) -> dict[str, int]:
+    if not hasattr(db, "query"):
+        return {"pending_logs_removed": 0, "unprocessed_logs_removed": 0}
+
+    normalized_dir = str(media_dir).rstrip("/\\")
+    resolved_rows = (
+        db.query(MediaRecord)
+        .filter(MediaRecord.sync_group_id == sync_group_id)
+        .filter(MediaRecord.status.in_(["scraped", "manual_fixed"]))
+        .filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
+        .filter(
+            or_(
+                MediaRecord.original_path == normalized_dir,
+                MediaRecord.original_path.like(f"{normalized_dir}/%"),
+                MediaRecord.original_path.like(f"{normalized_dir}\\%"),
+            )
+        )
+        .all()
+    )
+    if not resolved_rows:
+        return {"pending_logs_removed": 0, "unprocessed_logs_removed": 0}
+
+    try:
+        from ..api import media as media_api
+
+        result = media_api._cleanup_nonreview_pending_logs(resolved_rows)
+    except Exception as exc:
+        append_log(f"WARNING: 清理未处理日志失败: dir={media_dir} | {exc}")
+        return {"pending_logs_removed": 0, "unprocessed_logs_removed": 0}
+
+    pending_removed = int(result.get("pending_logs_removed") or 0)
+    unprocessed_removed = int(result.get("unprocessed_logs_removed") or 0)
+    if pending_removed or unprocessed_removed:
+        append_log(
+            f"INFO: 已清理未处理日志: pending={pending_removed}, unprocessed={unprocessed_removed} ({media_dir})"
+        )
+    return {
+        "pending_logs_removed": pending_removed,
+        "unprocessed_logs_removed": unprocessed_removed,
+    }
 
 
 def _mark_dir_pending(

@@ -28,7 +28,7 @@
     <!-- 统计卡片 -->
     <el-row :gutter="24" class="stats-row">
       <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
+        <el-card shadow="hover" class="stat-card stat-card--media">
           <div class="stat-content">
             <div class="stat-label">总媒体记录</div>
             <div class="stat-value">{{ stats.total_media }}</div>
@@ -37,7 +37,7 @@
         </el-card>
       </el-col>
       <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
+        <el-card shadow="hover" class="stat-card stat-card--tv">
           <div class="stat-content">
             <div class="stat-label">TV 剧集</div>
             <div class="stat-value">{{ stats.tv_count }}</div>
@@ -46,7 +46,7 @@
         </el-card>
       </el-col>
       <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
+        <el-card shadow="hover" class="stat-card stat-card--movie">
           <div class="stat-content">
             <div class="stat-label">电影</div>
             <div class="stat-value">{{ stats.movie_count }}</div>
@@ -55,7 +55,7 @@
         </el-card>
       </el-col>
       <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
+        <el-card shadow="hover" class="stat-card stat-card--storage">
           <div class="stat-content">
             <div class="stat-label">总大小</div>
             <div class="stat-value">{{ formatSize(stats.total_size) }}</div>
@@ -166,7 +166,7 @@
         <el-table-column prop="status" label="状态" width="120">
           <template #default="{ row }">
             <el-tag :type="statusType(row.status)" size="small">
-              {{ row.status }}
+              {{ statusText(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -191,7 +191,7 @@
               :disabled="row.status === 'cancelling'"
               @click="cancelTask(row)"
             >
-              {{ row.status === 'cancelling' ? '中断中' : '中断' }}
+              {{ row.status === 'queued' ? '取消排队' : (row.status === 'cancelling' ? '中断中' : '中断') }}
             </el-button>
             <el-button size="small" @click="viewLogs(row)">查看日志</el-button>
           </template>
@@ -317,7 +317,7 @@ function clearTasksTimer() {
 
 function restartTasksAutoRefresh() {
   clearTasksTimer()
-  if (!tasks.value.some((task) => ['running', 'cancelling'].includes(String(task?.status || '')))) return
+  if (!tasks.value.some((task) => ['queued', 'running', 'cancelling'].includes(String(task?.status || '')))) return
   tasksTimer = setTimeout(async () => {
     await loadTasks()
   }, 2000)
@@ -339,8 +339,8 @@ async function toggleGroup(group, val) {
 async function runFullScan() {
   scanning.value = true
   try {
-    await scanApi.run()
-    ElMessage.success('全量扫描任务已启动')
+    const { data } = await scanApi.run()
+    ElMessage.success(data?.message || '全量扫描任务已进入队列')
     setTimeout(loadTasks, 1000)
   } catch (e) {
     ElMessage.error('启动失败')
@@ -352,8 +352,8 @@ async function runFullScan() {
 async function runGroupScan(groupId) {
   scanningGroup.value = groupId
   try {
-    await scanApi.runGroup(groupId)
-    ElMessage.success('单组扫描任务已启动')
+    const { data } = await scanApi.runGroup(groupId)
+    ElMessage.success(data?.message || '单组扫描任务已进入队列')
     setTimeout(loadTasks, 1000)
   } catch (e) {
     ElMessage.error('启动失败')
@@ -369,7 +369,11 @@ function normalizedTaskType(row) {
 
 function isInterruptibleScanTask(row) {
   const type = normalizedTaskType(row)
-  return ['running', 'cancelling'].includes(String(row?.status || ''))
+  const status = String(row?.status || '')
+  if (status === 'queued') {
+    return type === 'full' || type === 'group' || type.startsWith('webhook_scan:') || type.startsWith('manual:') || type.startsWith('reidentify:')
+  }
+  return ['running', 'cancelling'].includes(status)
     && (type === 'full' || type === 'group' || type.startsWith('webhook_scan:') || type.startsWith('manual:'))
 }
 
@@ -377,11 +381,13 @@ async function cancelTask(row) {
   if (!row?.id || interruptingTaskId.value === row.id || row.status === 'cancelling') return
   try {
     await ElMessageBox.confirm(
-      `确认中断任务 #${row.id} 吗？当前正在处理的文件会在当前处理单元结束后停止。`,
-      '中断扫描任务',
+      row.status === 'queued'
+        ? `确认取消排队任务 #${row.id} 吗？`
+        : `确认中断任务 #${row.id} 吗？当前正在处理的文件会在当前处理单元结束后停止。`,
+      row.status === 'queued' ? '取消排队任务' : '中断扫描任务',
       {
         type: 'warning',
-        confirmButtonText: '确认中断',
+        confirmButtonText: row.status === 'queued' ? '确认取消' : '确认中断',
         cancelButtonText: '取消',
       },
     )
@@ -392,7 +398,7 @@ async function cancelTask(row) {
   interruptingTaskId.value = row.id
   try {
     const { data } = await tasksApi.cancel(row.id)
-    row.status = 'cancelling'
+    row.status = row.status === 'queued' ? 'cancelled' : 'cancelling'
     ElMessage.success(data?.message || '已发送中断请求')
     await loadTasks()
     if (currentLogTaskId.value === row.id) {
@@ -466,8 +472,13 @@ async function manualRefreshLogs() {
 }
 
 function statusType(status) {
-  const map = { running: 'primary', cancelling: 'warning', cancelled: 'info', completed: 'success', failed: 'danger' }
+  const map = { queued: 'warning', running: 'primary', cancelling: 'warning', cancelled: 'info', completed: 'success', failed: 'danger' }
   return map[status] || 'info'
+}
+
+function statusText(status) {
+  const map = { queued: '等待中', running: '运行中', cancelling: '取消中', cancelled: '已取消', completed: '已完成', failed: '失败' }
+  return map[String(status || '')] || (status || '-')
 }
 
 function taskTypeText(row) {
@@ -598,26 +609,59 @@ onBeforeUnmount(() => {
   position: relative;
   overflow: hidden;
   min-height: 118px;
+  background: var(--stat-card-surface, var(--stat-card-bg)) !important;
+  border-color: var(--stat-card-border) !important;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
+
+:deep(.stat-card .el-card__body) {
+  width: 100%;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+}
+
+.stat-card--media {
+  --stat-card-surface: linear-gradient(160deg, var(--stat-blue-bg), rgba(58, 142, 230, 0.01));
+  --stat-card-accent: var(--stat-blue-text);
+}
+
+.stat-card--tv {
+  --stat-card-surface: linear-gradient(160deg, var(--stat-green-bg), rgba(103, 194, 58, 0.01));
+  --stat-card-accent: var(--stat-green-text);
+}
+
+.stat-card--movie {
+  --stat-card-surface: linear-gradient(160deg, var(--stat-purple-bg), rgba(149, 117, 205, 0.01));
+  --stat-card-accent: var(--stat-purple-text);
+}
+
+.stat-card--storage {
+  --stat-card-surface: linear-gradient(160deg, var(--stat-amber-bg), rgba(230, 162, 60, 0.01));
+  --stat-card-accent: var(--stat-amber-text);
+}
+
 .stat-content {
   z-index: 1;
 }
 .stat-label {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--text-secondary);
   margin-bottom: 4px;
 }
 .stat-value {
   font-size: 28px;
   font-weight: 600;
-  color: #111827;
+  letter-spacing: 0.02em;
+  color: var(--stat-card-accent, var(--text-main));
 }
 .stat-icon {
   position: absolute;
   right: 16px;
   bottom: 16px;
-  opacity: 0.2;
-  color: #9ca3af;
+  opacity: 0.72;
+  color: var(--stat-card-accent, var(--text-secondary));
 }
 
 .group-card {
@@ -640,7 +684,7 @@ onBeforeUnmount(() => {
 .card-content {
   margin-bottom: 16px;
   font-size: 13px;
-  color: #6b7280;
+  color: var(--text-secondary);
 }
 .path-item {
   display: flex;

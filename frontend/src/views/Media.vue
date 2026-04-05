@@ -555,6 +555,7 @@ const fixMonitorWaitingForTask = ref(false)
 const fixMonitorAutoRefresh = ref(true)
 const fixMonitorRequestPending = ref(false)
 const fixMonitorMatchSpec = ref(null)
+const fixMonitorHandledTerminalTaskId = ref(null)
 let fixMonitorTimer = null
 
 function extractFilename(path) {
@@ -612,6 +613,7 @@ function resetFixMonitorState() {
   fixMonitorAutoRefresh.value = true
   fixMonitorRequestPending.value = false
   fixMonitorMatchSpec.value = null
+  fixMonitorHandledTerminalTaskId.value = null
 }
 
 function closeAllMediaOverlays() {
@@ -1186,9 +1188,8 @@ async function submitFix() {
       episode_offset: fixForm.media_type === 'tv' ? (fixForm.episode_offset ?? undefined) : undefined,
     })
     await attachFixMonitorTask(data?.task_id)
-    ElMessage.success(data?.message || '修正成功')
+    ElMessage.success(data?.message || '修正任务已进入队列')
     fixDialogVisible.value = false
-    await Promise.all([loadResources(), reloadDrawer()])
   } catch (error) {
     await refreshFixMonitorTask()
     if (fixMonitorTaskId.value) {
@@ -1275,9 +1276,8 @@ async function submitDirFix() {
           ...payload,
         })
     await attachFixMonitorTask(data?.task_id)
-    ElMessage.success(data?.message || (dirFixMode.value === 'season' ? 'Season 修正成功' : '整组修正成功'))
+    ElMessage.success(data?.message || (dirFixMode.value === 'season' ? 'Season 修正任务已进入队列' : '整组修正任务已进入队列'))
     dirFixDialogVisible.value = false
-    await Promise.all([loadResources(), reloadDrawer()])
   } catch (error) {
     await refreshFixMonitorTask()
     if (fixMonitorTaskId.value) {
@@ -1317,6 +1317,13 @@ watch(fixMonitorVisible, (visible) => {
     return
   }
   restartFixMonitorAutoRefresh()
+})
+
+watch(fixMonitorTaskStatus, async (status) => {
+  if (!fixMonitorTaskId.value || !isTerminalTaskStatus(status)) return
+  if (fixMonitorHandledTerminalTaskId.value === fixMonitorTaskId.value) return
+  fixMonitorHandledTerminalTaskId.value = fixMonitorTaskId.value
+  await Promise.all([loadResources(), reloadDrawer()])
 })
 
 watch(drawerVisible, (visible) => {

@@ -78,24 +78,6 @@ docker compose up -d --build
 
 默认挂载关系见 [docker-compose.yml](docker-compose.yml)。
 
-## 常用验证命令
-
-```bash
-# 前端生产构建
-cd frontend
-npm run build
-
-# 后端全量回归
-cd ..
-source .venv/bin/activate
-python -m pytest
-```
-
-当前仓库最近一次本地校验结果：
-
-- 前端 `npm run build` 通过
-- 后端全量测试 `324 passed`
-
 ## 项目结构
 
 ```text
@@ -107,3 +89,30 @@ scripts/     辅助脚本
 logs/        示例或本地调试日志
 tdocs/       调试分析文档与临时工具
 ```
+
+## 更新记录
+
+### 2025-04（任务队列 + 手动整理优化）
+
+**后端**
+
+- `task_queue.py`（新增）：基于线程队列的任务执行器，支持串行排队、可中断任务与取消语义
+- `database.py`：拆分任务专用数据库连接（`TaskSessionLocal`），配置 SQLite WAL 模式与 busy_timeout，隔离任务写入与请求读取，消除锁竞争；增加 `_migrate_scan_tasks_to_task_db` 迁移逻辑
+- `api/media.py`：重构手动整理任务执行路径，统一走 `_enqueue_logged_media_task` 入队；新增 `_manual_organize_log_cleanup_rows` 负责任务完成后清理冗余日志行；新增 `_pending_has_visible_mainline_files_fast` 快速判断目录是否有可见正片文件
+- `api/tasks.py`：任务列表 / 日志 / 取消 / 删除接口全部切换到 `get_task_db` 依赖；新增 `_is_running_interruptible_task` 校验可中断状态
+- `api/scan.py`：扫描任务入队逻辑迁移至 task_queue，支持按同步组扫描
+- `services/scanner.py`：新增 `_cleanup_nonreview_logs_for_directory` 在整理完成后清理非 review 日志；修复 `_task_session` 确保任务内操作使用任务专用 DB session
+- `api/logs.py`：日志追加路径兼容任务专用 session
+
+**前端**
+
+- `Pending.vue`（手动识别整理弹窗）：
+  - 修复 scoped `:deep()` 对 teleport 节点无效问题，改用全局 `<style>` 块约束弹窗布局
+  - 弹窗垂直居中显示；压缩表单行间距，为文件列表腾出更多空间
+  - `el-table` 启用 `height="100%"` 固定表头 + 内部滚动，支持鼠标滚轮
+  - 修复 `selectedPendingFileItems` 计算逻辑，确保"已选"视图与实际加载数据联动
+  - 修复切换全部 / 已选视图时表格 key 刷新，避免 Element Plus 内部状态错位
+- `Dashboard.vue`：任务状态标签新增 `cancelling` / `cancelled` 状态显示
+- `App.vue`：样式与主题变量拆分至 `frontend/src/styles/element/`
+- `main.js`：引入 Element Plus 主题覆盖样式
+- `vite.config.js`：配置 SCSS 预处理变量路径

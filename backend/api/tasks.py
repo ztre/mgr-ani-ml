@@ -7,10 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import get_task_db
 from ..models import ScanTask
 from ..services.scanner import request_scan_cancel
-from .logs import LOG_DIR, _tail_lines, append_log, cleanup_logs_if_needed, current_task_id
+from .logs import LOG_DIR, _tail_lines, append_log, append_task_log, cleanup_logs_if_needed, current_task_id
 
 router = APIRouter()
 DEFAULT_DISPLAY_TZ = timezone(timedelta(hours=8))
@@ -38,6 +38,17 @@ def _is_cancelable_scan_task(task: ScanTask) -> bool:
         or task_type == "group"
         or task_type.startswith("webhook_scan:")
         or task_type.startswith("manual:")
+        or task_type.startswith("reidentify:")
+    )
+
+
+def _is_running_interruptible_task(task: ScanTask) -> bool:
+    task_type = _normalize_task_type(task.type)
+    return (
+        task_type == "full"
+        or task_type == "group"
+        or task_type.startswith("webhook_scan:")
+        or task_type.startswith("manual:")
     )
 
 
@@ -55,7 +66,7 @@ class ScanTaskResponse(BaseModel):
 
 
 @router.get("", response_model=list[ScanTaskResponse])
-def list_tasks(db: Session = Depends(get_db), limit: int = Query(10, ge=1, le=200), offset: int = Query(0, ge=0)):
+def list_tasks(db: Session = Depends(get_task_db), limit: int = Query(10, ge=1, le=200), offset: int = Query(0, ge=0)):
     cleanup_logs_if_needed()
     tasks = db.query(ScanTask).order_by(ScanTask.created_at.desc()).offset(offset).limit(limit).all()
     return [
@@ -73,7 +84,7 @@ def list_tasks(db: Session = Depends(get_db), limit: int = Query(10, ge=1, le=20
 
 
 @router.get("/{task_id}/logs")
-def get_task_logs(task_id: int, limit: int = Query(400, ge=1, le=5000), db: Session = Depends(get_db)):
+def get_task_logs(task_id: int, limit: int = Query(400, ge=1, le=5000), db: Session = Depends(get_task_db)):
     cleanup_logs_if_needed()
     task = db.query(ScanTask).filter(ScanTask.id == task_id).first()
     if not task:
@@ -86,7 +97,7 @@ def get_task_logs(task_id: int, limit: int = Query(400, ge=1, le=5000), db: Sess
 
 
 @router.post("/{task_id}/cancel")
-def cancel_task(task_id: int, db: Session = Depends(get_db)):
+def cancel_task(task_id: int, db: Session = Depends(get_task_db)):
     cleanup_logs_if_needed()
     task = db.query(ScanTask).filter(ScanTask.id == task_id).first()
     if not task:
@@ -95,8 +106,17 @@ def cancel_task(task_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="该任务类型暂不支持中断")
     if task.status == "cancelled":
         return {"message": "任务已取消"}
+    if task.status == "queued":
+        task.status = "cancelled"
+        task.finished_at = datetime.now(timezone.utc)
+        task.log_file = f"task_{task.id}.log"
+        db.commit()
+        append_task_log(task.id, "INFO: 用户已取消排队中的任务")
+        return {"message": "已取消排队中的任务"}
     if task.status not in {"running", "cancelling"}:
-        raise HTTPException(status_code=409, detail="只有运行中的扫描任务可以中断")
+        raise HTTPException(status_code=409, detail="只有等待中或运行中的任务可以取消")
+    if not _is_running_interruptible_task(task):
+        raise HTTPException(status_code=409, detail="该任务运行后暂不支持中断，仅支持排队时取消")
 
     if not request_scan_cancel(task.id):
         raise HTTPException(status_code=409, detail="任务未处于可中断状态")
@@ -115,7 +135,7 @@ def cancel_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/all")
-def delete_all_tasks(db: Session = Depends(get_db)):
+def delete_all_tasks(db: Session = Depends(get_task_db)):
     count = db.query(ScanTask).delete()
     db.commit()
     for p in LOG_DIR.glob("task_*.log"):

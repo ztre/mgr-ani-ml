@@ -4,18 +4,20 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException
+from fastapi import Depends, FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import OperationalError
 
 from .api import auth, config as config_api, emby, inodes, logs, media, scan, sync_groups, tasks
 from .api.logs import cleanup_logs_if_needed
 from .config import settings
-from .database import SessionLocal, init_db
+from .database import RequestSessionLocal, SessionLocal, init_db
 from .models import MediaRecord, SyncGroup
 from .security import require_auth
 from .services.scanner import run_scan
+from .services.task_queue import enqueue_task, ensure_task_queue_worker
 
 
 @asynccontextmanager
@@ -27,6 +29,7 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("检测到默认账号口令 admin/admin123，请修改后再启动")
     init_db()
     cleanup_logs_if_needed(force=True)
+    ensure_task_queue_worker()
     yield
 
 
@@ -61,6 +64,18 @@ def health():
     return {"status": "ok"}
 
 
+def _is_sqlite_busy_error(exc: OperationalError) -> bool:
+    raw = str(getattr(exc, "orig", exc) or "").lower()
+    return "database is locked" in raw or "database table is locked" in raw
+
+
+@app.exception_handler(OperationalError)
+async def handle_operational_error(request, exc: OperationalError):
+    if _is_sqlite_busy_error(exc):
+        return JSONResponse(status_code=409, content={"detail": "数据库正忙，请稍后重试"})
+    return JSONResponse(status_code=500, content={"detail": "数据库操作失败"})
+
+
 def _run_scan_group_task(
     group_id: int,
     task_type_override: str | None = None,
@@ -81,18 +96,13 @@ def _run_scan_group_task(
 
 
 @app.post("/sendTask")
-def send_task(
-    background_tasks: BackgroundTasks,
-    dirname: str = Form(...),
-    group: str = Form(...),
-    _username: str = Depends(require_auth),
-):
+def send_task(dirname: str = Form(...), group: str = Form(...), _username: str = Depends(require_auth)):
     dirname = (dirname or "").strip()
     group = (group or "").strip()
     if not dirname or not group:
         raise HTTPException(status_code=400, detail="dirname 和 group 不能为空")
 
-    db = SessionLocal()
+    db = RequestSessionLocal()
     try:
         sync_group = db.query(SyncGroup).filter(SyncGroup.name == group).first()
         if not sync_group:
@@ -115,16 +125,26 @@ def send_task(
                 },
             )
 
-        background_tasks.add_task(
-            _run_scan_group_task,
-            sync_group.id,
-            f"webhook_scan:{sync_group.name}",
-            dirname,
-            matched[0].original_path,
+        task = enqueue_task(
+            db,
+            task_type=f"webhook_scan:{sync_group.name}",
+            target_id=sync_group.id,
+            target_name=dirname,
+            queued_message=f"webhook 扫描整理任务已进入队列，等待执行: {dirname}",
+            runner=lambda worker_db, queued_task: run_scan(
+                worker_db,
+                group_id=sync_group.id,
+                task=queued_task,
+                task_type_override=f"webhook_scan:{sync_group.name}",
+                target_name_override=dirname,
+                target_dir_override=matched[0].original_path,
+            ),
         )
         return {
             "ok": True,
-            "message": "已提交 webhook 扫描整理任务",
+            "message": "webhook 扫描整理任务已进入队列",
+            "task_id": task.id,
+            "status": task.status,
             "dirname": dirname,
             "group": group,
             "group_id": sync_group.id,

@@ -14,19 +14,20 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
-from .logs import append_log, current_task_id
+from .logs import append_log
 from ..config import settings
 from ..database import get_db
 from ..models import DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
 from ..services.group_routing import resolve_movie_target_root
-from ..services.linker import get_inode
+from ..services.linker import get_inode, path_excluded
 from ..services.parser import classify_extra_from_text, parse_movie_filename, parse_tv_filename
 from ..services.resource_tree import build_resource_summaries, build_resource_tree
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
 from ..services.scanner import (
     _collect_media_files_under_dir,
+    _is_ignored_name,
     _normalize_manual_selected_path,
     DirectoryProcessError,
     TaskCancelledError,
@@ -37,6 +38,7 @@ from ..services.scanner import (
     run_manual_organize,
     tag_task_type_with_issue,
 )
+from ..services.task_queue import enqueue_task
 
 router = APIRouter()
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
@@ -85,6 +87,69 @@ def _load_visible_pending_file_items(
         media_type=pending.type,
     )
     return _filter_processed_pending_file_items(db, pending, items)
+
+
+def _load_sync_group_map(db: Session, group_ids: set[int]) -> dict[int, SyncGroup]:
+    if not group_ids:
+        return {}
+    rows = db.query(SyncGroup).filter(SyncGroup.id.in_(sorted(group_ids))).all()
+    return {int(row.id): row for row in rows if getattr(row, "id", None) is not None}
+
+
+def _load_processed_original_paths_by_group(db: Session, group_ids: set[int]) -> dict[int, set[str]]:
+    if not group_ids:
+        return {}
+    rows = (
+        db.query(MediaRecord.sync_group_id, MediaRecord.original_path)
+        .filter(MediaRecord.sync_group_id.in_(sorted(group_ids)))
+        .filter(MediaRecord.status.in_(["scraped", "manual_fixed"]))
+        .filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
+        .all()
+    )
+    processed_by_group: dict[int, set[str]] = defaultdict(set)
+    for sync_group_id, original_path in rows:
+        if sync_group_id is None or not str(original_path or "").strip():
+            continue
+        processed_by_group[int(sync_group_id)].add(str(original_path))
+    return processed_by_group
+
+
+def _pending_has_visible_mainline_files_fast(
+    pending: MediaRecord,
+    group: SyncGroup,
+    *,
+    processed_paths: set[str] | None = None,
+) -> bool:
+    root_dir = Path(str(pending.original_path or ""))
+    if not _safe_is_dir(root_dir):
+        return False
+
+    processed_lookup = processed_paths or set()
+    include = str(getattr(group, "include", "") or "")
+    exclude = str(getattr(group, "exclude", "") or "")
+    source_value = getattr(group, "source", None)
+    source_root = Path(str(source_value)) if source_value else root_dir
+    media_type = str(getattr(pending, "type", "") or "")
+
+    try:
+        for current_root, _dirnames, filenames in os.walk(root_dir):
+            current_dir = Path(current_root)
+            for filename in filenames:
+                file_path = current_dir / filename
+                if file_path.suffix.lower() not in VIDEO_EXTS:
+                    continue
+                if _is_ignored_name(file_path.name):
+                    continue
+                if path_excluded(file_path, include, exclude, root_path=source_root):
+                    continue
+                if str(file_path) in processed_lookup:
+                    continue
+                if _pending_video_role(file_path, media_type) == "mainline":
+                    return True
+    except OSError:
+        return False
+
+    return False
 
 
 def _pending_has_visible_mainline_files(
@@ -500,23 +565,32 @@ def _delete_directory_states_for_removed_sources(
     if not affected_by_group:
         return 0
 
-    remaining_rows = (
-        db.query(MediaRecord)
-        .filter(MediaRecord.sync_group_id.in_(sorted(affected_group_ids)))
-        .filter(~MediaRecord.id.in_(sorted(deleted_ids)))
-        .all()
-    )
-
-    remaining_by_group: dict[int, set[str]] = defaultdict(set)
-    for row in remaining_rows:
-        if row.sync_group_id is None:
-            continue
-        source_dir = _derive_source_dir(row.original_path, row.status, row.target_path)
-        remaining_by_group[row.sync_group_id].add(str(source_dir))
-
     deleted_count = 0
     for group_id, dir_paths in affected_by_group.items():
-        removable = dir_paths - remaining_by_group.get(group_id, set())
+        remaining_rows = (
+            db.query(MediaRecord.original_path, MediaRecord.status, MediaRecord.target_path)
+            .filter(MediaRecord.sync_group_id == group_id)
+            .filter(~MediaRecord.id.in_(sorted(deleted_ids)))
+            .filter(
+                or_(
+                    *[
+                        or_(
+                            MediaRecord.original_path == dir_path,
+                            MediaRecord.original_path.like(f"{dir_path}/%"),
+                            MediaRecord.original_path.like(f"{dir_path}\\%"),
+                        )
+                        for dir_path in sorted(dir_paths)
+                    ]
+                )
+            )
+            .all()
+        )
+        remaining_dir_paths = {
+            str(_derive_source_dir(original_path, status, target_path))
+            for original_path, status, target_path in remaining_rows
+            if str(original_path or "").strip()
+        }
+        removable = dir_paths - remaining_dir_paths
         if not removable:
             continue
         deleted_count += (
@@ -537,33 +611,32 @@ def _delete_inodes_for_removed_sources(db: Session, rows: list[MediaRecord], del
     if not affected_keys:
         return 0
 
-    group_ids = sorted({group_id for group_id, _path in affected_keys if group_id is not None})
-    if not group_ids:
-        return 0
-
-    remaining_rows = (
-        db.query(MediaRecord.sync_group_id, MediaRecord.original_path)
-        .filter(MediaRecord.sync_group_id.in_(group_ids))
-        .filter(~MediaRecord.id.in_(sorted(deleted_ids)))
-        .all()
-    )
-    remaining_keys = {(group_id, original_path) for group_id, original_path in remaining_rows if group_id is not None}
-    removable_keys = affected_keys - remaining_keys
-    if not removable_keys:
-        return 0
-
     deleted_total = 0
-    by_group: dict[int, list[str]] = defaultdict(list)
-    for group_id, source_path in removable_keys:
+    by_group: dict[int, set[str]] = defaultdict(set)
+    for group_id, source_path in affected_keys:
         if group_id is None:
             continue
-        by_group[group_id].append(source_path)
+        by_group[group_id].add(source_path)
 
     for group_id, source_paths in by_group.items():
+        remaining_source_paths = {
+            str(original_path)
+            for (original_path,) in (
+                db.query(MediaRecord.original_path)
+                .filter(MediaRecord.sync_group_id == group_id)
+                .filter(~MediaRecord.id.in_(sorted(deleted_ids)))
+                .filter(MediaRecord.original_path.in_(sorted(source_paths)))
+                .all()
+            )
+            if str(original_path or "").strip()
+        }
+        removable_source_paths = sorted(source_paths - remaining_source_paths)
+        if not removable_source_paths:
+            continue
         deleted_total += (
             db.query(InodeRecord)
             .filter(InodeRecord.sync_group_id == group_id)
-            .filter(InodeRecord.source_path.in_(sorted(source_paths)))
+            .filter(InodeRecord.source_path.in_(removable_source_paths))
             .delete(synchronize_session=False)
         )
     return int(deleted_total)
@@ -751,85 +824,229 @@ def _resolve_reidentify_group(rows: list[MediaRecord], db: Session) -> tuple[Syn
     return group, media_type
 
 
-def _create_media_task(
-    db: Session,
-    *,
-    task_type: str,
-    target_id: int | None,
-    target_name: str | None,
-) -> ScanTask:
-    task = ScanTask(
-        type=task_type,
-        target_id=target_id,
-        target_name=target_name,
-        status="running",
-    )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-    return task
+def _task_session(task: ScanTask, fallback_db: Session) -> Session:
+    try:
+        session = object_session(task)
+    except Exception:
+        return fallback_db
+
+    if session is None:
+        return fallback_db
+    if type(session).__module__.startswith("unittest.mock"):
+        return fallback_db
+    if not hasattr(session, "commit") or not hasattr(session, "rollback"):
+        return fallback_db
+    return session
 
 
 def _finalize_media_task(db: Session, task: ScanTask, *, status: str, has_issues: bool = False) -> None:
+    task_db = _task_session(task, db)
     task.status = status
     if has_issues:
         task.type = tag_task_type_with_issue(task.type)
     task.finished_at = datetime.now(timezone.utc)
     task.log_file = f"task_{task.id}.log"
-    db.commit()
+    task_db.commit()
 
 
 def _fail_media_task(db: Session, task: ScanTask, detail: str, *, status_code: int) -> None:
+    task_db = _task_session(task, db)
     db.rollback()
+    task_db.rollback()
     task.status = "cancelled" if status_code == 409 else "failed"
     task.finished_at = datetime.now(timezone.utc)
     task.log_file = f"task_{task.id}.log"
     append_log(f"修正任务失败: {detail}")
     try:
-        db.commit()
+        task_db.commit()
     except Exception:
-        db.rollback()
+        task_db.rollback()
 
 
-def _run_logged_media_task(
+def _execute_logged_media_task(
+    db: Session,
+    *,
+    task: ScanTask,
+    start_message: str,
+    success_message_factory: Callable[[dict], str],
+    runner: Callable[[Session, ScanTask], dict],
+) -> None:
+    append_log(start_message)
+    result = runner(db, task)
+    has_issues = bool(result.get("has_issues"))
+    failed = int(result.get("failed") or 0)
+    if has_issues:
+        append_log("修正任务完成但存在问题项")
+    append_log(success_message_factory(result))
+    _finalize_media_task(db, task, status=("completed" if failed == 0 else "failed"), has_issues=has_issues)
+
+
+def _enqueue_logged_media_task(
     db: Session,
     *,
     task_type: str,
     target_id: int | None,
     target_name: str | None,
     start_message: str,
+    queued_message: str,
     success_message_factory: Callable[[dict], str],
-    runner: Callable[[], dict],
+    runner: Callable[[Session, ScanTask], dict],
 ) -> dict:
-    task = _create_media_task(
+    task = enqueue_task(
         db,
         task_type=task_type,
         target_id=target_id,
         target_name=target_name,
+        queued_message=queued_message,
+        runner=lambda worker_db, queued_task: _run_logged_media_task(
+            worker_db,
+            task=queued_task,
+            start_message=start_message,
+            success_message_factory=success_message_factory,
+            runner=runner,
+        ),
     )
-    token = current_task_id.set(task.id)
+    return {
+        "message": queued_message,
+        "task_id": task.id,
+        "status": task.status,
+        "log_file": task.log_file,
+    }
+
+
+def _run_logged_media_task(
+    db: Session,
+    *,
+    task: ScanTask,
+    start_message: str,
+    success_message_factory: Callable[[dict], str],
+    runner: Callable[[Session, ScanTask], dict],
+) -> None:
     try:
-        append_log(start_message)
-        result = runner()
-        has_issues = bool(result.get("has_issues"))
-        failed = int(result.get("failed") or 0)
-        if has_issues:
-            append_log("修正任务完成但存在问题项")
-        append_log(success_message_factory(result))
-        _finalize_media_task(db, task, status=("completed" if failed == 0 else "failed"), has_issues=has_issues)
-        return {
-            **result,
-            "task_id": task.id,
-            "log_file": task.log_file,
-        }
+        _execute_logged_media_task(
+            db,
+            task=task,
+            start_message=start_message,
+            success_message_factory=success_message_factory,
+            runner=runner,
+        )
     except HTTPException as exc:
         _fail_media_task(db, task, str(exc.detail), status_code=exc.status_code)
         raise
     except Exception as exc:
         _fail_media_task(db, task, str(exc), status_code=500)
         raise
+
+
+def _require_media_record(db: Session, media_id: int, *, detail: str = "记录不存在") -> MediaRecord:
+    row = db.query(MediaRecord).filter(MediaRecord.id == media_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=detail)
+    return row
+
+
+def _require_sync_group(db: Session, group_id: int | None, *, detail: str = "同步组不存在") -> SyncGroup:
+    if not group_id:
+        raise HTTPException(status_code=400, detail=detail)
+    group = db.query(SyncGroup).filter(SyncGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=400, detail=detail)
+    return group
+
+
+def _manual_organize_log_cleanup_rows(
+    db: Session,
+    *,
+    pending_id: int,
+    sync_group_id: int,
+    pending_original_path: str | None,
+) -> list[MediaRecord]:
+    root_dir = str(pending_original_path or "").strip()
+    if not root_dir:
+        return []
+
+    normalized_root = root_dir.rstrip("/\\")
+    if not normalized_root:
+        return []
+
+    resolved_rows = (
+        db.query(MediaRecord)
+        .filter(MediaRecord.sync_group_id == sync_group_id)
+        .filter(MediaRecord.status.in_(["scraped", "manual_fixed"]))
+        .filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
+        .filter(
+            or_(
+                MediaRecord.original_path == normalized_root,
+                MediaRecord.original_path.like(f"{normalized_root}/%"),
+                MediaRecord.original_path.like(f"{normalized_root}\\%"),
+            )
+        )
+        .all()
+    )
+
+    pending_after = db.query(MediaRecord).filter(MediaRecord.id == pending_id).first()
+    cleanup_rows = list(resolved_rows)
+    if pending_after is None:
+        cleanup_rows.append(
+            MediaRecord(
+                original_path=normalized_root,
+                target_path=None,
+                status="pending_manual",
+            )
+        )
+    return cleanup_rows
+
+
+def _run_manual_organize_task(
+    db: Session,
+    *,
+    task: ScanTask,
+    media_id: int,
+    group_id: int,
+    payload: dict,
+) -> dict[str, int | bool | str]:
+    pending = _require_media_record(db, media_id, detail="待办记录不存在")
+    if pending.status != "pending_manual":
+        raise HTTPException(status_code=400, detail="该记录不是待办状态")
+
+    group = _require_sync_group(db, group_id)
+    init_scan_cancel_flag(task.id)
+    try:
+        processed, failed, has_issues = run_manual_organize(
+            db=db,
+            pending=pending,
+            group=group,
+            media_type=payload["media_type"],
+            tmdb_id=payload["tmdb_id"],
+            title_override=payload.get("title"),
+            year_override=payload.get("year"),
+            season_override=payload.get("season"),
+            episode_offset=payload.get("episode_offset"),
+            selected_relative_paths=payload.get("selected_paths"),
+        )
+        cleanup_rows = _manual_organize_log_cleanup_rows(
+            db,
+            pending_id=media_id,
+            sync_group_id=group.id,
+            pending_original_path=pending.original_path,
+        )
+        log_cleanup = _cleanup_nonreview_pending_logs(cleanup_rows)
+        if has_issues:
+            append_log("手动整理完成但存在问题项（Special 冲突已跳过）")
+        return {
+            "message": f"手动整理完成: 成功 {processed}，失败 {failed}",
+            "processed": processed,
+            "failed": failed,
+            "has_issues": has_issues,
+            "pending_logs_removed": int(log_cleanup.get("pending_logs_removed") or 0),
+            "unprocessed_logs_removed": int(log_cleanup.get("unprocessed_logs_removed") or 0),
+        }
+    except TaskCancelledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DirectoryProcessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        current_task_id.reset(token)
+        pop_scan_cancel_flag(task.id)
 
 
 def _run_reidentify_scope(
@@ -845,6 +1062,9 @@ def _run_reidentify_scope(
     season_override: int | None = None,
     episode_offset: int | None,
 ) -> dict[str, int | bool | str]:
+    if not rows:
+        raise HTTPException(status_code=404, detail="待修正记录不存在")
+
     staged = _stage_batch_delete(db, rows, delete_files=True)
     effective_season_override = season_override if season_override is not None else season
     try:
@@ -1060,13 +1280,20 @@ def list_pending(
         q = q.filter(MediaRecord.original_path.contains(search))
 
     rows = q.order_by(MediaRecord.updated_at.desc()).all()
+    group_ids = {int(row.sync_group_id) for row in rows if getattr(row, "sync_group_id", None) is not None}
+    groups_by_id = _load_sync_group_map(db, group_ids)
+    processed_by_group = _load_processed_original_paths_by_group(db, group_ids)
     visible_rows: list[MediaRecord] = []
     for row in rows:
-        group = db.query(SyncGroup).filter(SyncGroup.id == row.sync_group_id).first()
+        group = groups_by_id.get(int(row.sync_group_id)) if getattr(row, "sync_group_id", None) is not None else None
         if not group:
             visible_rows.append(row)
             continue
-        if not _pending_has_visible_mainline_files(db, row, group):
+        if not _pending_has_visible_mainline_files_fast(
+            row,
+            group,
+            processed_paths=processed_by_group.get(int(group.id), set()),
+        ):
             continue
         visible_rows.append(row)
 
@@ -1472,18 +1699,25 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
     group = db.query(SyncGroup).filter(SyncGroup.id == row.sync_group_id).first()
     if not group:
         raise HTTPException(status_code=400, detail="同步组不存在")
-    return _run_logged_media_task(
+    payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+    return _enqueue_logged_media_task(
         db,
         task_type=f"reidentify:item:{group.name}",
         target_id=group.id,
         target_name=src.name,
+        queued_message=f"单文件修正任务已进入队列，等待执行: {src.name}",
         start_message=(
             f"单文件修正任务启动: media_id={media_id}, group={group.name}, "
             f"file={src.name}, media_type={data.media_type or row.type}, tmdb_id={data.tmdb_id}, "
             f"season={data.season}, episode={data.episode}, episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: f"单文件修正任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
-        runner=lambda: _run_single_reidentify(db=db, row=row, group=group, data=data),
+        runner=lambda worker_db, _task: _run_single_reidentify(
+            db=worker_db,
+            row=_require_media_record(worker_db, media_id),
+            group=_require_sync_group(worker_db, group.id),
+            data=ReidentifyRequest(**payload),
+        ),
     )
 
 
@@ -1522,76 +1756,29 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
     else:
         processed_mainline_paths = list(pending_mainline_paths)
 
-    task = ScanTask(
-        type=f"manual:{group.name}",
+    payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+    return _enqueue_logged_media_task(
+        db,
+        task_type=f"manual:{group.name}",
         target_id=group.id,
         target_name=root_dir.name,
-        status="running",
-    )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-    init_scan_cancel_flag(task.id)
-    token = current_task_id.set(task.id)
-
-    try:
-        append_log(
+        queued_message=(
+            f"手动整理任务已进入队列，等待执行: {root_dir.name}"
+            + (f"（{len(processed_mainline_paths)} 项）" if processed_mainline_paths else "")
+        ),
+        start_message=(
             f"手动整理任务启动: media_id={media_id}, group={group.name}, "
             f"dir={root_dir}, media_type={data.media_type}, tmdb_id={data.tmdb_id}"
-        )
-        processed, failed, has_issues = run_manual_organize(
-            db=db,
-            pending=pending,
-            group=group,
-            media_type=data.media_type,
-            tmdb_id=data.tmdb_id,
-            title_override=data.title,
-            year_override=data.year,
-            season_override=data.season,
-            episode_offset=data.episode_offset,
-            selected_relative_paths=data.selected_paths,
-        )
-        task.status = "completed" if failed == 0 else "failed"
-        if has_issues:
-            task.type = tag_task_type_with_issue(task.type)
-            append_log("手动整理完成但存在问题项（Special 冲突已跳过）")
-        task.finished_at = datetime.now(timezone.utc)
-        append_log(f"手动整理完成: 成功 {processed}，失败 {failed}")
-        db.commit()
-        pending_after = db.query(MediaRecord).filter(MediaRecord.id == media_id).first()
-        if pending_after is not None and not _pending_has_visible_mainline_files(db, pending_after, group):
-            db.delete(pending_after)
-            db.commit()
-            pending_after = None
-        pending_removed = pending_after is None
-
-        return {
-            "message": f"手动整理完成: 成功 {processed}，失败 {failed}",
-            "processed": processed,
-            "failed": failed,
-            "processed_mainline_paths": processed_mainline_paths,
-            "pending_removed": pending_removed,
-        }
-    except TaskCancelledError as e:
-        task.status = "cancelled"
-        task.finished_at = datetime.now(timezone.utc)
-        append_log(f"手动整理已取消: {e}")
-        db.commit()
-        raise HTTPException(status_code=409, detail=str(e))
-    except DirectoryProcessError as e:
-        task.status = "failed"
-        task.finished_at = datetime.now(timezone.utc)
-        append_log(f"手动整理失败: {e}")
-        db.commit()
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        pop_scan_cancel_flag(task.id)
-        task.log_file = f"task_{task.id}.log"
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-        current_task_id.reset(token)
+        ),
+        success_message_factory=lambda result: f"手动整理完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
+        runner=lambda worker_db, task: _run_manual_organize_task(
+            worker_db,
+            task=task,
+            media_id=media_id,
+            group_id=group.id,
+            payload=payload,
+        ),
+    )
 
 
 @router.post("/reidentify-by-target-dir")
@@ -1610,11 +1797,14 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
     )
     group, media_type = _resolve_reidentify_group(rows, db)
     media_type = data.media_type or media_type
-    return _run_logged_media_task(
+    payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+    row_ids = [row.id for row in rows]
+    return _enqueue_logged_media_task(
         db,
         task_type=f"reidentify:resource:{group.name}",
         target_id=group.id,
         target_name=Path(normalized).name or normalized,
+        queued_message=f"整组修正任务已进入队列，等待执行: {Path(normalized).name or normalized}",
         start_message=(
             f"整组修正任务启动: group={group.name}, target_dir={normalized}, "
             f"media_type={media_type}, tmdb_id={data.tmdb_id}, episode_offset={data.episode_offset}"
@@ -1622,7 +1812,7 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
         success_message_factory=lambda result: (
             f"整组修正任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}"
         ),
-        runner=lambda: {
+        runner=lambda worker_db, _task: {
             **(lambda scoped_result: {
                 "message": (
                     f"整组修正完成: 成功 {int(scoped_result['processed'])}，失败 {int(scoped_result['failed'])}"
@@ -1631,15 +1821,15 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
                 **scoped_result,
             })(
                 _run_reidentify_scope(
-                    db=db,
-                    rows=rows,
-                    group=group,
+                    db=worker_db,
+                    rows=worker_db.query(MediaRecord).filter(MediaRecord.id.in_(row_ids)).all(),
+                    group=_require_sync_group(worker_db, group.id),
                     media_type=media_type,
-                    tmdb_id=data.tmdb_id,
-                    title=data.title,
-                    year=data.year,
-                    season_override=(data.season_override if data.season_override is not None else data.season),
-                    episode_offset=data.episode_offset,
+                    tmdb_id=payload["tmdb_id"],
+                    title=payload.get("title"),
+                    year=payload.get("year"),
+                    season_override=(payload.get("season_override") if payload.get("season_override") is not None else payload.get("season")),
+                    episode_offset=payload.get("episode_offset"),
                 )
             )
         },
@@ -1664,11 +1854,13 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
     group, media_type = _resolve_reidentify_group(rows, db)
     media_type = data.media_type or media_type
     label = "Season 修正" if data.scope_level == "season" else "作用域修正"
-    return _run_logged_media_task(
+    payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+    return _enqueue_logged_media_task(
         db,
         task_type=(f"reidentify:season:{group.name}" if data.scope_level == "season" else f"reidentify:scope:{group.name}"),
         target_id=group.id,
         target_name=(data.group_label or Path(data.resource_dir).name or data.resource_dir),
+        queued_message=f"{label}任务已进入队列，等待执行: {data.group_label or Path(data.resource_dir).name or data.resource_dir}",
         start_message=(
             f"{label}任务启动: group={group.name}, scope={data.scope_level}, "
             f"target={data.group_label or data.resource_dir}, media_type={media_type}, tmdb_id={data.tmdb_id}, "
@@ -1676,7 +1868,7 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
             f"episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: f"{label}任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
-        runner=lambda: {
+        runner=lambda worker_db, _task: {
             **(lambda scoped_result: {
                 "message": (
                     f"{label}完成: 成功 {int(scoped_result['processed'])}，失败 {int(scoped_result['failed'])}"
@@ -1685,15 +1877,26 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
                 **scoped_result,
             })(
                 _run_reidentify_scope(
-                    db=db,
-                    rows=rows,
-                    group=group,
+                    db=worker_db,
+                    rows=_load_scope_media_rows(worker_db, DeleteScopeRequest(**{
+                        "scope_level": payload["scope_level"],
+                        "item_ids": payload["item_ids"],
+                        "resource_dir": payload["resource_dir"],
+                        "type": payload["type"],
+                        "sync_group_id": payload.get("sync_group_id"),
+                        "tmdb_id": payload.get("scope_tmdb_id"),
+                        "season": payload.get("season"),
+                        "group_kind": payload.get("group_kind"),
+                        "group_label": payload.get("group_label"),
+                        "delete_files": True,
+                    })),
+                    group=_require_sync_group(worker_db, group.id),
                     media_type=media_type,
-                    tmdb_id=data.tmdb_id,
-                    title=data.title,
-                    year=data.year,
-                    season_override=(data.season_override if data.season_override is not None else data.season),
-                    episode_offset=data.episode_offset,
+                    tmdb_id=payload["tmdb_id"],
+                    title=payload.get("title"),
+                    year=payload.get("year"),
+                    season_override=(payload.get("season_override") if payload.get("season_override") is not None else payload.get("season")),
+                    episode_offset=payload.get("episode_offset"),
                 )
             )
         },

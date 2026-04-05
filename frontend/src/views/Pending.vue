@@ -84,104 +84,119 @@
       width="980px"
       append-to-body
       destroy-on-close
+      modal-class="organize-dialog-overlay"
       class="organize-dialog"
     >
-      <div ref="organizeDrawerBodyRef" class="organize-dialog-body">
-      <el-form ref="organizeFormRef" :model="form" label-width="110px">
-        <el-form-item label="待办目录">
-          <div class="path-preview" :title="currentRow?.original_path">{{ currentRow?.original_path || '-' }}</div>
-        </el-form-item>
-        <el-form-item label="媒体类型" required>
-          <el-select v-model="form.media_type" style="width: 180px">
-            <el-option label="TV" value="tv" />
-            <el-option label="电影" value="movie" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="TMDB ID" required>
-          <el-input v-model="form.tmdb_id" placeholder="可直接填写 TMDB ID">
-            <template #append>
-              <el-button @click="openSearchDialog">
-                <el-icon><Search /></el-icon>
-              </el-button>
-            </template>
-          </el-input>
-        </el-form-item>
-        <el-form-item label="标题" required>
-          <el-input v-model="form.title" placeholder="例如：刀剑神域：序列之争" />
-        </el-form-item>
-        <el-form-item label="年份">
-          <el-input-number v-model="form.year" :min="1900" :max="2100" />
-        </el-form-item>
-        <el-form-item v-if="form.media_type === 'tv'" label="强制季号">
-          <el-input-number v-model="form.season" :min="0" />
-        </el-form-item>
-        <el-form-item v-if="form.media_type === 'tv'" label="集号偏移">
-          <el-input-number v-model="form.episode_offset" />
-        </el-form-item>
-      </el-form>
-
-      <div ref="pendingFilesSectionRef" class="pending-files-section">
-        <div ref="pendingFilesHeaderRef" class="pending-files-header">
-          <div>
-            <div class="pending-files-title">目录文件</div>
-            <div class="pending-files-subtitle">这里只展示正片视频；不勾选则整理整个目录，勾选后会自动补齐对应附件。</div>
-          </div>
-          <div class="pending-files-actions">
-            <div class="pending-filter-group" role="group" aria-label="目录文件过滤">
-              <el-button plain :type="pendingFileView === 'all' ? 'primary' : 'default'" @click="pendingFileView = 'all'">全部 {{ pendingFileItems.length }}</el-button>
-              <el-button plain :type="pendingFileView === 'selected' ? 'warning' : 'default'" @click="pendingFileView = 'selected'">已选 {{ selectedPendingPaths.length }}</el-button>
-            </div>
-            <div class="pending-select-group" role="group" aria-label="目录文件选择操作">
-              <el-button plain @click="selectAllPendingFiles" :disabled="pendingFilesLoading || !pendingFileItems.length">全选</el-button>
-              <el-button plain @click="clearPendingFileSelection" :disabled="pendingFilesLoading || !selectedPendingPaths.length">清空</el-button>
-            </div>
-          </div>
+      <div class="organize-dialog-body">
+        <div class="organize-form-section">
+          <el-form ref="organizeFormRef" :model="form" label-width="110px">
+            <el-form-item label="待办目录">
+              <div class="path-preview" :title="currentRow?.original_path">{{ currentRow?.original_path || '-' }}</div>
+            </el-form-item>
+            <el-form-item label="媒体类型" required>
+              <el-select v-model="form.media_type" style="width: 180px">
+                <el-option label="TV" value="tv" />
+                <el-option label="电影" value="movie" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="TMDB ID" required>
+              <el-input v-model="form.tmdb_id" placeholder="可直接填写 TMDB ID">
+                <template #append>
+                  <el-button @click="openSearchDialog">
+                    <el-icon><Search /></el-icon>
+                  </el-button>
+                </template>
+              </el-input>
+            </el-form-item>
+            <el-form-item label="标题" required>
+              <el-input v-model="form.title" placeholder="例如：刀剑神域：序列之争" />
+            </el-form-item>
+            <el-form-item label="年份">
+              <el-input-number v-model="form.year" :min="1900" :max="2100" />
+            </el-form-item>
+            <el-form-item v-if="form.media_type === 'tv'" label="强制季号">
+              <el-input-number v-model="form.season" :min="0" />
+            </el-form-item>
+            <el-form-item v-if="form.media_type === 'tv'" label="集号偏移">
+              <el-input-number v-model="form.episode_offset" />
+            </el-form-item>
+          </el-form>
         </div>
 
-        <el-alert
-          v-if="pendingFilesError"
-          ref="pendingFilesAlertRef"
-          type="warning"
-          :closable="false"
-          show-icon
-          class="pending-files-alert"
-          :title="pendingFilesError"
-        />
+        <div class="pending-files-section">
+          <div class="pending-files-header">
+            <div>
+              <div class="pending-files-title">目录文件</div>
+              <div class="pending-files-subtitle">这里只展示正片视频；不勾选则整理整个目录，勾选后会自动补齐对应附件。</div>
+            </div>
+            <div class="pending-files-actions">
+              <div class="pending-filter-group" role="group" aria-label="目录文件过滤">
+                <el-button plain :type="pendingFileView === 'all' ? 'primary' : 'default'" @click="setPendingFileView('all')">全部 {{ pendingFileItems.length }}</el-button>
+                <el-button plain :type="pendingFileView === 'selected' ? 'warning' : 'default'" :disabled="pendingFilesLoading || !selectedPendingFileCount" @click="setPendingFileView('selected')">已选 {{ selectedPendingFileCount }}</el-button>
+              </div>
+              <div class="pending-select-group" role="group" aria-label="目录文件选择操作">
+                <el-button plain @click="selectAllPendingFiles" :disabled="pendingFilesLoading || !pendingFileItems.length">全选</el-button>
+                <el-button plain @click="clearPendingFileSelection" :disabled="pendingFilesLoading || !selectedPendingFileCount">清空</el-button>
+              </div>
+            </div>
+          </div>
 
-        <div v-else class="pending-files-table-wrap">
-          <el-table
-            ref="pendingFilesTable"
-            :data="filteredPendingFileItems"
-            row-key="relative_path"
-            :height="pendingFilesTableHeight"
-            stripe
-            v-loading="pendingFilesLoading"
-            @selection-change="handlePendingFileSelection"
-          >
-            <el-table-column type="selection" width="52" />
-            <el-table-column prop="name" label="文件名" min-width="260" show-overflow-tooltip />
-            <el-table-column prop="parent_dir" label="所在目录" min-width="180" show-overflow-tooltip>
-              <template #default="{ row }">
-                {{ row.parent_dir === '.' ? '根目录' : row.parent_dir }}
+          <el-alert
+            v-if="pendingFilesError"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="pending-files-alert"
+            :title="pendingFilesError"
+          />
+
+          <div v-else class="pending-files-table-wrap">
+            <el-table
+              :key="pendingFilesTableKey"
+              :data="filteredPendingFileItems"
+              row-key="relative_path"
+              height="100%"
+              stripe
+              v-loading="pendingFilesLoading"
+            >
+              <el-table-column width="52" align="center">
+                <template #header>
+                  <el-checkbox
+                    :model-value="allFilteredPendingFilesSelected"
+                    :indeterminate="filteredPendingFilesSelectionIndeterminate"
+                    @change="toggleAllFilteredPendingFiles"
+                  />
+                </template>
+                <template #default="{ row }">
+                  <el-checkbox
+                    :model-value="isPendingFileSelected(row)"
+                    @change="(checked) => togglePendingFileSelection(row, checked)"
+                  />
+                </template>
+              </el-table-column>
+              <el-table-column prop="name" label="文件名" min-width="260" show-overflow-tooltip />
+              <el-table-column prop="parent_dir" label="所在目录" show-overflow-tooltip align="center">
+                <template #default="{ row }">
+                  {{ row.parent_dir === '.' ? '根目录' : row.parent_dir }}
+                </template>
+              </el-table-column>
+              <el-table-column label="大小" width="120" align="center">
+                <template #default="{ row }">
+                  {{ formatFileSize(row.size) }}
+                </template>
+              </el-table-column>
+              <template #empty>
+                <el-empty description="目录下没有可整理视频文件" />
               </template>
-            </el-table-column>
-            <el-table-column label="大小" width="120" align="right">
-              <template #default="{ row }">
-                {{ formatFileSize(row.size) }}
-              </template>
-            </el-table-column>
-            <template #empty>
-              <el-empty description="目录下没有可整理视频文件" />
-            </template>
-          </el-table>
+            </el-table>
+          </div>
         </div>
-      </div>
       </div>
 
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="submitting" @click="submitOrganize">
-          {{ selectedPendingPaths.length ? '整理选中文件' : '开始整理' }}
+          {{ selectedPendingFileCount ? '整理选中文件' : '开始整理' }}
         </el-button>
       </template>
     </el-dialog>
@@ -316,14 +331,8 @@ const pendingFilesLoading = ref(false)
 const pendingFileItems = ref([])
 const selectedPendingPaths = ref([])
 const pendingFilesError = ref('')
-const pendingFilesTable = ref(null)
 const pendingFileView = ref('all')
-const organizeDrawerBodyRef = ref(null)
 const organizeFormRef = ref(null)
-const pendingFilesSectionRef = ref(null)
-const pendingFilesHeaderRef = ref(null)
-const pendingFilesAlertRef = ref(null)
-const pendingFilesTableHeight = ref(360)
 const organizeMonitorVisible = ref(false)
 const organizeMonitorLogsLoading = ref(false)
 const organizeMonitorLogs = ref([])
@@ -335,6 +344,7 @@ const organizeMonitorWaitingForTask = ref(false)
 const organizeMonitorAutoRefresh = ref(true)
 const organizeMonitorRequestPending = ref(false)
 const organizeMonitorMatchSpec = ref(null)
+const organizeMonitorHandledTerminalTaskId = ref(null)
 const form = reactive({
   media_type: 'tv',
   tmdb_id: '',
@@ -344,16 +354,40 @@ const form = reactive({
   episode_offset: undefined,
 })
 
+function normalizePendingPath(path) {
+  return String(path || '').replace(/\\/g, '/').trim()
+}
+
+const selectedPendingPathSet = computed(() => new Set(selectedPendingPaths.value.map((path) => normalizePendingPath(path)).filter(Boolean)))
+
+const selectedPendingFileItems = computed(() => pendingFileItems.value.filter((item) => selectedPendingPathSet.value.has(normalizePendingPath(item?.relative_path))))
+
+const selectedPendingFileCount = computed(() => selectedPendingFileItems.value.length)
+
+const selectedPendingPayloadPaths = computed(() => selectedPendingFileItems.value.map((item) => normalizePendingPath(item?.relative_path)).filter(Boolean))
+
 const filteredPendingFileItems = computed(() => {
   if (pendingFileView.value === 'selected') {
-    const selected = new Set(selectedPendingPaths.value)
-    return pendingFileItems.value.filter((item) => selected.has(item.relative_path))
+    return [...selectedPendingFileItems.value]
   }
-  return pendingFileItems.value
+  return [...pendingFileItems.value]
 })
 
-let pendingLayoutFrame = null
+const pendingFilesTableKey = computed(() => `${Number(currentRow.value?.id || 0)}:${pendingFileView.value}:${filteredPendingFileItems.value.length}:${selectedPendingFileCount.value}`)
+
+const allFilteredPendingFilesSelected = computed(() => {
+  if (!filteredPendingFileItems.value.length) return false
+  return filteredPendingFileItems.value.every((item) => selectedPendingPathSet.value.has(normalizePendingPath(item?.relative_path)))
+})
+
+const filteredPendingFilesSelectionIndeterminate = computed(() => {
+  if (!filteredPendingFileItems.value.length) return false
+  const selectedCount = filteredPendingFileItems.value.filter((item) => selectedPendingPathSet.value.has(normalizePendingPath(item?.relative_path))).length
+  return selectedCount > 0 && selectedCount < filteredPendingFileItems.value.length
+})
+
 let organizeMonitorTimer = null
+let organizeDialogWheelOverlayEl = null
 
 function isTerminalTaskStatus(status) {
   return ['completed', 'failed', 'cancelled'].includes(String(status || ''))
@@ -364,6 +398,87 @@ function clearOrganizeMonitorTimer() {
     clearInterval(organizeMonitorTimer)
     organizeMonitorTimer = null
   }
+}
+
+function isScrollableElement(element) {
+  if (!(element instanceof HTMLElement)) return false
+  const style = window.getComputedStyle(element)
+  const overflowY = `${style.overflowY} ${style.overflow}`
+  if (!/(auto|scroll|overlay)/.test(overflowY)) return false
+  return element.scrollHeight > element.clientHeight + 1
+}
+
+function canElementScroll(element, deltaY) {
+  if (!(element instanceof HTMLElement)) return false
+  if (Math.abs(deltaY) < 0.5) return false
+  if (deltaY < 0) {
+    return element.scrollTop > 0
+  }
+  return element.scrollTop + element.clientHeight < element.scrollHeight - 1
+}
+
+function findDialogScrollableElement(target, dialogEl) {
+  if (!(target instanceof HTMLElement) || !(dialogEl instanceof HTMLElement)) return null
+
+  const tableWrapEl = target.closest('.pending-files-table-wrap')
+  if (tableWrapEl instanceof HTMLElement) {
+    const tableScrollEl = tableWrapEl.querySelector('.el-scrollbar__wrap, .el-table__body-wrapper')
+    if (tableScrollEl instanceof HTMLElement && isScrollableElement(tableScrollEl)) {
+      return tableScrollEl
+    }
+  }
+
+  let current = target
+  while (current && current !== dialogEl) {
+    if (isScrollableElement(current)) {
+      return current
+    }
+    current = current.parentElement
+  }
+
+  if (isScrollableElement(dialogEl)) {
+    return dialogEl
+  }
+
+  return null
+}
+
+function handleOrganizeDialogWheel(event) {
+  if (!dialogVisible.value || !(event.target instanceof HTMLElement)) {
+    return
+  }
+
+  const overlayEl = organizeDialogWheelOverlayEl
+  const dialogEl = overlayEl?.querySelector('.organize-dialog .el-dialog') || overlayEl?.querySelector('.el-dialog')
+  if (!(dialogEl instanceof HTMLElement)) {
+    event.preventDefault()
+    return
+  }
+
+  if (!dialogEl.contains(event.target)) {
+    event.preventDefault()
+    return
+  }
+
+  const scrollableEl = findDialogScrollableElement(event.target, dialogEl)
+  if (!scrollableEl || !canElementScroll(scrollableEl, event.deltaY)) {
+    event.preventDefault()
+  }
+}
+
+function detachOrganizeDialogWheelLock() {
+  if (!organizeDialogWheelOverlayEl) return
+  organizeDialogWheelOverlayEl.removeEventListener('wheel', handleOrganizeDialogWheel)
+  organizeDialogWheelOverlayEl = null
+}
+
+async function attachOrganizeDialogWheelLock() {
+  await nextTick()
+  detachOrganizeDialogWheelLock()
+  const overlayEl = document.querySelector('.organize-dialog-overlay')
+  if (!(overlayEl instanceof HTMLElement)) return
+  overlayEl.addEventListener('wheel', handleOrganizeDialogWheel, { passive: false })
+  organizeDialogWheelOverlayEl = overlayEl
 }
 
 function resetOrganizeMonitorState() {
@@ -378,6 +493,7 @@ function resetOrganizeMonitorState() {
   organizeMonitorAutoRefresh.value = true
   organizeMonitorRequestPending.value = false
   organizeMonitorMatchSpec.value = null
+  organizeMonitorHandledTerminalTaskId.value = null
 }
 
 function buildOrganizeMonitorMatchSpec({ typePrefix, targetName, targetLabel }) {
@@ -473,6 +589,23 @@ async function manualRefreshOrganizeMonitor() {
   }
 }
 
+async function attachOrganizeMonitorTask(taskId) {
+  if (!taskId) return
+  organizeMonitorTaskId.value = Number(taskId)
+  organizeMonitorWaitingForTask.value = false
+  await refreshOrganizeMonitorTask({ silent: true })
+  await fetchOrganizeMonitorLogs(organizeMonitorTaskId.value)
+  restartOrganizeMonitorAutoRefresh()
+}
+
+function setPendingFileView(nextView) {
+  if (nextView === 'selected' && !selectedPendingFileCount.value) {
+    pendingFileView.value = 'all'
+    return
+  }
+  pendingFileView.value = nextView
+}
+
 function openOrganizeMonitor(spec) {
   resetOrganizeMonitorState()
   organizeMonitorMatchSpec.value = spec
@@ -481,24 +614,6 @@ function openOrganizeMonitor(spec) {
   organizeMonitorWaitingForTask.value = true
   organizeMonitorRequestPending.value = true
   restartOrganizeMonitorAutoRefresh()
-}
-
-function updatePendingFilesTableHeight() {
-  if (pendingLayoutFrame !== null) {
-    cancelAnimationFrame(pendingLayoutFrame)
-  }
-  pendingLayoutFrame = requestAnimationFrame(() => {
-    const sectionEl = pendingFilesSectionRef.value
-    const headerEl = pendingFilesHeaderRef.value
-    const alertEl = pendingFilesAlertRef.value?.$el || pendingFilesAlertRef.value
-    if (!sectionEl || !headerEl) return
-
-    const sectionHeight = sectionEl.getBoundingClientRect().height
-    const headerHeight = headerEl.getBoundingClientRect().height
-    const alertHeight = alertEl ? alertEl.getBoundingClientRect().height + 12 : 0
-    const nextHeight = Math.floor(sectionHeight - headerHeight - alertHeight)
-    pendingFilesTableHeight.value = Math.max(nextHeight, 220)
-  })
 }
 
 function extractDirName(path) {
@@ -535,8 +650,6 @@ async function openOrganizeDialog(row) {
   pendingFileView.value = 'all'
   dialogVisible.value = true
   await loadPendingFiles(row)
-  await nextTick()
-  updatePendingFilesTableHeight()
 }
 
 async function loadPendingFiles(row) {
@@ -549,38 +662,66 @@ async function loadPendingFiles(row) {
   try {
     const { data } = await mediaApi.pendingFiles(row.id)
     pendingFileItems.value = (data.items || []).filter((item) => item.file_type === 'video' && item.content_role === 'mainline')
-    await nextTick()
-    pendingFilesTable.value?.clearSelection?.()
-    updatePendingFilesTableHeight()
+    selectedPendingPaths.value = []
+    pendingFileView.value = 'all'
   } catch (e) {
     pendingFilesError.value = e.response?.data?.detail || '目录文件加载失败'
   } finally {
     pendingFilesLoading.value = false
-    await nextTick()
-    updatePendingFilesTableHeight()
   }
 }
 
-function handlePendingFileSelection(rows) {
-  selectedPendingPaths.value = (rows || []).map((row) => row.relative_path)
+function isPendingFileSelected(row) {
+  return selectedPendingPathSet.value.has(normalizePendingPath(row?.relative_path))
+}
+
+function togglePendingFileSelection(row, checked) {
+  const path = normalizePendingPath(row?.relative_path)
+  if (!path) return
+
+  const selected = new Set(selectedPendingPaths.value)
+  if (checked) {
+    selected.add(path)
+  } else {
+    selected.delete(path)
+  }
+  selectedPendingPaths.value = [...selected]
+
+  if (pendingFileView.value === 'selected' && !selectedPendingFileCount.value) {
+    pendingFileView.value = 'all'
+  }
 }
 
 function clearPendingFileSelection() {
-  pendingFilesTable.value?.clearSelection?.()
   selectedPendingPaths.value = []
+  if (pendingFileView.value === 'selected') {
+    pendingFileView.value = 'all'
+  }
 }
 
 function selectPendingFiles(predicate) {
-  const table = pendingFilesTable.value
-  if (!table) return
-  table.clearSelection?.()
-  const selected = []
-  pendingFileItems.value.forEach((item) => {
-    if (!predicate(item)) return
-    table.toggleRowSelection?.(item, true)
-    selected.push(item.relative_path)
+  selectedPendingPaths.value = pendingFileItems.value
+    .filter((item) => predicate(item))
+    .map((item) => normalizePendingPath(item?.relative_path))
+    .filter(Boolean)
+}
+
+function toggleAllFilteredPendingFiles(checked) {
+  const selected = new Set(selectedPendingPaths.value)
+  filteredPendingFileItems.value.forEach((item) => {
+    const path = normalizePendingPath(item?.relative_path)
+    if (!path) return
+    if (checked) {
+      selected.add(path)
+    } else {
+      selected.delete(path)
+    }
   })
-  selectedPendingPaths.value = selected
+  selectedPendingPaths.value = [...selected]
+
+  if (pendingFileView.value === 'selected' && !selectedPendingFileCount.value) {
+    pendingFileView.value = 'all'
+  }
 }
 
 function selectAllPendingFiles() {
@@ -596,32 +737,6 @@ function removePendingRowLocally(pendingId) {
   total.value = Math.max(0, total.value - removedCount)
 }
 
-function applyOrganizeSuccess(result) {
-  const processedPathSet = new Set(
-    (result?.processed_mainline_paths || [])
-      .map((path) => String(path || '').replace(/\\/g, '/'))
-      .filter(Boolean),
-  )
-
-  if (processedPathSet.size) {
-    pendingFileItems.value = pendingFileItems.value.filter(
-      (item) => !processedPathSet.has(String(item?.relative_path || '').replace(/\\/g, '/')),
-    )
-    selectedPendingPaths.value = selectedPendingPaths.value.filter(
-      (path) => !processedPathSet.has(String(path || '').replace(/\\/g, '/')),
-    )
-    pendingFilesTable.value?.clearSelection?.()
-    if (pendingFileView.value === 'selected' && !selectedPendingPaths.value.length) {
-      pendingFileView.value = 'all'
-    }
-  }
-
-  const pendingRemoved = Boolean(result?.pending_removed) || pendingFileItems.value.length === 0
-  if (pendingRemoved && currentRow.value?.id) {
-    removePendingRowLocally(currentRow.value.id)
-  }
-}
-
 async function submitOrganize() {
   if (!currentRow.value) return
   if (!form.tmdb_id) {
@@ -634,8 +749,8 @@ async function submitOrganize() {
     buildOrganizeMonitorMatchSpec({
       typePrefix: 'manual:',
       targetName,
-      targetLabel: selectedPendingPaths.value.length
-        ? `手动整理 · ${targetName} · ${selectedPendingPaths.value.length} 项`
+        targetLabel: selectedPendingFileCount.value
+        ? `手动整理 · ${targetName} · ${selectedPendingFileCount.value} 项`
         : `手动整理 · ${targetName}`,
     }),
   )
@@ -647,17 +762,12 @@ async function submitOrganize() {
       media_type: form.media_type,
       season: form.media_type === 'tv' ? (form.season ?? null) : null,
       episode_offset: form.media_type === 'tv' ? (form.episode_offset ?? null) : null,
-      selected_paths: selectedPendingPaths.value.length ? [...selectedPendingPaths.value] : null,
+      selected_paths: selectedPendingFileCount.value ? [...selectedPendingPayloadPaths.value] : null,
     }
     dialogVisible.value = false
     const { data } = await mediaApi.manualOrganize(currentRow.value.id, payload)
-    await refreshOrganizeMonitorTask()
-    if (organizeMonitorTaskId.value) {
-      await fetchOrganizeMonitorLogs(organizeMonitorTaskId.value)
-    }
-    applyOrganizeSuccess(data)
-    ElMessage.success(data.message || '整理完成')
-    await loadPending()
+    await attachOrganizeMonitorTask(data?.task_id)
+    ElMessage.success(data?.message || '手动整理任务已进入队列')
   } catch (e) {
     await refreshOrganizeMonitorTask()
     if (organizeMonitorTaskId.value) {
@@ -795,21 +905,19 @@ onMounted(() => {
   const q = route.query.search
   search.value = typeof q === 'string' ? q : ''
   loadPending()
-  window.addEventListener('resize', updatePendingFilesTableHeight)
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', updatePendingFilesTableHeight)
-  if (pendingLayoutFrame !== null) {
-    cancelAnimationFrame(pendingLayoutFrame)
-  }
+  detachOrganizeDialogWheelLock()
   clearOrganizeMonitorTimer()
 })
 
 watch(dialogVisible, async (visible) => {
-  if (!visible) return
-  await nextTick()
-  updatePendingFilesTableHeight()
+  if (visible) {
+    await attachOrganizeDialogWheelLock()
+    return
+  }
+  detachOrganizeDialogWheelLock()
 })
 
 watch(organizeMonitorVisible, (visible) => {
@@ -820,10 +928,11 @@ watch(organizeMonitorVisible, (visible) => {
   restartOrganizeMonitorAutoRefresh()
 })
 
-watch([pendingFilesError, filteredPendingFileItems], async () => {
-  if (!dialogVisible.value) return
-  await nextTick()
-  updatePendingFilesTableHeight()
+watch(organizeMonitorTaskStatus, async (status) => {
+  if (!organizeMonitorTaskId.value || !isTerminalTaskStatus(status)) return
+  if (organizeMonitorHandledTerminalTaskId.value === organizeMonitorTaskId.value) return
+  organizeMonitorHandledTerminalTaskId.value = organizeMonitorTaskId.value
+  await loadPending()
 })
 </script>
 
@@ -856,16 +965,24 @@ watch([pendingFilesError, filteredPendingFileItems], async () => {
   word-break: break-all;
 }
 .organize-dialog-body {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
-  height: min(64vh, 680px);
+  height: 100%;
   min-height: 0;
   overflow: hidden;
 }
+
+.organize-form-section {
+  min-height: 0;
+}
+
+.organize-form-section :deep(.el-form) {
+  margin-bottom: 0;
+}
 .pending-files-section {
   display: flex;
-  flex: 1;
+  flex: 1 1 0;
   flex-direction: column;
   margin-top: 8px;
   border-top: 1px solid var(--amm-border, #e5e7eb);
@@ -914,9 +1031,21 @@ watch([pendingFilesError, filteredPendingFileItems], async () => {
   margin-bottom: 12px;
 }
 .pending-files-table-wrap {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.pending-files-table-wrap :deep(.el-table) {
+  width: 100%;
+  height: 100%;
+}
+
+.pending-files-table-wrap :deep(.el-scrollbar),
+.pending-files-table-wrap :deep(.el-scrollbar__wrap),
+.pending-files-table-wrap :deep(.el-table__body-wrapper) {
+  overscroll-behavior: contain;
 }
 .search-bar {
   margin-bottom: 24px;
@@ -1024,31 +1153,60 @@ watch([pendingFilesError, filteredPendingFileItems], async () => {
   max-width: 92vw;
 }
 
-:deep(.organize-dialog .el-dialog) {
-  max-width: 96vw;
-  max-height: calc(100vh - 96px);
-  margin: 48px auto !important;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-:deep(.organize-dialog .el-dialog__header),
-:deep(.organize-dialog .el-dialog__footer) {
-  flex: 0 0 auto;
-}
-
-:deep(.organize-dialog .el-dialog__body) {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
-  padding-top: 12px;
-}
+/* organize-dialog 对话框级别的样式已移至文件末尾非 scoped <style> 块
+   原因：el-dialog 使用 append-to-body teleport，:deep() 生成的后代选择器
+   [data-v-xxxx] .organize-dialog 无法匹配（没有 data-v 祖先节点）。 */
 
 @media (max-width: 900px) {
   .pending-files-header {
     flex-direction: column;
     align-items: stretch;
   }
+}
+</style>
+
+<!-- 对话框全局样式：el-dialog 被 teleport 到 body，scoped :deep() 无效，必须用全局 CSS -->
+<style>
+.el-overlay.organize-dialog-overlay {
+  overflow: hidden;
+}
+
+.el-overlay.organize-dialog-overlay .el-overlay-dialog {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.el-dialog.organize-dialog {
+  box-sizing: border-box;
+  height: min(760px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
+  width: min(980px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  margin: 0 !important;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.el-dialog.organize-dialog .el-dialog__header,
+.el-dialog.organize-dialog .el-dialog__footer {
+  flex: 0 0 auto;
+}
+
+.el-dialog.organize-dialog .el-form-item {
+  margin-bottom: 10px;
+}
+
+.el-dialog.organize-dialog .el-dialog__body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding-top: 12px;
 }
 </style>

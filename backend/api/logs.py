@@ -19,8 +19,7 @@ current_task_id: ContextVar[int | None] = ContextVar("current_task_id", default=
 _last_cleanup_at: datetime | None = None
 
 
-def append_log(message: str) -> None:
-    task_id = current_task_id.get()
+def append_task_log(task_id: int | None, message: str) -> None:
     if not task_id:
         return
 
@@ -36,6 +35,10 @@ def append_log(message: str) -> None:
             f.write(line)
     except Exception:
         pass
+
+
+def append_log(message: str) -> None:
+    append_task_log(current_task_id.get(), message)
 
 
 def _tail_lines(path: Path, limit: int) -> list[str]:
