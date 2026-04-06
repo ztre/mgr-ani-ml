@@ -18,6 +18,7 @@ EXTRA_CATEGORIES = {
     "teaser",
     "character_pv",
     "mv",
+    "iv",
     "making",
     "interview",
     "bdextra",
