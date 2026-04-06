@@ -360,6 +360,161 @@ def _record_unhandled_item(
     _append_jsonl_record(unprocessed_path, payload)
 
 
+def _extract_inode_owner_label(target_path: str | Path | None) -> str | None:
+    raw = str(target_path or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    parts = list(path.parts)
+    if not parts:
+        return None
+
+    for part in parts:
+        if re.search(r"\[tmdbid=\d+\]", part, re.I):
+            return part
+
+    parent = path.parent
+    parent_name = parent.name.strip()
+    if re.match(r"^season\s*\d+", parent_name, re.I):
+        return parent.parent.name.strip() or None
+    if parent_name.lower() == "extras":
+        return parent.parent.name.strip() or None
+    return parent_name or None
+
+
+def _extract_tmdb_id_from_owner_label(owner_label: str | None) -> int | None:
+    text = str(owner_label or "")
+    match = re.search(r"\[tmdbid=(\d+)\]", text, re.I)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_inode_skip_owner_note(existing_target: str | Path | None, context: dict | None) -> str:
+    owner_label = _extract_inode_owner_label(existing_target)
+    if not owner_label:
+        return ""
+    current_tmdb_id = context.get("tmdb_id") if isinstance(context, dict) else None
+    owner_tmdb_id = _extract_tmdb_id_from_owner_label(owner_label)
+    if isinstance(current_tmdb_id, int) and isinstance(owner_tmdb_id, int) and current_tmdb_id != owner_tmdb_id:
+        return f"，当前归属资源: {owner_label}（非当前整理目标）"
+    return f"，当前归属资源: {owner_label}"
+
+
+def _find_inode_record_by_target_path(db: Session, target_path: Path) -> InodeRecord | None:
+    if not hasattr(db, "query"):
+        return None
+
+    normalized_target = str(target_path)
+    try:
+        return db.query(InodeRecord).filter(InodeRecord.target_path == normalized_target).first()
+    except AttributeError:
+        try:
+            rows = db.query(InodeRecord).all()
+        except Exception:
+            return None
+        for row in rows:
+            if str(getattr(row, "target_path", "") or "") == normalized_target:
+                return row
+        return None
+    except Exception:
+        return None
+
+
+def _build_main_video_conflict_diagnostics(
+    db: Session,
+    *,
+    src_path: Path,
+    dst_path: Path,
+    parse_result: ParseResult,
+    seen_targets: dict[Path, Path],
+) -> str:
+    details: list[str] = []
+
+    previous_src = seen_targets.get(dst_path)
+    if previous_src is not None and previous_src != src_path:
+        details.append(f"批次内已有映射源: {Path(previous_src).name}")
+
+    if dst_path.exists():
+        if is_same_inode(src_path, dst_path):
+            details.append("目标已存在且与源文件同 inode")
+        else:
+            details.append("目标已存在且与源文件不同 inode")
+    else:
+        details.append("目标文件当前不存在")
+
+    inode_row = _find_inode_record_by_target_path(db, dst_path)
+    if inode_row is not None:
+        source_path = str(getattr(inode_row, "source_path", "") or "").strip()
+        if source_path:
+            details.append(f"已有 inode 记录源: {source_path}")
+        owner_label = _extract_inode_owner_label(getattr(inode_row, "target_path", None))
+        if owner_label:
+            details.append(f"已占用资源: {owner_label}")
+
+    source_diff_tags = _extract_distinguish_source_tags(src_path.name)
+    if source_diff_tags:
+        details.append(f"区分标签候选: {','.join(source_diff_tags)}")
+    else:
+        details.append("未提取到可用区分标签")
+
+    version_tag = getattr(parse_result, "version_tag", None)
+    if version_tag:
+        details.append(f"version_tag={version_tag}")
+    else:
+        details.append("无 version_tag")
+
+    extra_label = str(getattr(parse_result, "extra_label", "") or "").strip()
+    if extra_label:
+        details.append(f"当前补强标签: {extra_label}")
+
+    return " | ".join(details)
+
+
+def _summarize_main_video_conflict(
+    db: Session,
+    *,
+    src_path: Path,
+    dst_path: Path,
+    parse_result: ParseResult,
+    seen_targets: dict[Path, Path],
+) -> str:
+    clauses: list[str] = []
+
+    previous_src = seen_targets.get(dst_path)
+    if previous_src is not None and previous_src != src_path:
+        clauses.append(f"批次内已有同目标映射: {Path(previous_src).name}")
+
+    inode_row = _find_inode_record_by_target_path(db, dst_path)
+    if dst_path.exists() and not is_same_inode(src_path, dst_path):
+        occupied_label = None
+        if inode_row is not None:
+            source_path = str(getattr(inode_row, "source_path", "") or "").strip()
+            if source_path:
+                occupied_label = Path(source_path).name
+            if not occupied_label:
+                occupied_label = _extract_inode_owner_label(getattr(inode_row, "target_path", None))
+        if occupied_label:
+            clauses.append(f"目标已被已有文件占用: {occupied_label}")
+        else:
+            clauses.append("目标已存在且与当前源文件不同 inode")
+
+    source_diff_tags = _extract_distinguish_source_tags(src_path.name)
+    version_tag = getattr(parse_result, "version_tag", None)
+    if not source_diff_tags and not version_tag:
+        clauses.append("文件名缺少可用于区分版本的标签")
+    elif source_diff_tags:
+        clauses.append(f"候选区分标签未能解冲突: {','.join(source_diff_tags)}")
+    elif version_tag:
+        clauses.append(f"候选 version_tag 未能解冲突: {version_tag}")
+
+    summary = "；".join(clause for clause in clauses if clause)
+    return summary or "已尝试自动区分版本但仍无法解冲突"
+
+
 def tag_task_type_with_issue(task_type: str) -> str:
     base = str(task_type or "").strip() or "scan"
     return base if base.startswith("issue_sp:") else f"issue_sp:{base}"
@@ -637,11 +792,12 @@ def _run_manual_organize_core(
     title_override: str | None = None,
     year_override: int | None = None,
     season_override: int | None = None,
+    episode_override: int | None = None,
     episode_offset: int | None = None,
     selected_relative_paths: list[str] | None = None,
     pending: MediaRecord | None = None,
     action_label: str = "手动整理",
-) -> tuple[int, int, bool]:
+) -> tuple[int, int, bool, int]:
     task_id = current_task_id.get()
 
     if not root_dir.exists() or not root_dir.is_dir():
@@ -672,6 +828,10 @@ def _run_manual_organize_core(
         fallback_title=fallback_title,
     )
 
+    normalized_forced_season = None
+    if season_override is not None:
+        normalized_forced_season = max(0, int(season_override))
+
     context = {
         "media_type": media_type,
         "sync_group_id": group.id,
@@ -682,10 +842,11 @@ def _run_manual_organize_core(
         "target_root": str(target_root),
         "score": 1.0,
         "fallback_round": 0,
-        "season_hint": max(1, int(season_override)) if (season_override is not None and season_override > 0) else None,
-        "season_hint_source": "explicit" if (season_override is not None and season_override > 0) else None,
-        "season_hint_confidence": "high" if (season_override is not None and season_override > 0) else None,
-        "force_resolved_season_on_tv_items": bool(season_override is not None and season_override > 0),
+        "season_hint": normalized_forced_season,
+        "season_hint_source": "explicit" if normalized_forced_season is not None else None,
+        "season_hint_confidence": "high" if normalized_forced_season is not None else None,
+        "force_resolved_season_on_tv_items": normalized_forced_season is not None,
+        "forced_episode": (max(1, int(episode_override)) if episode_override is not None else None),
         "special_hint": False,
         "record_status": "manual_fixed",
         "extra_context": bool(detect_special_dir_context(root_dir)[0]),
@@ -708,6 +869,15 @@ def _run_manual_organize_core(
         raise DirectoryProcessError("待办目录中没有可处理媒体")
 
     selection_mode = bool(selected_relative_paths)
+    explicit_selected_files = _select_manual_media_files(all_media_files, root_dir, selected_relative_paths) if selection_mode else []
+    explicit_selected_mainlines = (
+        sum(1 for path in explicit_selected_files if _classify_manual_video_role(path, media_type) == "mainline")
+        if selection_mode else 0
+    )
+    auto_selected_special_files = (
+        _collect_manual_selected_special_videos(all_media_files, explicit_selected_files, media_type=media_type)
+        if selection_mode else []
+    )
     media_files, auto_selected_specials, auto_selected_attachments = _expand_manual_selected_media_files(
         all_media_files,
         root_dir,
@@ -732,6 +902,9 @@ def _run_manual_organize_core(
         "video_anchor_by_parent": {},
         "video_anchor_by_parent_episode": {},
         "video_anchor_by_parent_stem": {},
+        "inode_skip_count": 0,
+        "inode_skip_owner_counts": {},
+        "skipped_count": 0,
     }
 
     append_log(
@@ -739,6 +912,17 @@ def _run_manual_organize_core(
         f"tmdb_id={tmdb_id}, title={resolved_title}, files={len(media_files)}, selection_mode={selection_mode}, "
         f"auto_selected_specials={int(auto_selected_specials)}, auto_selected_attachments={int(auto_selected_attachments)}"
     )
+
+    if selection_mode:
+        append_log(
+            f"INFO: {action_label}选择摘要: 显式选择 {len(explicit_selected_files)} 个，"
+            f"其中主视频 {int(explicit_selected_mainlines)} 个，"
+            f"自动纳入 SP {int(auto_selected_specials)} 个，自动纳入附件 {int(auto_selected_attachments)} 个"
+        )
+        if auto_selected_special_files:
+            sample_names = "、".join(path.name for path in auto_selected_special_files[:5])
+            suffix = " 等" if len(auto_selected_special_files) > 5 else ""
+            append_log(f"INFO: 自动纳入 SP 样本: {sample_names}{suffix}")
 
     processed = 0
 
@@ -757,7 +941,7 @@ def _run_manual_organize_core(
                 _cancel_manual_task("manual-video-loop", f"file={src_path.name}")
             if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
                 continue
-            _process_file(
+            result = _process_file(
                 db=db,
                 src_path=src_path,
                 sync_group_id=group.id,
@@ -766,14 +950,15 @@ def _run_manual_organize_core(
                 op_log=op_log,
                 dir_runtime=dir_runtime,
             )
-            processed += 1
+            if result == "processed":
+                processed += 1
 
         for src_path in attachment_files:
             if is_scan_cancel_requested(task_id):
                 _cancel_manual_task("manual-attachment-loop", f"file={src_path.name}")
             if src_path.parent in dir_runtime.get("rolled_back_dirs", set()):
                 continue
-            _process_file(
+            result = _process_file(
                 db=db,
                 src_path=src_path,
                 sync_group_id=group.id,
@@ -782,7 +967,8 @@ def _run_manual_organize_core(
                 op_log=op_log,
                 dir_runtime=dir_runtime,
             )
-            processed += 1
+            if result == "processed":
+                processed += 1
 
         if is_scan_cancel_requested(task_id):
             _cancel_manual_task("manual-finalize")
@@ -800,8 +986,18 @@ def _run_manual_organize_core(
                 db.delete(pending)
             else:
                 pending.updated_at = datetime.now(timezone.utc)
+        inode_skipped = int(dir_runtime.get("inode_skip_count") or 0)
+        if inode_skipped:
+            append_log(f"INFO: {action_label}跳过摘要: 已处理跳过 {inode_skipped} 个（inode 幂等保护）")
+            owner_counts = dict(dir_runtime.get("inode_skip_owner_counts") or {})
+            if owner_counts:
+                owner_summary = "；".join(
+                    f"{owner_label} × {count}"
+                    for owner_label, count in sorted(owner_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))
+                )
+                append_log(f"INFO: {action_label}跳过归属摘要: {owner_summary}")
         db.commit()
-        return processed, 0, bool(context.get("_has_issues"))
+        return processed, 0, bool(context.get("_has_issues")), inode_skipped
     except TaskCancelledError:
         raise
     except DirectoryProcessError:
@@ -823,9 +1019,10 @@ def run_manual_organize(
     title_override: str | None = None,
     year_override: int | None = None,
     season_override: int | None = None,
+    episode_override: int | None = None,
     episode_offset: int | None = None,
     selected_relative_paths: list[str] | None = None,
-) -> tuple[int, int, bool]:
+) -> tuple[int, int, bool, int]:
     return _run_manual_organize_core(
         db,
         pending=pending,
@@ -836,6 +1033,7 @@ def run_manual_organize(
         title_override=title_override,
         year_override=year_override,
         season_override=season_override,
+        episode_override=episode_override,
         episode_offset=episode_offset,
         selected_relative_paths=selected_relative_paths,
         action_label="手动整理",
@@ -850,6 +1048,7 @@ def reidentify_by_target_dir(
     title_override: str | None,
     year_override: int | None,
     season_override: int | None,
+    episode_override: int | None,
     episode_offset: int | None,
     records: list[MediaRecord],
 ) -> tuple[int, int, bool]:
@@ -873,7 +1072,7 @@ def reidentify_by_target_dir(
     root_dir = Path(os.path.commonpath(root_candidates)) if root_candidates else media_files[0].parent
     selected_relative_paths = sorted({path.relative_to(root_dir).as_posix() for path in media_files})
 
-    return _run_manual_organize_core(
+    processed, failed, has_issues, _inode_skipped = _run_manual_organize_core(
         db,
         group=group,
         media_type=media_type,
@@ -882,11 +1081,13 @@ def reidentify_by_target_dir(
         title_override=title_override,
         year_override=year_override,
         season_override=season_override,
+        episode_override=episode_override,
         episode_offset=episode_offset,
         selected_relative_paths=selected_relative_paths,
         pending=None,
         action_label="修正重整",
     )
+    return processed, failed, has_issues
 
 
 def _process_sync_group(
@@ -1432,7 +1633,7 @@ def _process_file(
     seen_targets: dict[Path, Path],
     op_log: OperationLog,
     dir_runtime: dict | None = None,
-) -> None:
+) -> str | None:
     ext = src_path.suffix.lower()
     if ext not in MEDIA_EXTS:
         return
@@ -1442,7 +1643,19 @@ def _process_file(
         # 幂等保护：已处理文件直接跳过
         existing = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
         if existing:
-            append_log(f"INFO: 已处理文件跳过: {src_path}")
+            if dir_runtime is not None:
+                dir_runtime["inode_skip_count"] = int(dir_runtime.get("inode_skip_count") or 0) + 1
+                dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
+                owner_label = _extract_inode_owner_label(getattr(existing, "target_path", None))
+                if owner_label:
+                    owner_counts = dir_runtime.setdefault("inode_skip_owner_counts", {})
+                    owner_counts[owner_label] = int(owner_counts.get(owner_label) or 0) + 1
+            existing_target = str(getattr(existing, "target_path", "") or "").strip()
+            owner_note = _build_inode_skip_owner_note(existing_target, context)
+            if existing_target:
+                append_log(f"INFO: 已处理文件跳过（inode 幂等保护{owner_note}）: {src_path} -> {existing_target}")
+            else:
+                append_log(f"INFO: 已处理文件跳过（inode 幂等保护{owner_note}）: {src_path}")
             return
 
     tmdb_id = context.get("tmdb_id")
@@ -1732,7 +1945,7 @@ def _process_file(
                 f"INFO: 附件跟随正片: {src_path.name} -> {dst_path} "
                 f"(mode={anchor_result.follow_mode}, layer={anchor_result.layer})"
             )
-            return
+            return "processed"
         if parse_result.extra_category in SPECIAL_ANCHOR_CATEGORIES:
             append_log(f"WARNING: 特典附件未能匹配任何视频，已跳过: {src_path.name}")
             dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
@@ -1808,6 +2021,9 @@ def _process_file(
 
     if media_type == "tv" and parse_result.extra_category is None and _is_missing_or_invalid_episode(parse_result.episode):
         parse_result = parse_result._replace(episode=None)
+
+    if media_type == "tv" and (not extra_context) and parse_result.extra_category is None:
+        parse_result = _apply_forced_tv_episode_override(parse_result, context)
 
     if (
         media_type == "tv"
@@ -1890,6 +2106,22 @@ def _process_file(
     )
     if decision.status == "pending":
         if decision.reason == "main video target conflict unresolved":
+            diagnostics = _build_main_video_conflict_diagnostics(
+                db,
+                src_path=src_path,
+                dst_path=Path(decision.dst_path),
+                parse_result=decision.parse_result,
+                seen_targets=seen_targets,
+            )
+            if diagnostics:
+                append_log(f"INFO: 主视频冲突诊断: {src_path.name} | {diagnostics}")
+            summary = _summarize_main_video_conflict(
+                db,
+                src_path=src_path,
+                dst_path=Path(decision.dst_path),
+                parse_result=decision.parse_result,
+                seen_targets=seen_targets,
+            )
             _rollback_dir_context(
                 conflict_dir=src_path.parent,
                 reason=decision.reason,
@@ -1899,7 +2131,7 @@ def _process_file(
             )
             append_log(f"WARNING: 主视频目标冲突已回滚并转待办: {src_path.name} | 目标: {decision.dst_path}")
             context["_has_issues"] = True
-            raise DirectoryProcessError(f"主视频目标冲突: {src_path.name} -> {decision.dst_path}")
+            raise DirectoryProcessError(f"主视频目标冲突: {src_path.name} -> {decision.dst_path}（{summary}）")
         else:
             append_log(f"WARNING: 转待办: {src_path.name} | 原因: {decision.reason}")
         context["_has_issues"] = True
@@ -2013,6 +2245,7 @@ def _process_file(
         _register_video_anchor(src_path, dst_path, parse_result, dir_runtime, raw_label=original_special_label)
 
     append_log(f"INFO: 处理成功: {src_path.name} -> {dst_path}")
+    return "processed"
 
 
 def resolve_season(tmdb_id: int, season_hint: int | None, final_season: bool = False) -> int | None:
@@ -2096,8 +2329,12 @@ def _apply_tv_mainline_context_overrides(
             )
             season = resolved_season
         else:
-            season = parse_result.season or resolved_season or 1
+            season = parse_result.season if parse_result.season is not None else (resolved_season if resolved_season is not None else 1)
     parse_result = parse_result._replace(season=season)
+
+    forced_episode = context.get("forced_episode")
+    if forced_episode is not None and parse_result.extra_category is None:
+        return parse_result._replace(episode=max(1, int(forced_episode)))
 
     offset = context.get("episode_offset")
     if offset is not None and parse_result.episode is not None:
@@ -2116,6 +2353,16 @@ def _apply_forced_tv_item_season(parse_result: ParseResult, context: dict) -> Pa
     if parse_result.season == resolved_season:
         return parse_result
     return parse_result._replace(season=int(resolved_season))
+
+
+def _apply_forced_tv_episode_override(parse_result: ParseResult, context: dict) -> ParseResult:
+    forced_episode = context.get("forced_episode")
+    if forced_episode is None or parse_result.extra_category is not None:
+        return parse_result
+    normalized_episode = max(1, int(forced_episode))
+    if parse_result.episode == normalized_episode:
+        return parse_result
+    return parse_result._replace(episode=normalized_episode)
 
 
 def detect_special_dir_context(path: Path) -> tuple[bool, str | None]:
@@ -4568,9 +4815,9 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         and season_hint_source == "explicit"
         and season_hint_confidence == "high"
         and isinstance(season_hint, int)
-        and season_hint > 0
+        and season_hint >= 0
     )
-    if isinstance(season_hint, int) and season_hint <= 0:
+    if isinstance(season_hint, int) and season_hint < 0:
         season_hint = None
 
     try:
@@ -4579,7 +4826,7 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         details = None
     if not details:
         # TMDB API 失败时优雅降级：利用已有 season_hint，而屏弃硬失败
-        fallback_chosen = season_from_path or season_hint or 1
+        fallback_chosen = season_from_path if season_from_path is not None else (season_hint if season_hint is not None else 1)
         append_log(
             f"WARNING: 无法获取 TMDB 季信息 (tmdbid={tmdb_id})，降级使用 season={fallback_chosen}"
         )
@@ -4599,7 +4846,7 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
     # 存入 context，供后续 AI 映射调用使用
     context["_tmdb_series_details"] = details
 
-    chosen = season_from_path or season_hint
+    chosen = season_from_path if season_from_path is not None else season_hint
     is_final = _is_final_season_title(media_dir.name) or bool(context.get("final_hint"))
 
     tmdb_season_list = details.get("seasons", []) if isinstance(details, dict) else []

@@ -117,6 +117,9 @@
             <el-form-item v-if="form.media_type === 'tv'" label="强制季号">
               <el-input-number v-model="form.season" :min="0" />
             </el-form-item>
+            <el-form-item v-if="form.media_type === 'tv' && form.season === 0" label="强制集数" required>
+              <el-input-number v-model="form.episode_override" :min="1" />
+            </el-form-item>
             <el-form-item v-if="form.media_type === 'tv'" label="集号偏移">
               <el-input-number v-model="form.episode_offset" />
             </el-form-item>
@@ -351,6 +354,7 @@ const form = reactive({
   title: '',
   year: undefined,
   season: undefined,
+  episode_override: undefined,
   episode_offset: undefined,
 })
 
@@ -543,7 +547,7 @@ async function refreshOrganizeMonitorTask({ silent = false } = {}) {
   if (!organizeMonitorVisible.value) return
   try {
     const { data } = await tasksApi.list({ limit: 30, offset: 0 })
-    const tasks = data || []
+    const tasks = data?.items || []
     if (!organizeMonitorTaskId.value) {
       const matched = findMatchingOrganizeMonitorTask(tasks)
       if (matched) {
@@ -643,6 +647,7 @@ async function openOrganizeDialog(row) {
   form.title = ''
   form.year = undefined
   form.season = undefined
+  form.episode_override = undefined
   form.episode_offset = undefined
   pendingFileItems.value = []
   pendingFilesError.value = ''
@@ -743,6 +748,10 @@ async function submitOrganize() {
     ElMessage.warning('请填写 TMDB ID，或先用搜索选择条目')
     return
   }
+  if (form.media_type === 'tv' && form.season === 0 && (form.episode_override === undefined || form.episode_override === null)) {
+    ElMessage.warning('强制季号为 0 时必须填写强制集数')
+    return
+  }
   const targetName = extractDirName(currentRow.value?.original_path)
   submitting.value = true
   openOrganizeMonitor(
@@ -761,6 +770,7 @@ async function submitOrganize() {
       year: form.year ?? null,
       media_type: form.media_type,
       season: form.media_type === 'tv' ? (form.season ?? null) : null,
+      episode_override: (form.media_type === 'tv' && form.season === 0) ? (form.episode_override ?? null) : null,
       episode_offset: form.media_type === 'tv' ? (form.episode_offset ?? null) : null,
       selected_paths: selectedPendingFileCount.value ? [...selectedPendingPayloadPaths.value] : null,
     }

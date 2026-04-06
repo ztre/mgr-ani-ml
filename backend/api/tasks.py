@@ -65,22 +65,41 @@ class ScanTaskResponse(BaseModel):
         from_attributes = True
 
 
-@router.get("", response_model=list[ScanTaskResponse])
-def list_tasks(db: Session = Depends(get_task_db), limit: int = Query(10, ge=1, le=200), offset: int = Query(0, ge=0)):
+class ScanTaskListResponse(BaseModel):
+    items: list[ScanTaskResponse]
+    total: int
+
+
+@router.get("", response_model=ScanTaskListResponse)
+def list_tasks(
+    db: Session = Depends(get_task_db),
+    limit: int = Query(10, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    status: str | None = Query(None),
+):
     cleanup_logs_if_needed()
-    tasks = db.query(ScanTask).order_by(ScanTask.created_at.desc()).offset(offset).limit(limit).all()
-    return [
-        ScanTaskResponse(
-            id=task.id,
-            type=task.type,
-            target_id=task.target_id,
-            target_name=task.target_name,
-            status=task.status,
-            created_at=_to_default_display_time(task.created_at),
-            finished_at=_to_default_display_time(task.finished_at),
-        )
-        for task in tasks
-    ]
+    query = db.query(ScanTask)
+    raw_status = status if isinstance(status, str) or status is None else getattr(status, "default", None)
+    normalized_status = str(raw_status or "").strip()
+    if normalized_status:
+        query = query.filter(ScanTask.status == normalized_status)
+    total = query.count()
+    tasks = query.order_by(ScanTask.created_at.desc()).offset(offset).limit(limit).all()
+    return ScanTaskListResponse(
+        total=total,
+        items=[
+            ScanTaskResponse(
+                id=task.id,
+                type=task.type,
+                target_id=task.target_id,
+                target_name=task.target_name,
+                status=task.status,
+                created_at=_to_default_display_time(task.created_at),
+                finished_at=_to_default_display_time(task.finished_at),
+            )
+            for task in tasks
+        ],
+    )
 
 
 @router.get("/{task_id}/logs")

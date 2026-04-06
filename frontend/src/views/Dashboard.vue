@@ -146,7 +146,17 @@
       <template #header>
         <div class="card-header-flex">
           <span>扫描历史</span>
-          <el-button size="small" @click="loadTasks">刷新</el-button>
+          <div class="history-toolbar">
+            <el-select v-model="taskStatusFilter" size="small" clearable placeholder="全部状态" @change="handleTaskFilterChange">
+              <el-option label="等待中" value="queued" />
+              <el-option label="运行中" value="running" />
+              <el-option label="取消中" value="cancelling" />
+              <el-option label="已取消" value="cancelled" />
+              <el-option label="已完成" value="completed" />
+              <el-option label="失败" value="failed" />
+            </el-select>
+            <el-button size="small" @click="loadTasks">刷新</el-button>
+          </div>
         </div>
       </template>
       <el-table :data="tasks" stripe style="width: 100%">
@@ -197,6 +207,17 @@
           </template>
         </el-table-column>
       </el-table>
+      <div class="history-pagination">
+        <el-pagination
+          :current-page="taskPage"
+          :page-size="taskPageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          :total="taskTotal"
+          layout="total, sizes, prev, pager, next"
+          @current-change="handleTaskPageChange"
+          @size-change="handleTaskPageSizeChange"
+        />
+      </div>
     </el-card>
 
     <TaskLogMonitorDrawer
@@ -232,6 +253,10 @@ const TaskLogMonitorDrawer = defineAsyncComponent(() => import('../components/Ta
 
 const groups = ref([])
 const tasks = ref([])
+const taskTotal = ref(0)
+const taskPage = ref(1)
+const taskPageSize = ref(10)
+const taskStatusFilter = ref('')
 const scanning = ref(false)
 const refreshing = ref(false)
 const scanningGroup = ref(null)
@@ -295,8 +320,13 @@ async function loadGroups() {
 
 async function loadTasks() {
   try {
-    const { data } = await tasksApi.list({ limit: 10 })
-    tasks.value = data
+    const { data } = await tasksApi.list({
+      limit: taskPageSize.value,
+      offset: (taskPage.value - 1) * taskPageSize.value,
+      status: taskStatusFilter.value || undefined,
+    })
+    tasks.value = data?.items || []
+    taskTotal.value = Number(data?.total || 0)
     if (currentLogTaskId.value) {
       const matched = tasks.value.find((task) => Number(task?.id) === Number(currentLogTaskId.value))
       syncCurrentLogTaskMeta(matched)
@@ -306,6 +336,22 @@ async function loadTasks() {
   } finally {
     restartTasksAutoRefresh()
   }
+}
+
+async function handleTaskPageChange(page) {
+  taskPage.value = Number(page || 1)
+  await loadTasks()
+}
+
+async function handleTaskPageSizeChange(size) {
+  taskPageSize.value = Number(size || 10)
+  taskPage.value = 1
+  await loadTasks()
+}
+
+async function handleTaskFilterChange() {
+  taskPage.value = 1
+  await loadTasks()
 }
 
 function clearTasksTimer() {
@@ -726,6 +772,25 @@ onBeforeUnmount(() => {
 .history-card {
   margin-top: 0;
 }
+
+.history-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.history-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.history-toolbar :deep(.el-select) {
+  width: 140px;
+  flex-shrink: 0;
+}
+
 .pending-card {
   margin-bottom: 0;
 }

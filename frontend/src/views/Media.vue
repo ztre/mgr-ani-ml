@@ -355,8 +355,8 @@
         <el-form-item v-if="fixForm.media_type === 'tv'" label="强制季号">
           <el-input-number v-model="fixForm.season" :min="0" />
         </el-form-item>
-        <el-form-item v-if="fixForm.media_type === 'tv'" label="集号">
-          <el-input-number v-model="fixForm.episode" :min="0" />
+        <el-form-item v-if="fixForm.media_type === 'tv'" label="强制集数">
+          <el-input-number v-model="fixForm.episode" :min="1" />
         </el-form-item>
         <el-form-item v-if="fixForm.media_type === 'tv'" label="集号偏移">
           <el-input-number v-model="fixForm.episode_offset" />
@@ -404,6 +404,9 @@
         </el-form-item>
         <el-form-item v-if="dirFixForm.media_type === 'tv'" label="强制季号">
           <el-input-number v-model="dirFixForm.season" :min="0" />
+        </el-form-item>
+        <el-form-item v-if="dirFixForm.media_type === 'tv' && dirFixForm.season === 0" label="强制集数" required>
+          <el-input-number v-model="dirFixForm.episode_override" :min="1" />
         </el-form-item>
         <el-form-item v-if="dirFixForm.media_type === 'tv'" label="集号偏移">
           <el-input-number v-model="dirFixForm.episode_offset" />
@@ -538,7 +541,7 @@ const dirFixing = ref(false)
 const dirFixMode = ref('resource')
 const dirFixScope = ref(null)
 const dirFixFormRef = ref(null)
-const dirFixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: undefined, episode_offset: undefined })
+const dirFixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: undefined, episode_override: undefined, episode_offset: undefined })
 const tmdbSearchDialogVisible = ref(false)
 const tmdbSearchLoading = ref(false)
 const tmdbSearchKeyword = ref('')
@@ -693,7 +696,7 @@ async function refreshFixMonitorTask({ silent = false } = {}) {
   if (!fixMonitorVisible.value) return
   try {
     const { data } = await tasksApi.list({ limit: 30, offset: 0 })
-    const tasks = data || []
+    const tasks = data?.items || []
     if (!fixMonitorTaskId.value) {
       const matched = findMatchingFixMonitorTask(tasks)
       if (matched) {
@@ -1181,6 +1184,10 @@ async function submitFix() {
     ElMessage.warning('请填写完整的修正信息')
     return
   }
+  if (fixForm.media_type === 'tv' && fixForm.season === 0 && (fixForm.episode === undefined || fixForm.episode === null)) {
+    ElMessage.warning('强制季号为 0 时必须填写强制集数')
+    return
+  }
   fixing.value = true
   openFixMonitor(
     buildFixMonitorMatchSpec({
@@ -1228,6 +1235,7 @@ function openDirFixDialog() {
   dirFixForm.title = title
   dirFixForm.year = year
   dirFixForm.season = undefined
+  dirFixForm.episode_override = undefined
   dirFixForm.episode_offset = undefined
   tmdbSearchResults.value = []
   dirFixDialogVisible.value = true
@@ -1242,6 +1250,7 @@ function openSeasonFixDialog(node) {
   dirFixForm.title = title
   dirFixForm.year = year
   dirFixForm.season = node?.season ?? currentNode.value?.season ?? 1
+  dirFixForm.episode_override = undefined
   dirFixForm.episode_offset = undefined
   tmdbSearchResults.value = []
   dirFixDialogVisible.value = true
@@ -1250,6 +1259,10 @@ function openSeasonFixDialog(node) {
 async function submitDirFix() {
   if (!drawerResource.value?.resource_dir || !dirFixForm.tmdb_id || !dirFixForm.title) {
     ElMessage.warning('请填写完整的修正信息')
+    return
+  }
+  if (dirFixForm.media_type === 'tv' && dirFixForm.season === 0 && (dirFixForm.episode_override === undefined || dirFixForm.episode_override === null)) {
+    ElMessage.warning('强制季号为 0 时必须填写强制集数')
     return
   }
   if (dirFixMode.value === 'resource' && drawerResource.value?.type === 'tv') {
@@ -1275,6 +1288,7 @@ async function submitDirFix() {
       title: dirFixForm.title,
       year: dirFixForm.year ? Number(dirFixForm.year) : undefined,
       season_override: dirFixForm.media_type === 'tv' ? (dirFixForm.season ?? undefined) : undefined,
+      episode_override: (dirFixForm.media_type === 'tv' && dirFixForm.season === 0) ? (dirFixForm.episode_override ?? undefined) : undefined,
       episode_offset: dirFixForm.media_type === 'tv' ? (dirFixForm.episode_offset ?? undefined) : undefined,
     }
     const { data } = dirFixMode.value === 'season'

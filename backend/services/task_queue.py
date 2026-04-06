@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import traceback
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import queue
@@ -12,6 +12,7 @@ from ..database import SessionLocal, TaskSessionLocal
 from ..models import ScanTask
 
 TaskRunner = Callable[..., None]
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,6 +29,22 @@ _TASK_QUEUE_RECOVERY_DONE = False
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _is_task_error_already_logged(exc: Exception) -> bool:
+    return bool(getattr(exc, "_task_log_handled", False))
+
+
+def _extract_task_error_detail(exc: Exception) -> str:
+    detail = getattr(exc, "detail", None)
+    if detail is not None:
+        text = str(detail).strip()
+        if text:
+            return text
+    text = str(exc).strip()
+    if text:
+        return text
+    return exc.__class__.__name__
 
 
 def _mark_stale_tasks() -> None:
@@ -89,11 +106,13 @@ def _execute_job(job: QueuedTaskJob) -> None:
     except Exception as exc:
         worker_db.rollback()
         task_db.rollback()
+        logger.exception("Task %s failed", job.task_id)
         task = task_db.query(ScanTask).filter(ScanTask.id == job.task_id).first()
         if task is not None:
             if token is None:
                 token = current_task_id.set(task.id)
-            append_log(f"任务异常: {exc}\n{traceback.format_exc()}")
+            if not _is_task_error_already_logged(exc):
+                append_log(f"任务异常: {_extract_task_error_detail(exc)}")
             task.status = "failed"
             task.finished_at = _now_utc()
             task.log_file = f"task_{task.id}.log"

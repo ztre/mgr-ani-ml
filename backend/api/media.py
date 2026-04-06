@@ -167,6 +167,7 @@ class PendingOrganizeRequest(BaseModel):
     year: int | None = None
     media_type: Literal["tv", "movie"] = "tv"
     season: int | None = None
+    episode_override: int | None = None
     episode_offset: int | None = None
     selected_paths: list[str] | None = None
 
@@ -208,6 +209,7 @@ class ReidentifyDirRequest(BaseModel):
     year: int | None = None
     season: int | None = None
     season_override: int | None = None
+    episode_override: int | None = None
     episode_offset: int | None = None
 
 
@@ -226,7 +228,21 @@ class ReidentifyScopeRequest(BaseModel):
     title: str | None = None
     year: int | None = None
     season_override: int | None = None
+    episode_override: int | None = None
     episode_offset: int | None = None
+
+
+def _validate_forced_tv_episode(
+    media_type: str | None,
+    forced_season: int | None,
+    forced_episode: int | None,
+) -> None:
+    if str(media_type or "") != "tv":
+        return
+    if forced_season == 0 and forced_episode is None:
+        raise HTTPException(status_code=400, detail="强制季号为 0 时必须填写强制集数")
+    if forced_episode is not None and int(forced_episode) < 1:
+        raise HTTPException(status_code=400, detail="强制集数必须大于等于 1")
 
 
 def _build_scoped_reidentify_target_name(resource_dir: str, group_label: str | None = None) -> str:
@@ -872,6 +888,14 @@ def _fail_media_task(db: Session, task: ScanTask, detail: str, *, status_code: i
         task_db.rollback()
 
 
+def _mark_task_error_logged(exc: Exception) -> Exception:
+    try:
+        setattr(exc, "_task_log_handled", True)
+    except Exception:
+        pass
+    return exc
+
+
 def _execute_logged_media_task(
     db: Session,
     *,
@@ -941,9 +965,11 @@ def _run_logged_media_task(
         )
     except HTTPException as exc:
         _fail_media_task(db, task, str(exc.detail), status_code=exc.status_code)
+        _mark_task_error_logged(exc)
         raise
     except Exception as exc:
         _fail_media_task(db, task, str(exc), status_code=500)
+        _mark_task_error_logged(exc)
         raise
 
 
@@ -1021,7 +1047,7 @@ def _run_manual_organize_task(
     group = _require_sync_group(db, group_id)
     init_scan_cancel_flag(task.id)
     try:
-        processed, failed, has_issues = run_manual_organize(
+        processed, failed, has_issues, inode_skipped = run_manual_organize(
             db=db,
             pending=pending,
             group=group,
@@ -1030,6 +1056,7 @@ def _run_manual_organize_task(
             title_override=payload.get("title"),
             year_override=payload.get("year"),
             season_override=payload.get("season"),
+            episode_override=payload.get("episode_override"),
             episode_offset=payload.get("episode_offset"),
             selected_relative_paths=payload.get("selected_paths"),
         )
@@ -1042,11 +1069,15 @@ def _run_manual_organize_task(
         log_cleanup = _cleanup_nonreview_pending_logs(cleanup_rows)
         if has_issues:
             append_log("手动整理完成但存在问题项（Special 冲突已跳过）")
+        summary = f"手动整理完成: 成功 {processed}，失败 {failed}"
+        if inode_skipped:
+            summary += f"，已处理跳过 {inode_skipped}"
         return {
-            "message": f"手动整理完成: 成功 {processed}，失败 {failed}",
+            "message": summary,
             "processed": processed,
             "failed": failed,
             "has_issues": has_issues,
+            "inode_skipped": inode_skipped,
             "pending_logs_removed": int(log_cleanup.get("pending_logs_removed") or 0),
             "unprocessed_logs_removed": int(log_cleanup.get("unprocessed_logs_removed") or 0),
         }
@@ -1069,6 +1100,7 @@ def _run_reidentify_scope(
     year: int | None,
     season: int | None = None,
     season_override: int | None = None,
+    episode_override: int | None = None,
     episode_offset: int | None,
 ) -> dict[str, int | bool | str]:
     if not rows:
@@ -1085,6 +1117,7 @@ def _run_reidentify_scope(
             title_override=title,
             year_override=year,
             season_override=effective_season_override,
+            episode_override=episode_override,
             episode_offset=episode_offset,
             records=rows,
         )
@@ -1708,6 +1741,7 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
     group = db.query(SyncGroup).filter(SyncGroup.id == row.sync_group_id).first()
     if not group:
         raise HTTPException(status_code=400, detail="同步组不存在")
+    _validate_forced_tv_episode(data.media_type or row.type, data.season, data.episode)
     payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
     return _enqueue_logged_media_task(
         db,
@@ -1732,6 +1766,7 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
 
 @router.post("/{media_id}/manual-organize")
 def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = Depends(get_db)):
+    _validate_forced_tv_episode(data.media_type, data.season, data.episode_override)
     pending = db.query(MediaRecord).filter(MediaRecord.id == media_id).first()
     if not pending:
         raise HTTPException(status_code=404, detail="待办记录不存在")
@@ -1779,7 +1814,10 @@ def manual_organize(media_id: int, data: PendingOrganizeRequest, db: Session = D
             f"手动整理任务启动: media_id={media_id}, group={group.name}, "
             f"dir={root_dir}, media_type={data.media_type}, tmdb_id={data.tmdb_id}"
         ),
-        success_message_factory=lambda result: f"手动整理完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
+        success_message_factory=lambda result: (
+            f"手动整理完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}"
+            + (f"，已处理跳过 {int(result.get('inode_skipped') or 0)}" if int(result.get('inode_skipped') or 0) > 0 else "")
+        ),
         runner=lambda worker_db, task: _run_manual_organize_task(
             worker_db,
             task=task,
@@ -1795,6 +1833,11 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
     target_dir = (data.target_dir or "").strip()
     if not target_dir:
         raise HTTPException(status_code=400, detail="target_dir 不能为空")
+    _validate_forced_tv_episode(
+        data.media_type,
+        data.season_override if data.season_override is not None else data.season,
+        data.episode_override,
+    )
 
     normalized = target_dir.replace("\\", "/").rstrip("/")
     lower_target_path = func.lower(func.replace(func.coalesce(MediaRecord.target_path, ""), "\\", "/"))
@@ -1816,7 +1859,8 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
         queued_message=f"整组修正任务已进入队列，等待执行: {Path(normalized).name or normalized}",
         start_message=(
             f"整组修正任务启动: group={group.name}, target_dir={normalized}, "
-            f"media_type={media_type}, tmdb_id={data.tmdb_id}, episode_offset={data.episode_offset}"
+            f"media_type={media_type}, tmdb_id={data.tmdb_id}, season_override={data.season_override if data.season_override is not None else data.season}, "
+            f"episode_override={data.episode_override}, episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: (
             f"整组修正任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}"
@@ -1838,6 +1882,7 @@ def reidentify_by_target_dir_api(data: ReidentifyDirRequest, db: Session = Depen
                     title=payload.get("title"),
                     year=payload.get("year"),
                     season_override=(payload.get("season_override") if payload.get("season_override") is not None else payload.get("season")),
+                    episode_override=payload.get("episode_override"),
                     episode_offset=payload.get("episode_offset"),
                 )
             )
@@ -1862,6 +1907,11 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
     rows = _load_scope_media_rows(db, scope)
     group, media_type = _resolve_reidentify_group(rows, db)
     media_type = data.media_type or media_type
+    _validate_forced_tv_episode(
+        media_type,
+        data.season_override if data.season_override is not None else data.season,
+        data.episode_override,
+    )
     label = "季度修正" if data.scope_level == "season" else "作用域修正"
     target_name = _build_scoped_reidentify_target_name(data.resource_dir, data.group_label)
     payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
@@ -1875,7 +1925,7 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
             f"{label}任务启动: group={group.name}, scope={data.scope_level}, "
             f"target={target_name}, media_type={media_type}, tmdb_id={data.tmdb_id}, "
             f"season_override={data.season_override if data.season_override is not None else data.season}, "
-            f"episode_offset={data.episode_offset}"
+            f"episode_override={data.episode_override}, episode_offset={data.episode_offset}"
         ),
         success_message_factory=lambda result: f"{label}任务完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
         runner=lambda worker_db, _task: {
@@ -1906,6 +1956,7 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
                     title=payload.get("title"),
                     year=payload.get("year"),
                     season_override=(payload.get("season_override") if payload.get("season_override") is not None else payload.get("season")),
+                    episode_override=payload.get("episode_override"),
                     episode_offset=payload.get("episode_offset"),
                 )
             )
