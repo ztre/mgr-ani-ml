@@ -4300,6 +4300,11 @@ def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) ->
     variant = _extract_parallel_variant_suffix(src_path.stem)
     if not variant:
         return parse_result
+    # 若 variant 是系列副标题（篇名，如 Raihousha-hen），而非真正的版本区分标记，则跳过。
+    title_norm = re.sub(r"[^a-z0-9 ]", " ", (parse_result.title or "").lower())
+    variant_norm = re.sub(r"[^a-z0-9 ]", " ", variant.lower()).strip()
+    if variant_norm and variant_norm in title_norm:
+        return parse_result
     label = str(parse_result.extra_label or "").strip()
     if not label:
         return parse_result._replace(extra_label=variant)
