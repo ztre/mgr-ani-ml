@@ -59,7 +59,7 @@ def extract_tv_primary_season(path_value: str | None) -> int | None:
     if not match:
         return None
     season = int(match.group(1))
-    return season if season > 0 else None
+    return season  # Season 00 也允许（即 season=0）
 
 
 def extract_tv_aux_season(path_value: str | None) -> int | None:
@@ -86,7 +86,7 @@ def extract_tv_aux_season(path_value: str | None) -> int | None:
         if not match:
             return None
         season = int(match.group(1))
-        return season if season > 0 else None
+        return season  # S00_CM01 等 season=0 的特典也允许
 
     return None
 
@@ -283,14 +283,14 @@ def build_resource_summaries(items: list[dict]) -> list[dict]:
         for item in group.get("items") or []:
             target_path = item.get("target_path")
             if resolved_type == "tv":
-                primary_season = extract_tv_primary_season(target_path)
                 aux_season = extract_tv_aux_season(target_path)
-                if primary_season is not None:
-                    season_numbers.add(primary_season)
-                    main_count += 1
-                elif aux_season is not None:
+                primary_season = extract_tv_primary_season(target_path) if aux_season is None else None
+                if aux_season is not None:
                     season_numbers.add(aux_season)
                     aux_count += 1
+                elif primary_season is not None:
+                    season_numbers.add(primary_season)
+                    main_count += 1
                 else:
                     misc_count += 1
             else:
@@ -332,23 +332,8 @@ def build_resource_summaries(items: list[dict]) -> list[dict]:
 
 def _tv_bucket_info(item: dict) -> dict:
     target_path = normalize_path(item.get("target_path"))
-    primary = extract_tv_primary_season(target_path)
-    if primary is not None:
-        target_dir = extract_season_dir(target_path)
-        return {
-            "node_kind": "season",
-            "node_key": f"season:{primary}",
-            "node_label": f"Season {primary:02d}",
-            "season": primary,
-            "node_target_dir": target_dir,
-            "group_kind": "main",
-            "group_key": f"season:{primary}:main",
-            "group_label": "正片目录",
-            "group_target_dir": target_dir,
-            "group_delete_files": True,
-            "tree_bucket": "main",
-        }
 
+    # 先判断 aux（包含 Season 00 下的编码 SP 和 extras/ 下的特典）
     aux = extract_tv_aux_season(target_path)
     if aux is not None:
         target_dir = extract_target_dir(target_path)
@@ -364,6 +349,32 @@ def _tv_bucket_info(item: dict) -> dict:
             "group_target_dir": target_dir,
             "group_delete_files": True,
             "tree_bucket": "aux",
+        }
+
+    primary = extract_tv_primary_season(target_path)
+    if primary is not None:
+        target_dir = extract_season_dir(target_path)
+        if primary == 0:
+            # Season 00 正片（S00E0X 形式）归到 main 分组，节点标签 Season 00
+            group_kind = "main"
+            group_key = "season:0:main"
+            group_label = "正片目录"
+        else:
+            group_kind = "main"
+            group_key = f"season:{primary}:main"
+            group_label = "正片目录"
+        return {
+            "node_kind": "season",
+            "node_key": f"season:{primary}",
+            "node_label": f"Season {primary:02d}",
+            "season": primary,
+            "node_target_dir": target_dir,
+            "group_kind": group_kind,
+            "group_key": group_key,
+            "group_label": group_label,
+            "group_target_dir": target_dir,
+            "group_delete_files": True,
+            "tree_bucket": "main",
         }
 
     target_dir = extract_target_dir(target_path)

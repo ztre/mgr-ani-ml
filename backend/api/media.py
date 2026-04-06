@@ -25,6 +25,7 @@ from ..services.linker import get_inode, path_excluded
 from ..services.parser import classify_extra_from_text, parse_movie_filename, parse_tv_filename
 from ..services.resource_tree import build_resource_summaries, build_resource_tree
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
+from ..services.target_path_resolver import build_attachment_target_from_anchor
 from ..services.scanner import (
     _collect_media_files_under_dir,
     _is_ignored_name,
@@ -199,6 +200,7 @@ class ReidentifyRequest(BaseModel):
     season: int | None = None
     episode: int | None = None
     episode_offset: int | None = None
+    companion_ids: list[int] | None = None  # 附件 ID 列表，随主文件一起修正
 
 
 class ReidentifyDirRequest(BaseModel):
@@ -1233,15 +1235,50 @@ def _run_single_reidentify(
             inode_row.target_path = str(dst)
             inode_row.sync_group_id = group.id
 
+    # 处理随行附件（字幕/音轨等）
+    companion_processed = 0
+    companion_failed = 0
+    if data.companion_ids:
+        companion_rows = db.query(MediaRecord).filter(MediaRecord.id.in_(data.companion_ids)).all()
+        for att_row in companion_rows:
+            att_src = Path(att_row.original_path)
+            if not att_src.exists() or not att_src.is_file():
+                append_log(f"WARNING: 附件源文件不存在，跳过: {att_src}")
+                companion_failed += 1
+                continue
+            att_ext = att_src.suffix.lower()
+            att_pr = parse_tv_filename(str(att_src)) or parse_movie_filename(str(att_src)) or pr
+            try:
+                att_dst = build_attachment_target_from_anchor(dst, att_pr, att_ext, src_path=att_src)
+                _link_or_fail(att_src, att_dst)
+                att_row.tmdb_id = data.tmdb_id
+                att_row.type = media_type
+                att_row.target_path = str(att_dst)
+                att_row.status = "manual_fixed"
+                att_row.updated_at = datetime.now(timezone.utc)
+                att_ino = get_inode(att_src)
+                if att_ino:
+                    att_inode_row = db.query(InodeRecord).filter(InodeRecord.inode == att_ino).first()
+                    if att_inode_row:
+                        att_inode_row.target_path = str(att_dst)
+                        att_inode_row.sync_group_id = group.id
+                append_log(f"附件修正完成: {att_src.name} -> {att_dst}")
+                companion_processed += 1
+            except Exception as exc:
+                append_log(f"WARNING: 附件修正失败，跳过: {att_src.name} | {exc}")
+                companion_failed += 1
+
     db.commit()
-    append_log(f"单文件修正完成: {src.name} -> {dst}")
+    total_processed = 1 + companion_processed
+    total_failed = companion_failed
+    append_log(f"单文件修正完成: {src.name} -> {dst}" + (f"（附件 {companion_processed} 个）" if companion_processed else ""))
     return {
         "message": "修正成功",
         "new_path": str(dst),
         "tmdb_id": data.tmdb_id,
-        "processed": 1,
-        "failed": 0,
-        "has_issues": False,
+        "processed": total_processed,
+        "failed": total_failed,
+        "has_issues": total_failed > 0,
     }
 
 

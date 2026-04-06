@@ -317,6 +317,39 @@ def compute_target_path(
     return compute_movie_target_path(target_root, parse_result, tmdb_id, ext)
 
 
+def _has_explicit_season_token(name: str) -> bool:
+    text = str(name or "")
+    if re.search(r"\bS\d{1,2}\b", text, re.I):
+        return True
+    if re.search(r"\bSeason\s*\d{1,2}\b", text, re.I):
+        return True
+    if re.search(r"\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", text, re.I):
+        return True
+    if re.search(r"第\s*\d{1,2}\s*季", text):
+        return True
+    return False
+
+
+def _apply_resolved_season_zero_final_guard(
+    parse_result: ParseResult,
+    *,
+    media_type: str,
+    src_path: Path,
+    resolved_season: int | None,
+) -> ParseResult:
+    if media_type != "tv" or resolved_season != 0:
+        return parse_result
+    if parse_result.season == 0:
+        return parse_result
+    if _has_explicit_season_token(src_path.name):
+        return parse_result
+    append_log(
+        f"INFO: [season00 final-guard] 目标解析前强制季号归零: "
+        f"file={src_path.name!r}, candidate={parse_result.season} -> 0"
+    )
+    return parse_result._replace(season=0)
+
+
 def resolve_final_target(
     *,
     src_path: Path,
@@ -330,8 +363,15 @@ def resolve_final_target(
     assignments: dict,
     item_map: dict,
     is_attachment: bool = False,
+    resolved_season: int | None = None,
     deduplicate_func=deduplicate_target_or_raise,
 ) -> TargetDecision:
+    parse_result = _apply_resolved_season_zero_final_guard(
+        parse_result,
+        media_type=media_type,
+        src_path=src_path,
+        resolved_season=resolved_season,
+    )
     original_special_label = parse_result.extra_label
     source_diff_tags = _extract_distinguish_source_tags(src_path.stem)
     remapped = False

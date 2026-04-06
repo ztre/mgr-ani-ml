@@ -197,6 +197,18 @@
                     </div>
                   </div>
                   <div class="group-actions">
+                    <el-select
+                      v-if="supportsGroupFilter(group)"
+                      :model-value="drawerGroupFilters[group.key] || 'all'"
+                      size="small"
+                      class="group-filter-select"
+                      @change="(value) => updateGroupFilter(group, value)"
+                    >
+                      <el-option label="全部" value="all" />
+                      <el-option label="正片(视频)" value="video" />
+                      <el-option label="附件" value="attachment" />
+                      <el-option label="已选中项" value="selected" />
+                    </el-select>
                     <el-button plain size="small" @click="toggleGroupCollapse(group)">
                       {{ isGroupCollapsed(group) ? '展开分组' : '收起分组' }}
                     </el-button>
@@ -215,6 +227,10 @@
 
               <div v-if="isGroupCollapsed(group)" class="collapsed-group-hint">
                 该分组默认折叠，点击“展开分组”查看明细。
+              </div>
+
+              <div v-else-if="group.visibleCount === 0" class="group-empty-hint">
+                当前筛选下没有项目。
               </div>
 
               <el-table v-else :data="group.items" stripe style="width: 100%">
@@ -331,13 +347,16 @@
         <el-form-item label="待处理文件">
           <div class="path-preview" :title="currentFixRow?.original_path">{{ currentFixRow?.original_path || '-' }}</div>
         </el-form-item>
+        <el-form-item v-if="fixCompanionRows.length" label="随行附件">
+          <div class="companion-hint">将同时对该分组中 {{ fixCompanionRows.length }} 个附件做附带处理</div>
+        </el-form-item>
         <el-form-item label="媒体类型" required>
           <el-select v-model="fixForm.media_type" style="width: 180px">
             <el-option label="TV" value="tv" />
             <el-option label="电影" value="movie" />
           </el-select>
         </el-form-item>
-        <el-form-item label="TMDB ID" required>
+        <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
           <el-input v-model="fixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
             <template #append>
               <el-button @click="openTmdbSearchDialog('fix')">
@@ -346,7 +365,7 @@
             </template>
           </el-input>
         </el-form-item>
-        <el-form-item label="标题" required>
+        <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
           <el-input v-model="fixForm.title" placeholder="例如：刀剑神域：序列之争" />
         </el-form-item>
         <el-form-item label="年份">
@@ -387,7 +406,7 @@
             <el-option label="电影" value="movie" />
           </el-select>
         </el-form-item>
-        <el-form-item label="TMDB ID" required>
+        <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
           <el-input v-model="dirFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
             <template #append>
               <el-button @click="openTmdbSearchDialog('dir')">
@@ -396,7 +415,7 @@
             </template>
           </el-input>
         </el-form-item>
-        <el-form-item label="标题" required>
+        <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
           <el-input v-model="dirFixForm.title" placeholder="例如：刀剑神域：序列之争" />
         </el-form-item>
         <el-form-item label="年份">
@@ -405,7 +424,7 @@
         <el-form-item v-if="dirFixForm.media_type === 'tv'" label="强制季号">
           <el-input-number v-model="dirFixForm.season" :min="0" />
         </el-form-item>
-        <el-form-item v-if="dirFixForm.media_type === 'tv' && dirFixForm.season === 0" label="强制集数" required>
+        <el-form-item v-if="dirFixForm.media_type === 'tv' && dirFixForm.season === 0" label="强制集数" required prop="episode_override" :rules="[{ required: true, type: 'number', message: '强制季号为 0 时必须填写强制集数', trigger: 'change' }]">
           <el-input-number v-model="dirFixForm.episode_override" :min="1" />
         </el-form-item>
         <el-form-item v-if="dirFixForm.media_type === 'tv'" label="集号偏移">
@@ -522,6 +541,7 @@ const drawerTree = ref([])
 const selectedNodeKey = ref('')
 const drawerSearch = ref('')
 const drawerCategory = ref('all')
+const drawerGroupFilters = ref({})
 const drawerSelectedIds = ref([])
 const collapsedGroups = ref({})
 const resourceIconElements = new Map()
@@ -533,6 +553,7 @@ const { ensurePosterForResource, hydrateCachedPosterMeta, resourcePosterUrl, res
 const fixDialogVisible = ref(false)
 const fixing = ref(false)
 const currentFixRow = ref(null)
+const fixCompanionRows = ref([])
 const fixFormRef = ref(null)
 const fixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: 1, episode: 1, episode_offset: undefined })
 
@@ -560,6 +581,29 @@ const fixMonitorRequestPending = ref(false)
 const fixMonitorMatchSpec = ref(null)
 const fixMonitorHandledTerminalTaskId = ref(null)
 let fixMonitorTimer = null
+
+const VIDEO_FILE_EXTENSIONS = new Set([
+  '.3g2',
+  '.3gp',
+  '.asf',
+  '.avi',
+  '.flv',
+  '.m2ts',
+  '.m4v',
+  '.mkv',
+  '.mov',
+  '.mp4',
+  '.mpeg',
+  '.mpg',
+  '.mts',
+  '.ogm',
+  '.rm',
+  '.rmvb',
+  '.ts',
+  '.vob',
+  '.webm',
+  '.wmv',
+])
 
 function extractFilename(path) {
   return String(path || '').split(/[/\\]/).pop() || ''
@@ -870,21 +914,68 @@ function itemMatchesSearch(item, keyword) {
   return text.includes(keyword)
 }
 
+function supportsGroupFilter(group) {
+  return ['main', 'aux'].includes(String(group?.kind || ''))
+}
+
+function extractItemExtension(item) {
+  const path = String(item?.target_path || item?.original_path || '').split('?')[0]
+  const filename = extractFilename(path)
+  const dotIndex = filename.lastIndexOf('.')
+  if (dotIndex < 0) return ''
+  return filename.slice(dotIndex).toLowerCase()
+}
+
+function isVideoItem(item) {
+  return VIDEO_FILE_EXTENSIONS.has(extractItemExtension(item))
+}
+
+function itemMatchesGroupFilter(item, mode, selectedIds) {
+  if (mode === 'video') return isVideoItem(item)
+  if (mode === 'attachment') return !isVideoItem(item)
+  if (mode === 'selected') return selectedIds.has(item.id)
+  return true
+}
+
+function buildDrawerGroupFilters(nodes) {
+  return Object.fromEntries(
+    (nodes || [])
+      .flatMap((node) => node.groups || [])
+      .filter((group) => supportsGroupFilter(group))
+      .map((group) => [group.key, 'video']),
+  )
+}
+
+function updateGroupFilter(group, value) {
+  drawerGroupFilters.value = {
+    ...drawerGroupFilters.value,
+    [group.key]: value || 'all',
+  }
+}
+
 const displayNodes = computed(() => {
   const keyword = String(drawerSearch.value || '').trim().toLowerCase()
   const category = drawerCategory.value || 'all'
+  const selectedIds = new Set(drawerSelectedIds.value || [])
   return (drawerTree.value || [])
     .map((node) => {
       const groups = (node.groups || [])
         .map((group) => {
-          const items = (group.items || []).filter((item) => {
+          const baseItems = (group.items || []).filter((item) => {
             if (category === 'main' && item.tree_bucket !== 'main') return false
             if (category === 'sps' && item.tree_bucket === 'main') return false
             return itemMatchesSearch(item, keyword)
           })
-          return { ...group, items, visibleCount: items.length }
+          const groupMode = supportsGroupFilter(group) ? (drawerGroupFilters.value[group.key] || 'all') : 'all'
+          const items = baseItems.filter((item) => itemMatchesGroupFilter(item, groupMode, selectedIds))
+          return {
+            ...group,
+            items,
+            visibleCount: items.length,
+            baseVisibleCount: baseItems.length,
+          }
         })
-        .filter((group) => group.items.length > 0)
+        .filter((group) => group.baseVisibleCount > 0)
       const visibleCount = groups.reduce((sum, group) => sum + group.items.length, 0)
       return { ...node, groups, visibleCount }
     })
@@ -967,6 +1058,7 @@ async function loadDrawerTree(resource) {
     drawerResource.value = data.resource || resource
     ensurePosterForResource(drawerResource.value)
     drawerTree.value = data.nodes || []
+    drawerGroupFilters.value = buildDrawerGroupFilters(data.nodes || [])
     collapsedGroups.value = Object.fromEntries(
       (data.nodes || [])
         .flatMap((node) => node.groups || [])
@@ -985,6 +1077,7 @@ async function openResourceDrawer(resource) {
   drawerVisible.value = true
   drawerSearch.value = ''
   drawerCategory.value = 'all'
+  drawerGroupFilters.value = {}
   drawerResource.value = resource
   ensurePosterForResource(resource)
   await loadDrawerTree(resource)
@@ -998,6 +1091,7 @@ async function reloadDrawer() {
 function resetDrawerFilters() {
   drawerSearch.value = ''
   drawerCategory.value = 'all'
+  drawerGroupFilters.value = buildDrawerGroupFilters(drawerTree.value || [])
   reloadDrawer()
 }
 
@@ -1166,22 +1260,42 @@ async function deleteSelectedItems(command) {
   }
 }
 
+function findGroupCompanionAttachments(row) {
+  // 在未筛选的原始树中查找 row 所属分组，收集同组非视频附件
+  for (const node of drawerTree.value || []) {
+    for (const group of node.groups || []) {
+      const inGroup = (group.items || []).some((item) => item.id === row.id)
+      if (inGroup) {
+        return (group.items || []).filter((item) => item.id !== row.id && !isVideoItem(item))
+      }
+    }
+  }
+  return []
+}
+
 function openFixDialog(row) {
   currentFixRow.value = row
   fixForm.media_type = row?.type === 'movie' ? 'movie' : 'tv'
   fixForm.tmdb_id = row.tmdb_id || drawerResource.value?.tmdb_id || ''
-  fixForm.title = ''
-  fixForm.year = undefined
+  const { title: defaultTitle, year: defaultYear } = extractResourceTitleAndYear(drawerResource.value)
+  fixForm.title = defaultTitle
+  fixForm.year = defaultYear
   fixForm.season = row.tree_season || currentNode.value?.season || 1
   fixForm.episode = 1
   fixForm.episode_offset = undefined
+  fixCompanionRows.value = isVideoItem(row) ? findGroupCompanionAttachments(row) : []
   tmdbSearchResults.value = []
   fixDialogVisible.value = true
 }
 
 async function submitFix() {
-  if (!currentFixRow.value?.id || !fixForm.tmdb_id || !fixForm.title) {
-    ElMessage.warning('请填写完整的修正信息')
+  if (!currentFixRow.value?.id) {
+    ElMessage.warning('请先选择待修正文件')
+    return
+  }
+  try {
+    await fixFormRef.value?.validate()
+  } catch {
     return
   }
   if (fixForm.media_type === 'tv' && fixForm.season === 0 && (fixForm.episode === undefined || fixForm.episode === null)) {
@@ -1205,6 +1319,7 @@ async function submitFix() {
       season: fixForm.media_type === 'tv' ? (fixForm.season ?? undefined) : undefined,
       episode: fixForm.media_type === 'tv' ? (fixForm.episode ?? undefined) : undefined,
       episode_offset: fixForm.media_type === 'tv' ? (fixForm.episode_offset ?? undefined) : undefined,
+      companion_ids: fixCompanionRows.value.length ? fixCompanionRows.value.map((r) => r.id) : undefined,
     })
     await attachFixMonitorTask(data?.task_id)
     ElMessage.success(data?.message || '修正任务已进入队列')
@@ -1257,12 +1372,13 @@ function openSeasonFixDialog(node) {
 }
 
 async function submitDirFix() {
-  if (!drawerResource.value?.resource_dir || !dirFixForm.tmdb_id || !dirFixForm.title) {
-    ElMessage.warning('请填写完整的修正信息')
+  if (!drawerResource.value?.resource_dir) {
+    ElMessage.warning('当前资源目录不可用')
     return
   }
-  if (dirFixForm.media_type === 'tv' && dirFixForm.season === 0 && (dirFixForm.episode_override === undefined || dirFixForm.episode_override === null)) {
-    ElMessage.warning('强制季号为 0 时必须填写强制集数')
+  try {
+    await dirFixFormRef.value?.validate()
+  } catch {
     return
   }
   if (dirFixMode.value === 'resource' && drawerResource.value?.type === 'tv') {
@@ -1464,6 +1580,11 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: #64748b;
   word-break: break-all;
+}
+
+.companion-hint {
+  font-size: 13px;
+  color: #059669;
 }
 
 .drawer-header-sticky {
@@ -1717,6 +1838,16 @@ onBeforeUnmount(() => {
   padding: 8px 4px 0;
   color: #64748b;
   font-size: 13px;
+}
+
+.group-empty-hint {
+  padding: 12px 4px 4px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.group-filter-select {
+  width: 144px;
 }
 
 .path-row {

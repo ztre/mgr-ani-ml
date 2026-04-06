@@ -177,10 +177,10 @@ def resolve_season(tmdb_client, tmdbid: int, season_hint: int | None, final_hint
                 return int(s.get("season_number"))
         return max(available)
 
-    if season_hint and season_hint in available:
+    if season_hint is not None and season_hint in available:
         return int(season_hint)
 
-    if season_hint and season_hint not in available:
+    if season_hint is not None and season_hint not in available:
         append_log(
             f"WARNING: season_hint={season_hint} not in TMDB valid_seasons={sorted(available)}, fallback=1"
         )

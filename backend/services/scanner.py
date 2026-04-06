@@ -1048,9 +1048,9 @@ def reidentify_by_target_dir(
     title_override: str | None,
     year_override: int | None,
     season_override: int | None,
-    episode_override: int | None,
-    episode_offset: int | None,
-    records: list[MediaRecord],
+    episode_override: int | None = None,
+    episode_offset: int | None = None,
+    records: list[MediaRecord] = (),
 ) -> tuple[int, int, bool]:
     if not records:
         raise DirectoryProcessError("未找到可修正的媒体记录")
@@ -2089,6 +2089,13 @@ def _process_file(
 
     if media_type == "tv":
         parse_result = _apply_forced_tv_item_season(parse_result, context)
+        parse_result = _apply_resolved_season_zero_safety_override(parse_result, src_path, context)
+        if context.get("resolved_season") == 0 and parse_result.extra_category is None:
+            append_log(
+                f"INFO: [season00 target-preview] file={src_path.name!r}, "
+                f"season={parse_result.season}, episode={parse_result.episode}, "
+                f"forced_episode={context.get('forced_episode')}"
+            )
 
     decision = resolve_final_target(
         src_path=src_path,
@@ -2102,6 +2109,7 @@ def _process_file(
         assignments=assignments,
         item_map=item_map,
         is_attachment=is_attachment,
+        resolved_season=context.get("resolved_season"),
         deduplicate_func=_deduplicate_target_or_raise,
     )
     if decision.status == "pending":
@@ -2282,6 +2290,8 @@ def _has_explicit_season_token(name: str) -> bool:
         return True
     if re.search(r"\b\d{1,2}(st|nd|rd|th)\s+Season\b", s, re.I):
         return True
+    if re.search(r"第\s*\d{1,2}\s*季", s):
+        return True
     return False
 
 
@@ -2363,6 +2373,21 @@ def _apply_forced_tv_episode_override(parse_result: ParseResult, context: dict) 
     if parse_result.episode == normalized_episode:
         return parse_result
     return parse_result._replace(episode=normalized_episode)
+
+
+def _apply_resolved_season_zero_safety_override(parse_result: ParseResult, src_path: Path, context: dict) -> ParseResult:
+    resolved_season = context.get("resolved_season")
+    if resolved_season != 0:
+        return parse_result
+    if parse_result.season == 0:
+        return parse_result
+    if _has_explicit_season_token(src_path.name):
+        return parse_result
+    append_log(
+        f"INFO: [season00 safety] 检测到 resolved_season=0，强制覆盖季号: "
+        f"file={src_path.name!r}, candidate={parse_result.season} -> 0"
+    )
+    return parse_result._replace(season=0)
 
 
 def detect_special_dir_context(path: Path) -> tuple[bool, str | None]:
@@ -4924,11 +4949,8 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
             append_log(
                 f"INFO: OVA 目录 season=0 在 TMDB 中存在，直接采用（跳过冲突流程）"
             )
-            resolved = resolve_season_by_tmdb(None, int(tmdb_id), 0, final_hint=False)
-            if resolved is None:
-                resolved = 0
             context["season_hint"] = 0
-            context["resolved_season"] = resolved
+            context["resolved_season"] = 0
             context["final_resolved_season"] = None
             append_log(
                 f"INFO: [season稳定] 完成: dir={media_dir.name!r}, candidate={season_hint} → resolved_season=0, source=ova_dir_detect"
