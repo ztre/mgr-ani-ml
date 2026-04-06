@@ -59,7 +59,9 @@ class AttachmentAnchorResult:
 
 
 def build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseResult, ext: str, src_path: Path | None = None) -> Path:
-    base = _strip_attachment_base_noise(anchor_dst.stem)
+    # anchor_dst 已是重命名后的干净目标路径，直接以其 stem 为基准，
+    # 保证字幕/音轨文件名与正片完全一致，播放器才能自动加载。
+    base = anchor_dst.stem
     if src_path is not None:
         suffix = _build_attachment_source_suffix(src_path, parse_result, base)
         if suffix:
@@ -203,9 +205,30 @@ def resolve_attachment_follow_target_details(
         if ep_key is None:
             return None
         candidate = by_parent_ep.get((parent_key, int(ep_key)))
-        if candidate:
-            return _result(candidate, f"{layer_prefix}:episode")
-        return None
+        if not candidate:
+            return None
+        # 标题一致性校验：防止混合目录下跨作品附件通过 episode 序号绑到错误锚点。
+        # 若附件 stem 能在 by_parent_stem 中命中不同锚点，说明与当前 episode 锚点
+        # 来自不同作品 → 拒绝。若附件 stem 在 by_parent_stem 中完全找不到，但当前
+        # 目录已有其他视频注册了 stem，同样说明附件来自未知作品 → 拒绝。
+        att_stem_keys = [
+            _normalize_attachment_stem(src_path.stem),
+            _normalize_media_stem(src_path.stem),
+        ]
+        stem_hit: Path | None = next(
+            (
+                by_parent_stem[(parent_key, sk)]
+                for sk in att_stem_keys
+                if sk and (parent_key, sk) in by_parent_stem
+            ),
+            None,
+        )
+        if stem_hit is not None:
+            if stem_hit != candidate:
+                return None  # 附件 stem 指向其他锚点 → 跨作品，拒绝
+        elif any(k[0] == parent_key for k in by_parent_stem):
+            return None  # 目录有 stem 注册但本附件不匹配任何一条 → 跨作品，拒绝
+        return _result(candidate, f"{layer_prefix}:episode")
 
     def _lookup_stem_anchor(layer_prefix: str) -> AttachmentAnchorResult | None:
         stem_candidates = [_normalize_media_stem(src_path.stem), _normalize_attachment_stem(src_path.stem)]
@@ -247,9 +270,18 @@ def resolve_attachment_follow_target_details(
                 return lookup
         return _result(None)
 
-    for lookup in (_lookup_episode_anchor("mainline"), _lookup_stem_anchor("mainline"), _lookup_weak_fallback("mainline")):
-        if lookup is not None and lookup.anchor_dst is not None:
-            return lookup
+    ep_anchor = _lookup_episode_anchor("mainline")
+    if ep_anchor is not None and ep_anchor.anchor_dst is not None:
+        return ep_anchor
+    stem_anchor = _lookup_stem_anchor("mainline")
+    if stem_anchor is not None and stem_anchor.anchor_dst is not None:
+        return stem_anchor
+    # 如果附件自带 episode 编号信号，则跳过弱回退：
+    # episode/stem 均未命中说明附件来自其他作品，弱回退只会造成跨作品污染。
+    if _normalized_episode_key(parse_result, src_path, src_path.name) is None:
+        weak = _lookup_weak_fallback("mainline")
+        if weak is not None and weak.anchor_dst is not None:
+            return weak
     return _result(None)
 
 
@@ -824,6 +856,9 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
     if parse_result.extra_category in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
         return ""
     anchor_key = _normalize_media_stem(anchor_stem)
+    # 预计算：附件自身标题的规范化（把连字符当空格），用于过滤"系列/篇名"标签。
+    # 若 token 只是标题的一部分（如 Raihousha-hen 来自系列副标题），不应作为区分后缀。
+    _src_title_space = _normalize_media_stem(parse_result.title or "").replace("-", " ")
     parts: list[str] = []
     attachment_token = _extract_attachment_distinguish_token(src_path.stem)
     if attachment_token:
@@ -847,6 +882,9 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
         seen.add(key)
         normalized = _normalize_media_stem(token)
         if normalized and normalized in anchor_key:
+            continue
+        # 若 token 来自附件文件名的标题部分（系列名/篇名），它对区分没有意义，跳过。
+        if normalized and _src_title_space and normalized.replace("-", " ") in _src_title_space:
             continue
         return token[:40]
     return ""
@@ -876,6 +914,8 @@ def _strip_attachment_base_noise(stem: str) -> str:
     s = _strip_release_group_fragments(s)
     s = re.sub(r"\s+(?:ma\d+p[_\s-]*\d{3,4}p|\d{3,4}p)\b", "", s, flags=re.I)
     s = re.sub(r"\s+(?:x26[45]|h26[45]|hevc|av1|flac|aac|ac3|dts)\b", "", s, flags=re.I)
+    # 清理剥离质量标签后遗留的尾随分隔符（如 "Title - 1080p" → "Title -" → "Title"）
+    s = re.sub(r"[\s\-_]+$", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
