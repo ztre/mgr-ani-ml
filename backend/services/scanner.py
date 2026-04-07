@@ -4301,9 +4301,13 @@ def _apply_parallel_variant_suffix(parse_result: ParseResult, src_path: Path) ->
     if not variant:
         return parse_result
     # 若 variant 是系列副标题（篇名，如 Raihousha-hen），而非真正的版本区分标记，则跳过。
+    # 双重检查：parse_result.title（可能已被 context 覆盖为中文）和从 stem 的非 bracket 部分
+    # 提取的原始标题（保留 ASCII 副标题词，如 'Raihousha Hen'）。
     title_norm = re.sub(r"[^a-z0-9 ]", " ", (parse_result.title or "").lower())
+    stem_title_raw = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", src_path.stem)
+    stem_title_norm = re.sub(r"[^a-z0-9 ]", " ", stem_title_raw.lower())
     variant_norm = re.sub(r"[^a-z0-9 ]", " ", variant.lower()).strip()
-    if variant_norm and variant_norm in title_norm:
+    if variant_norm and (variant_norm in title_norm or variant_norm in stem_title_norm):
         return parse_result
     label = str(parse_result.extra_label or "").strip()
     if not label:

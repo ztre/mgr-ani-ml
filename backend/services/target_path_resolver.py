@@ -858,7 +858,12 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
     anchor_key = _normalize_media_stem(anchor_stem)
     # 预计算：附件自身标题的规范化（把连字符当空格），用于过滤"系列/篇名"标签。
     # 若 token 只是标题的一部分（如 Raihousha-hen 来自系列副标题），不应作为区分后缀。
+    # 注意：scanner 会用 context["title"]（中文）覆盖 parse_result.title，
+    # 导致 title 里不含原始的 ASCII 副标题词。因此同时从 src_path.stem 的非 bracket 主干
+    # 里提取一份原始标题空间作为补充检查来源。
     _src_title_space = _normalize_media_stem(parse_result.title or "").replace("-", " ")
+    _stem_title_raw = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", src_path.stem)
+    _stem_title_space = _normalize_media_stem(_stem_title_raw).replace("-", " ")
     parts: list[str] = []
     attachment_token = _extract_attachment_distinguish_token(src_path.stem)
     if attachment_token:
@@ -884,7 +889,12 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
         if normalized and normalized in anchor_key:
             continue
         # 若 token 来自附件文件名的标题部分（系列名/篇名），它对区分没有意义，跳过。
-        if normalized and _src_title_space and normalized.replace("-", " ") in _src_title_space:
+        # 双重检查：parse_result.title（可能已被上下文覆盖为中文）和从 stem 直接提取的原始标题。
+        norm_token_sp = normalized.replace("-", " ")
+        if normalized and (
+            (_src_title_space and norm_token_sp in _src_title_space)
+            or (_stem_title_space and norm_token_sp in _stem_title_space)
+        ):
             continue
         return token[:40]
     return ""
