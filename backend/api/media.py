@@ -234,6 +234,14 @@ class ReidentifyScopeRequest(BaseModel):
     episode_offset: int | None = None
 
 
+class AdjustRequest(BaseModel):
+    extra_category: str | None = None  # None=正片; "special"/"oped"=Season00; others=extras
+    season: int | None = None
+    episode: int | None = None
+    extra_label: str | None = None
+    custom_filename: str | None = None  # optional stem override (without extension)
+
+
 def _validate_forced_tv_episode(
     media_type: str | None,
     forced_season: int | None,
@@ -1282,6 +1290,93 @@ def _run_single_reidentify(
     }
 
 
+def _run_single_adjust(
+    *,
+    db: Session,
+    row: MediaRecord,
+    group: SyncGroup,
+    data: AdjustRequest,
+) -> dict[str, str | bool]:
+    src = Path(row.original_path)
+    ext = src.suffix.lower()
+    old_target = Path(str(row.target_path))
+
+    # show_dir is always 2 levels above the file:
+    # <show_dir>/Season XX/<file>, <show_dir>/Season 00/<file>, <show_dir>/extras/<file>
+    show_dir = old_target.parent.parent
+    target_root = show_dir.parent
+
+    # Extract title and year from the existing show dir name: "Title (year) [tmdbid=xxx]"
+    show_dirname = show_dir.name
+    m = re.match(r"^(.*?)(?:\s+\((\d{4})\))?(?:\s+\[tmdbid=\d+\])?\s*$", show_dirname)
+    existing_title = m.group(1).strip() if m else show_dirname.strip()
+    existing_year = int(m.group(2)) if (m and m.group(2)) else None
+
+    # Parse source file to get base ParseResult (for episode index and subtitle_lang)
+    pr = parse_tv_filename(str(src)) or parse_movie_filename(str(src))
+    if not pr:
+        raise HTTPException(status_code=400, detail="文件名解析失败")
+
+    # Override with resolved values
+    pr = pr._replace(
+        title=existing_title,
+        year=existing_year,
+        extra_category=data.extra_category,
+        extra_label=data.extra_label if data.extra_label is not None else None,
+    )
+    if data.season is not None:
+        pr = pr._replace(season=max(0, data.season))
+    if data.episode is not None:
+        pr = pr._replace(episode=max(0, data.episode))
+
+    # Compute new target path
+    dst = compute_tv_target_path(target_root, pr, row.tmdb_id, ext, src_filename=src.name)
+
+    # Apply custom filename stem override
+    if data.custom_filename:
+        safe_stem = re.sub(r'[<>:"/\\|?*]', "_", data.custom_filename.strip())
+        if safe_stem:
+            dst = dst.with_name(safe_stem + ext)
+
+    # Create new hardlink
+    _link_or_fail(src, dst)
+
+    # Remove old hardlink if path changed
+    if dst != old_target:
+        try:
+            if old_target.is_file():
+                old_target.unlink()
+        except OSError as exc:
+            append_log(f"WARNING: 旧目标文件清理失败: {old_target} | {exc}")
+
+    # Update database record
+    row.target_path = str(dst)
+    row.status = "manual_fixed"
+    row.updated_at = datetime.now(timezone.utc)
+
+    ino = get_inode(src)
+    if ino:
+        inode_row = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
+        if inode_row:
+            inode_row.target_path = str(dst)
+
+    db.commit()
+
+    # Prune empty directories left by old target
+    if dst != old_target and not old_target.is_file():
+        try:
+            _prune_empty_dirs_with_metadata(old_target.parent, target_root)
+        except OSError:
+            pass
+
+    append_log(f"季内调整完成: {src.name} -> {dst}")
+    return {
+        "message": f"{src.name} -> {dst.name}",
+        "new_path": str(dst),
+        "has_issues": False,
+    }
+
+
 def _normalize_scope_item_ids(item_ids: list[int]) -> list[int]:
     return sorted({int(value) for value in item_ids if isinstance(value, int) or str(value).isdigit()})
 
@@ -1797,6 +1892,46 @@ def reidentify(media_id: int, data: ReidentifyRequest, db: Session = Depends(get
             row=_require_media_record(worker_db, media_id),
             group=_require_sync_group(worker_db, group.id),
             data=ReidentifyRequest(**payload),
+        ),
+    )
+
+
+@router.post("/{media_id}/adjust")
+def adjust_media(media_id: int, data: AdjustRequest, db: Session = Depends(get_db)):
+    row = db.query(MediaRecord).filter(MediaRecord.id == media_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    if row.type != "tv":
+        raise HTTPException(status_code=400, detail="仅支持TV类型的季内调整")
+    if not row.target_path:
+        raise HTTPException(status_code=400, detail="记录缺少目标路径，请先完成识别")
+
+    src = Path(row.original_path)
+    if not src.exists() or not src.is_file():
+        raise HTTPException(status_code=400, detail="源文件不存在")
+
+    group = db.query(SyncGroup).filter(SyncGroup.id == row.sync_group_id).first()
+    if not group:
+        raise HTTPException(status_code=400, detail="同步组不存在")
+
+    payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+    return _enqueue_logged_media_task(
+        db,
+        task_type=f"adjust:item:{group.name}",
+        target_id=group.id,
+        target_name=src.name,
+        queued_message=f"季内调整任务已进入队列: {src.name}",
+        start_message=(
+            f"季内调整任务启动: media_id={media_id}, group={group.name}, "
+            f"file={src.name}, extra_category={data.extra_category}, "
+            f"season={data.season}, episode={data.episode}"
+        ),
+        success_message_factory=lambda result: f"季内调整完成: {result.get('message', '')}",
+        runner=lambda worker_db, _task: _run_single_adjust(
+            db=worker_db,
+            row=_require_media_record(worker_db, media_id),
+            group=_require_sync_group(worker_db, group.id),
+            data=AdjustRequest(**payload),
         ),
     )
 

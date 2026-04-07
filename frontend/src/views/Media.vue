@@ -306,7 +306,7 @@
       append-to-body
       destroy-on-close
       drawer-class="fix-monitor-drawer"
-      :before-close="handleOverlayBeforeClose"
+      :before-close="handleMonitorBeforeClose"
       :task-id="fixMonitorTaskId"
       :task-status="fixMonitorTaskStatus"
       :target-label="fixMonitorTargetLabel"
@@ -342,48 +342,87 @@
       </transition>
     </teleport>
 
-    <el-dialog v-model="fixDialogVisible" title="手动修正识别" width="540px" append-to-body destroy-on-close>
-      <el-form ref="fixFormRef" :model="fixForm" label-width="110px">
-        <el-form-item label="待处理文件">
-          <div class="path-preview" :title="currentFixRow?.original_path">{{ currentFixRow?.original_path || '-' }}</div>
-        </el-form-item>
-        <el-form-item v-if="fixCompanionRows.length" label="随行附件">
-          <div class="companion-hint">将同时对该分组中 {{ fixCompanionRows.length }} 个附件做附带处理</div>
-        </el-form-item>
-        <el-form-item label="媒体类型" required>
-          <el-select v-model="fixForm.media_type" style="width: 180px">
-            <el-option label="TV" value="tv" />
-            <el-option label="电影" value="movie" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
-          <el-input v-model="fixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
-            <template #append>
-              <el-button @click="openTmdbSearchDialog('fix')">
-                <el-icon><Search /></el-icon>
-              </el-button>
-            </template>
-          </el-input>
-        </el-form-item>
-        <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
-          <el-input v-model="fixForm.title" placeholder="例如：刀剑神域：序列之争" />
-        </el-form-item>
-        <el-form-item label="年份">
-          <el-input-number v-model="fixForm.year" :min="1900" :max="2100" />
-        </el-form-item>
-        <el-form-item v-if="fixForm.media_type === 'tv'" label="强制季号">
-          <el-input-number v-model="fixForm.season" :min="0" />
-        </el-form-item>
-        <el-form-item v-if="fixForm.media_type === 'tv'" label="强制集数">
-          <el-input-number v-model="fixForm.episode" :min="1" />
-        </el-form-item>
-        <el-form-item v-if="fixForm.media_type === 'tv'" label="集号偏移">
-          <el-input-number v-model="fixForm.episode_offset" />
-        </el-form-item>
-      </el-form>
+    <el-dialog v-model="fixDialogVisible" title="资源修正" width="560px" append-to-body destroy-on-close>
+      <el-tabs v-model="activeFixTab" style="margin-top: -10px">
+        <el-tab-pane label="识别修正" name="reidentify">
+          <el-form ref="fixFormRef" :model="fixForm" label-width="110px" style="margin-top: 12px">
+            <el-form-item label="待处理文件">
+              <div class="path-preview" :title="currentFixRow?.original_path">{{ currentFixRow?.original_path || '-' }}</div>
+            </el-form-item>
+            <el-form-item v-if="fixCompanionRows.length" label="随行附件">
+              <div class="companion-hint">将同时对该分组中 {{ fixCompanionRows.length }} 个附件做附带处理</div>
+            </el-form-item>
+            <el-form-item label="媒体类型" required>
+              <el-select v-model="fixForm.media_type" style="width: 180px">
+                <el-option label="TV" value="tv" />
+                <el-option label="电影" value="movie" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
+              <el-input v-model="fixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
+                <template #append>
+                  <el-button @click="openTmdbSearchDialog('fix')">
+                    <el-icon><Search /></el-icon>
+                  </el-button>
+                </template>
+              </el-input>
+            </el-form-item>
+            <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
+              <el-input v-model="fixForm.title" placeholder="例如：刀剑神域：序列之争" />
+            </el-form-item>
+            <el-form-item label="年份">
+              <el-input-number v-model="fixForm.year" :min="1900" :max="2100" />
+            </el-form-item>
+            <el-form-item v-if="fixForm.media_type === 'tv'" label="强制季号">
+              <el-input-number v-model="fixForm.season" :min="0" />
+            </el-form-item>
+            <el-form-item v-if="fixForm.media_type === 'tv'" label="强制集数">
+              <el-input-number v-model="fixForm.episode" :min="1" />
+            </el-form-item>
+            <el-form-item v-if="fixForm.media_type === 'tv'" label="集号偏移">
+              <el-input-number v-model="fixForm.episode_offset" />
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+        <el-tab-pane label="季内调整" name="adjust">
+          <el-form ref="adjustFormRef" :model="adjustForm" label-width="110px" style="margin-top: 12px">
+            <el-form-item label="待处理文件">
+              <div class="path-preview" :title="currentFixRow?.original_path">{{ currentFixRow?.original_path || '-' }}</div>
+            </el-form-item>
+            <el-form-item label="类别">
+              <el-select v-model="adjustForm.extra_category" style="width: 220px" clearable placeholder="正片（主集数）">
+                <el-option label="正片（主集数）" :value="null" />
+                <el-option label="Season 00 · 特典/SP/OVA" value="special" />
+                <el-option label="Season 00 · OP/ED" value="oped" />
+                <el-option label="extras · PV" value="pv" />
+                <el-option label="extras · CM" value="cm" />
+                <el-option label="extras · 预告/Trailer" value="trailer" />
+                <el-option label="extras · 幕后/Making" value="making" />
+                <el-option label="extras · 采访/Interview" value="interview" />
+                <el-option label="extras · MV" value="mv" />
+                <el-option label="extras · IV" value="iv" />
+                <el-option label="extras · BD特典" value="bdextra" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="季号">
+              <el-input-number v-model="adjustForm.season" :min="0" style="width: 140px" />
+            </el-form-item>
+            <el-form-item v-if="adjustForm.extra_category === null" label="集号">
+              <el-input-number v-model="adjustForm.episode" :min="1" style="width: 140px" />
+            </el-form-item>
+            <el-form-item v-if="adjustForm.extra_category !== null" label="标签">
+              <el-input v-model="adjustForm.extra_label" placeholder="例如：SP01、OP01、PV01" style="width: 220px" clearable />
+            </el-form-item>
+            <el-form-item label="自定义文件名">
+              <el-input v-model="adjustForm.custom_filename" placeholder="留空使用自动计算名称（不含扩展名）" style="width: 300px" clearable />
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+      </el-tabs>
       <template #footer>
         <el-button @click="fixDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="fixing" @click="submitFix">提交修正</el-button>
+        <el-button v-if="activeFixTab === 'reidentify'" type="primary" :loading="fixing" @click="submitFix">提交修正</el-button>
+        <el-button v-else type="primary" :loading="adjusting" @click="submitAdjust">提交调整</el-button>
       </template>
     </el-dialog>
 
@@ -556,6 +595,10 @@ const currentFixRow = ref(null)
 const fixCompanionRows = ref([])
 const fixFormRef = ref(null)
 const fixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: 1, episode: 1, episode_offset: undefined })
+const activeFixTab = ref('reidentify')
+const adjustFormRef = ref(null)
+const adjusting = ref(false)
+const adjustForm = reactive({ extra_category: null, season: 1, episode: 1, extra_label: '', custom_filename: '' })
 
 const dirFixDialogVisible = ref(false)
 const dirFixing = ref(false)
@@ -674,6 +717,12 @@ function closeAllMediaOverlays() {
 
 function handleOverlayBeforeClose(done) {
   closeAllMediaOverlays()
+  done()
+}
+
+function handleMonitorBeforeClose(done) {
+  fixMonitorVisible.value = false
+  resetFixMonitorState()
   done()
 }
 
@@ -1280,11 +1329,17 @@ function openFixDialog(row) {
   const { title: defaultTitle, year: defaultYear } = extractResourceTitleAndYear(drawerResource.value)
   fixForm.title = defaultTitle
   fixForm.year = defaultYear
-  fixForm.season = row.tree_season || currentNode.value?.season || 1
+  fixForm.season = row.tree_season ?? currentNode.value?.season ?? 1
   fixForm.episode = 1
   fixForm.episode_offset = undefined
   fixCompanionRows.value = isVideoItem(row) ? findGroupCompanionAttachments(row) : []
   tmdbSearchResults.value = []
+  activeFixTab.value = 'reidentify'
+  adjustForm.extra_category = null
+  adjustForm.season = row.tree_season ?? currentNode.value?.season ?? 1
+  adjustForm.episode = 1
+  adjustForm.extra_label = ''
+  adjustForm.custom_filename = ''
   fixDialogVisible.value = true
 }
 
@@ -1336,6 +1391,47 @@ async function submitFix() {
     ElMessage.error(error?.response?.data?.detail || error?.message || '修正失败')
   } finally {
     fixing.value = false
+    fixMonitorRequestPending.value = false
+    restartFixMonitorAutoRefresh()
+  }
+}
+
+async function submitAdjust() {
+  if (!currentFixRow.value?.id) {
+    ElMessage.warning('请先选择待调整文件')
+    return
+  }
+  adjusting.value = true
+  openFixMonitor(
+    buildFixMonitorMatchSpec({
+      typePrefix: 'adjust:item:',
+      targetName: extractFilename(currentFixRow.value?.original_path),
+      targetLabel: `季内调整 · ${extractFilename(currentFixRow.value?.original_path)}`,
+    }),
+  )
+  try {
+    const { data } = await mediaApi.adjust(currentFixRow.value.id, {
+      extra_category: adjustForm.extra_category || null,
+      season: adjustForm.extra_category === null ? (adjustForm.season ?? undefined) : (adjustForm.season ?? undefined),
+      episode: adjustForm.extra_category === null ? (adjustForm.episode ?? undefined) : (adjustForm.episode ?? undefined),
+      extra_label: adjustForm.extra_label || null,
+      custom_filename: adjustForm.custom_filename || null,
+    })
+    await attachFixMonitorTask(data?.task_id)
+    ElMessage.success(data?.message || '季内调整任务已进入队列')
+    fixDialogVisible.value = false
+  } catch (error) {
+    await refreshFixMonitorTask()
+    if (fixMonitorTaskId.value) {
+      await fetchFixMonitorLogs(fixMonitorTaskId.value)
+    }
+    if (!fixMonitorTaskId.value) {
+      resetFixMonitorState()
+      fixMonitorVisible.value = false
+    }
+    ElMessage.error(error?.response?.data?.detail || error?.message || '季内调整失败')
+  } finally {
+    adjusting.value = false
     fixMonitorRequestPending.value = false
     restartFixMonitorAutoRefresh()
   }
@@ -1465,7 +1561,7 @@ watch(fixMonitorTaskStatus, async (status) => {
   if (!fixMonitorTaskId.value || !isTerminalTaskStatus(status)) return
   if (fixMonitorHandledTerminalTaskId.value === fixMonitorTaskId.value) return
   fixMonitorHandledTerminalTaskId.value = fixMonitorTaskId.value
-  await Promise.all([loadResources(), reloadDrawer()])
+  await reloadDrawer()
 })
 
 watch(drawerVisible, (visible) => {

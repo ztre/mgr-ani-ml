@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from .parser import classify_extra_from_text
+
 
 AUX_RESOURCE_DIRS = {"extras", "specials", "trailers", "interviews"}
 
@@ -72,14 +74,22 @@ def extract_tv_aux_season(path_value: str | None) -> int | None:
     filename = extract_filename(normalized)
 
     if leaf in {"season 00", "specials"}:
+        # 先检查编码季号（S00E301 → 第 3 季）
         match = re.search(r"\bS00E(\d{3,4})\b", filename, re.I)
-        if not match:
+        if match:
+            encoded_episode = int(match.group(1))
+            if encoded_episode >= 100:
+                season = encoded_episode // 100
+                if season > 0:
+                    return season
+        # 再检查 OP/ED/SP 标签（无编码季号则归到 Season 00 aux）
+        category, _label, _from_bracket = classify_extra_from_text(filename)
+        if category not in {"special", "oped"}:
             return None
-        encoded_episode = int(match.group(1))
-        if encoded_episode < 100:
-            return None
-        season = encoded_episode // 100
-        return season if season > 0 else None
+        season_match = re.search(r"\bS(\d{1,2})E\d{2,4}\b", filename, re.I)
+        if not season_match:
+            return 0
+        return int(season_match.group(1))
 
     if leaf in AUX_RESOURCE_DIRS:
         match = re.search(r"\bS(\d{1,2})(?:[_ .-]|$)", filename, re.I)
@@ -332,6 +342,26 @@ def build_resource_summaries(items: list[dict]) -> list[dict]:
 
 def _tv_bucket_info(item: dict) -> dict:
     target_path = normalize_path(item.get("target_path"))
+    extra_category = item.get("extra_category")
+
+    # 优先根据 extra_category 判断 Season 00/aux 分组
+    if extra_category in {"special", "oped"}:
+        # oped/special 归到 Season 00/aux
+        season = 0
+        target_dir = extract_target_dir(target_path)
+        return {
+            "node_kind": "season",
+            "node_key": f"season:{season}",
+            "node_label": f"Season {season:02d}",
+            "season": season,
+            "node_target_dir": target_dir,
+            "group_kind": "aux",
+            "group_key": f"season:{season}:aux",
+            "group_label": "关联 SP/Extras",
+            "group_target_dir": target_dir,
+            "group_delete_files": True,
+            "tree_bucket": "aux",
+        }
 
     # 先判断 aux（包含 Season 00 下的编码 SP 和 extras/ 下的特典）
     aux = extract_tv_aux_season(target_path)

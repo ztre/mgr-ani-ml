@@ -561,6 +561,10 @@ function taskTypeText(row) {
     const groupName = type.slice('reidentify:scope:'.length) || '未知同步组'
     return withIssueTag(`${groupName} · 作用域修正`)
   }
+  if (type.startsWith('adjust:item:')) {
+    const groupName = type.slice('adjust:item:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · 季内调整`)
+  }
   if (type === 'group') {
     const group = groups.value.find((g) => g.id === row?.target_id)
     const text = group?.name || '单组扫描'
@@ -581,6 +585,7 @@ function taskTypeTag(row) {
   if (type.startsWith('manual_scan:')) return 'primary'
   if (type.startsWith('webhook_scan:')) return 'primary'
   if (type.startsWith('reidentify:')) return 'warning'
+  if (type.startsWith('adjust:')) return 'warning'
   if (type === 'full') return 'success'
   return 'info'
 }
