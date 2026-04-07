@@ -92,7 +92,8 @@ def extract_tv_aux_season(path_value: str | None) -> int | None:
         return int(season_match.group(1))
 
     if leaf in AUX_RESOURCE_DIRS:
-        match = re.search(r"\bS(\d{1,2})(?:[_ .-]|$)", filename, re.I)
+        # 匹配 S\d 后跟 [_ .-]，但排除 " -" 序列（分隔符，如 "PV06 S3 - 1080p"）
+        match = re.search(r"\bS(\d{1,2})(?:[_.]|(?= [^-])| $|$)", filename, re.I)
         if not match:
             return None
         season = int(match.group(1))
@@ -145,13 +146,28 @@ def _resource_group_key(sync_group_id: int | None, tmdb_id: int | None, resource
 
 
 def _resolve_group_media_type(group: dict) -> str:
-    if group.get("explicit_tv_count"):
+    explicit_tv = group.get("explicit_tv_count", 0)
+    type_tv = group.get("type_tv_count", 0)
+    explicit_movie = group.get("explicit_movie_count", 0)
+    type_movie = group.get("type_movie_count", 0)
+
+    # 路径含 Season 子目录 且 DB 同样标注 TV → 明确 TV
+    if explicit_tv and type_tv:
         return "tv"
-    if group.get("type_tv_count"):
-        return "tv"
-    if group.get("explicit_movie_count"):
+    # DB 全部为 movie（type_tv=0）且 movie 记录数 > 路径疑似 TV 的记录数：
+    #   路径的"TV"证据很可能是 extras 内文件名含 S3 等误匹配，以 DB 为准。
+    if type_movie and not type_tv and type_movie > explicit_tv:
         return "movie"
-    if group.get("type_movie_count"):
+    # 路径含 Season 子目录（DB 无 TV 类型支撑时也认可路径证据）
+    if explicit_tv:
+        return "tv"
+    if type_movie > type_tv:
+        return "movie"
+    if type_tv:
+        return "tv"
+    if explicit_movie:
+        return "movie"
+    if type_movie:
         return "movie"
     return str(group.get("fallback_type") or "movie")
 
@@ -534,7 +550,10 @@ def build_resource_tree(
 ) -> dict:
     normalized_resource_dir = normalize_path(resource_dir)
     selected: list[dict] = []
-    resolved_type = str(media_type or "").strip().lower() or None
+    # resolved_type 从实际条目推断；media_type 仅作无条目时的兜底提示，
+    # 不参与初始化，避免前端传入错误 type 导致 bucket 函数选错。
+    _media_type_hint: str | None = str(media_type or "").strip().lower() or None
+    resolved_type: str | None = None
     resolved_tmdb_id = tmdb_id
 
     for raw_item in items or []:
@@ -547,8 +566,6 @@ def build_resource_tree(
             continue
         if sync_group_id is not None and item_sync_group_id != sync_group_id:
             continue
-        if resolved_type is not None and item_type != resolved_type:
-            continue
         if resolved_tmdb_id is not None and item_tmdb_id != resolved_tmdb_id:
             continue
         if resolved_type is None:
@@ -558,18 +575,19 @@ def build_resource_tree(
         selected.append(item)
 
     summaries = build_resource_summaries(selected)
+    _fallback_type = resolved_type or _media_type_hint or "tv"
     base_summary = summaries[0] if summaries else {
-        "key": _resource_key(sync_group_id, resolved_type or "tv", resolved_tmdb_id, normalized_resource_dir),
+        "key": _resource_key(sync_group_id, _fallback_type, resolved_tmdb_id, normalized_resource_dir),
         "sample_id": None,
         "sync_group_id": sync_group_id,
-        "type": resolved_type or "tv",
+        "type": _fallback_type,
         "tmdb_id": resolved_tmdb_id,
         "resource_dir": normalized_resource_dir,
         "resource_name": clean_resource_name(normalized_resource_dir),
         "record_count": 0,
         "season_count": 0,
         "season_labels": [],
-        "season_summary": "Misc" if (resolved_type or "tv") == "tv" else "Movie",
+        "season_summary": "Misc" if _fallback_type == "tv" else "Movie",
         "main_count": 0,
         "aux_count": 0,
         "misc_count": 0,

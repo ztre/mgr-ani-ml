@@ -1720,7 +1720,10 @@ def _main_feature_expr():
 
 def _target_dir_like_expr(target_dir_norm: str):
     lower_target_path = func.lower(func.replace(func.coalesce(MediaRecord.target_path, ""), "\\", "/"))
-    base = target_dir_norm.lower().rstrip("/")
+    # 只对 ASCII A-Z 执行小写，与 SQLite LOWER() 行为一致。
+    # Python str.lower() 会转换非 ASCII 大写字母（如 Ⅱ→ⅱ），而 SQLite LOWER() 不会，
+    # 导致含 Unicode 大写的路径匹配失败。
+    base = re.sub(r"[A-Z]", lambda m: m.group().lower(), target_dir_norm).rstrip("/")
     return or_(lower_target_path == base, lower_target_path.like(f"{base}/%"))
 
 
@@ -1783,8 +1786,9 @@ def get_media_resource_tree(
 
     q = db.query(MediaRecord).filter(MediaRecord.target_path.isnot(None), MediaRecord.target_path != "")
     q = q.filter(_target_dir_like_expr(normalized_resource_dir))
-    if type:
-        q = q.filter(MediaRecord.type == type)
+    # 不按 type 过滤：resource_dir + sync_group_id 已足够定位记录集。
+    # 传入 type 可能与 DB 中实际存储的 type 不一致（如 movie 被前端误传为 tv），
+    # 过滤会导致 0 条结果；type 仅作为 build_resource_tree 的展示提示。
     if sync_group_id is not None:
         q = q.filter(MediaRecord.sync_group_id == sync_group_id)
     rows = q.order_by(MediaRecord.updated_at.desc()).all()

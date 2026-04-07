@@ -1,6 +1,7 @@
 """Inode management APIs."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -47,7 +48,9 @@ def _inode_to_dict(row: InodeRecord) -> dict:
 
 def _target_dir_like_expr(target_dir_norm: str):
     lower_target_path = func.lower(func.replace(InodeRecord.target_path, "\\", "/"))
-    base = target_dir_norm.lower().rstrip("/")
+    # 只对 ASCII A-Z 做小写化，与 SQLite LOWER() 行为一致；
+    # Python str.lower() 会转换非 ASCII 大写字符（如 Ⅱ→ⅱ），SQLite 不会，导致匹配失败。
+    base = re.sub(r"[A-Z]", lambda m: m.group().lower(), target_dir_norm).rstrip("/")
     return or_(
         lower_target_path == base,
         lower_target_path.like(f"{base}/%"),

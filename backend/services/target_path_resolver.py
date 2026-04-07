@@ -63,7 +63,7 @@ def build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseRes
     # 保证字幕/音轨文件名与正片完全一致，播放器才能自动加载。
     base = anchor_dst.stem
     if src_path is not None:
-        suffix = _build_attachment_source_suffix(src_path, parse_result, base)
+        suffix = _build_attachment_source_suffix(src_path, parse_result, base, anchor_dir=anchor_dst.parent)
         if suffix:
             base = f"{base} {suffix}".strip()
     lang = parse_result.subtitle_lang or ""
@@ -852,9 +852,11 @@ def _pick_best_anchor_candidate(candidates: list[Path], src_path: Path, parse_re
     return best
 
 
-def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, anchor_stem: str) -> str:
+def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, anchor_stem: str, anchor_dir: Path | None = None) -> str:
     if parse_result.extra_category in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
         return ""
+    # 仅在 TV Season 目录（Season XX）下才追加集号区分后缀；movie 上下文无集号。
+    _in_season_dir = anchor_dir is not None and bool(re.match(r"season\s+\d+", anchor_dir.name, re.I))
     anchor_key = _normalize_media_stem(anchor_stem)
     # 预计算：附件自身标题的规范化（把连字符当空格），用于过滤"系列/篇名"标签。
     # 若 token 只是标题的一部分（如 Raihousha-hen 来自系列副标题），不应作为区分后缀。
@@ -872,7 +874,7 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
     if scene:
         parts.append(re.sub(r"\s+", " ", scene).strip())
     ep = _extract_episode_from_filename_loose(src_path.name)
-    if ep is not None and (parse_result.episode is None or int(ep) == int(parse_result.episode)):
+    if _in_season_dir and ep is not None and (parse_result.episode is None or int(ep) == int(parse_result.episode)):
         parts.append(f"E{int(ep):02d}")
     for tag in _extract_distinguish_source_tags(src_path.stem):
         parts.append(tag)
@@ -1082,6 +1084,10 @@ def _apply_variant_label_hint(parse_result: ParseResult, src_path: Path) -> Pars
     label = re.sub(r"\s+", " ", str(parse_result.extra_label or "")).strip()
     if not label:
         return parse_result
+    # 预计算标题空间，用于过滤系列篇名标签（如 Raihousha-hen）。
+    _src_title_space = _normalize_media_stem(parse_result.title or "").replace("-", " ")
+    _stem_title_raw = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", src_path.stem)
+    _stem_title_space = _normalize_media_stem(_stem_title_raw).replace("-", " ")
     out = label
     lower = out.lower()
     for tag in tags:
@@ -1089,6 +1095,13 @@ def _apply_variant_label_hint(parse_result: ParseResult, src_path: Path) -> Pars
         if not token:
             continue
         if token.lower() in lower:
+            continue
+        # 若 token 来自文件名的标题部分（系列/篇名），不属于变体区分标签，跳过。
+        norm_token_sp = _normalize_media_stem(token).replace("-", " ")
+        if norm_token_sp and (
+            (_src_title_space and norm_token_sp in _src_title_space)
+            or (_stem_title_space and norm_token_sp in _stem_title_space)
+        ):
             continue
         candidate = f"{out} {token}".strip()
         if len(candidate) > 120:
