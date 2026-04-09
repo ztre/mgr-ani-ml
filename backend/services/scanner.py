@@ -833,6 +833,11 @@ def _run_manual_organize_core(
     if season_override is not None:
         normalized_forced_season = max(0, int(season_override))
 
+    include = str(getattr(group, "include", "") or "")
+    exclude = str(getattr(group, "exclude", "") or "")
+    source_value = getattr(group, "source", None)
+    source_root = Path(str(source_value)) if source_value else root_dir
+
     context = {
         "media_type": media_type,
         "sync_group_id": group.id,
@@ -853,6 +858,7 @@ def _run_manual_organize_core(
         "extra_context": bool(detect_special_dir_context(root_dir)[0]) or force_extra_context,
         "strong_extra_context": bool(detect_strong_special_dir_context(root_dir)[0]) or force_extra_context,
         "_has_issues": False,
+        "source_root": str(source_root),
         "episode_offset": int(episode_offset) if episode_offset is not None else None,
     }
 
@@ -861,10 +867,6 @@ def _run_manual_organize_core(
         if not stable_ok:
             raise DirectoryProcessError(f"目录稳定决策失败: {stable_reason}")
 
-    include = str(getattr(group, "include", "") or "")
-    exclude = str(getattr(group, "exclude", "") or "")
-    source_value = getattr(group, "source", None)
-    source_root = Path(str(source_value)) if source_value else root_dir
     all_media_files = _collect_media_files_under_dir(root_dir, include, exclude, source_root)
     if not all_media_files:
         raise DirectoryProcessError("待办目录中没有可处理媒体")
@@ -1334,6 +1336,7 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         "strong_extra_context": bool(strong_extra_context),
         "strong_extra_context_token": strong_extra_token,
         "_has_issues": False,
+        "source_root": str(source),
     }
 
     def _cancel_current_directory(phase: str) -> bool:
@@ -1769,6 +1772,7 @@ def _process_file(
                     episode=parse_result.episode,
                     extra_category=parse_result.extra_category,
                 )
+                _mark_dir_pending_for_unresolved_extra(db, src_path, context, sync_group_id, media_type)
                 if dir_runtime is not None:
                     dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
                 return
@@ -1784,6 +1788,7 @@ def _process_file(
                 episode=parse_result.episode,
                 extra_category=parse_result.extra_category,
             )
+            _mark_dir_pending_for_unresolved_extra(db, src_path, context, sync_group_id, media_type)
             if dir_runtime is not None:
                 dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
             return
@@ -1799,6 +1804,7 @@ def _process_file(
             episode=parse_result.episode,
             extra_category=parse_result.extra_category,
         )
+        _mark_dir_pending_for_unresolved_extra(db, src_path, context, sync_group_id, media_type)
         if dir_runtime is not None:
             dir_runtime["skipped_count"] = int(dir_runtime.get("skipped_count") or 0) + 1
         return
@@ -3378,6 +3384,29 @@ def _resolve_manual_scope(src_path: Path, source_root: Path) -> Path:
     if scope.name.lower() in aux_names and scope.parent != source_root:
         return scope.parent
     return scope
+
+
+def _mark_dir_pending_for_unresolved_extra(
+    db: Session,
+    src_path: Path,
+    context: dict,
+    sync_group_id: int,
+    source_type: str,
+) -> None:
+    """当特典目录文件无法稳定分类被跳过时，将其父目录标记为 pending_manual，
+    以便在待办清单中显示并支持人工修正。"""
+    raw_source_root = context.get("source_root")
+    source_root = Path(str(raw_source_root)) if raw_source_root else src_path.parent
+    _mark_dir_pending(
+        db,
+        src_path,
+        source_root,
+        sync_group_id,
+        source_type,
+        reason="extra category unresolved in special dir",
+        emit_log=False,
+        emit_jsonl=False,
+    )
 
 
 def _is_under_pending_dir(src_path: Path, pending_dirs: set[Path]) -> bool:
