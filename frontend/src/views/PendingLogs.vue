@@ -56,13 +56,13 @@
           <el-table-column label="类型" width="130">
             <template #default="{ row }">
               <el-tag size="small" :type="fileTypeTag(row.file_type)">
-                {{ row.file_type || row.entry_type || '-' }}
+                {{ fileTypeLabel(row.file_type || row.entry_type) }}
               </el-tag>
             </template>
           </el-table-column>
           <el-table-column label="原因 / 状态" min-width="220" show-overflow-tooltip>
             <template #default="{ row }">
-              {{ row.reason || row.resolution_status || '-' }}
+              {{ reasonLabel(row.reason) || resolutionLabel(row.resolution_status) || '-' }}
             </template>
           </el-table-column>
           <el-table-column label="源路径" min-width="320" show-overflow-tooltip>
@@ -97,7 +97,7 @@
           </template>
           <div v-if="currentItem" class="detail-grid">
             <div><strong>路径：</strong>{{ currentItem.original_path || currentItem.source_original_path || '-' }}</div>
-            <div><strong>原因：</strong>{{ currentItem.reason || '-' }}</div>
+            <div><strong>原因：</strong>{{ reasonLabel(currentItem.reason) || resolutionLabel(currentItem.resolution_status) || '-' }}</div>
             <div><strong>TMDB：</strong>{{ currentItem.tmdb_id || currentItem.tmdbid || '-' }}</div>
             <div><strong>季 / 集：</strong>{{ formatSeasonEpisode(currentItem) }}</div>
             <div><strong>Extra：</strong>{{ currentItem.extra_category || '-' }}</div>
@@ -185,9 +185,51 @@ const visibleKinds = computed(() => {
 })
 
 function kindLabel(value) {
-  if (value === 'pending') return 'Pending'
-  if (value === 'unprocessed') return 'Unprocessed'
-  return 'Review'
+  if (value === 'pending') return '待办'
+  if (value === 'unprocessed') return '未处理项'
+  return '人工处理记录'
+}
+
+const FILE_TYPE_MAP = {
+  video: '视频',
+  attachment: '附件',
+  special: '特典',
+  extra: '附加内容',
+  subtitle: '字幕',
+  audio: '音轨',
+}
+
+function fileTypeLabel(type) {
+  if (!type) return '-'
+  return FILE_TYPE_MAP[type] || type
+}
+
+const REASON_MAP = {
+  'extra category unresolved in special dir': '特典目录无法稳定分类',
+  'special dir conflict': '特典目录冲突',
+  'no matching episode': '无匹配集数',
+  'parse failed': '文件名解析失败',
+  'duplicate target': '目标路径重复',
+  'inode conflict': 'inode 冲突',
+  'season unstable': '季度无法稳定',
+  'unresolved': '无法识别',
+}
+
+function reasonLabel(reason) {
+  if (!reason) return ''
+  return REASON_MAP[reason] || reason
+}
+
+const RESOLUTION_MAP = {
+  resolved: '已解决',
+  skipped: '确认跳过',
+  false_positive: '误报',
+  needs_followup: '继续跟进',
+}
+
+function resolutionLabel(status) {
+  if (!status) return ''
+  return RESOLUTION_MAP[status] || status
 }
 
 function formatTime(value) {
