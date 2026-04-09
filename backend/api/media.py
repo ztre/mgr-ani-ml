@@ -1265,7 +1265,32 @@ def _run_single_reidentify(
         if media_type == "tv"
         else compute_movie_target_path(target_root, pr, data.tmdb_id, ext)
     )
+
+    # 记录旧目标路径，用于后续清理（类型变更时旧目录可能在另一个媒体库根目录下）
+    old_target_value = str(row.target_path or "").strip()
+    old_target = Path(old_target_value) if old_target_value else None
+    old_target_root = Path(group.target)
+    if str(row.type or "") == "movie":
+        old_movie_root, _ = resolve_movie_target_root(db, group)
+        if old_movie_root is not None:
+            old_target_root = old_movie_root
+
     _link_or_fail(src, dst)
+
+    # 清理旧目标硬链接（路径变更时），并向上级联删除空目录 / 纯元数据目录
+    # 特别是类型变更（tv↔movie）时，旧链接位于不同媒体库根目录下必须清理，
+    # 否则 Emby 仍会在旧目录下看到该文件导致解析异常
+    if old_target is not None and old_target != dst:
+        try:
+            if old_target.is_file():
+                old_target.unlink()
+                append_log(f"已清理旧目标文件: {old_target}")
+        except OSError as exc:
+            append_log(f"WARNING: 旧目标文件清理失败: {old_target} | {exc}")
+        try:
+            _prune_empty_dirs_with_metadata(old_target.parent, old_target_root)
+        except OSError:
+            pass
 
     row.tmdb_id = data.tmdb_id
     row.type = media_type
@@ -1295,6 +1320,16 @@ def _run_single_reidentify(
             att_pr = parse_tv_filename(str(att_src)) or parse_movie_filename(str(att_src)) or pr
             try:
                 att_dst = build_attachment_target_from_anchor(dst, att_pr, att_ext, src_path=att_src)
+                # 清理附件旧目标
+                att_old_value = str(att_row.target_path or "").strip()
+                if att_old_value:
+                    att_old = Path(att_old_value)
+                    if att_old != att_dst:
+                        try:
+                            if att_old.is_file():
+                                att_old.unlink()
+                        except OSError:
+                            pass
                 _link_or_fail(att_src, att_dst)
                 att_row.tmdb_id = data.tmdb_id
                 att_row.type = media_type
