@@ -15,11 +15,14 @@
 #   --log-dir <dir>     日志目录路径（默认: 脚本上级目录下的 logs/）
 #   --tv-root <dir>     TV 媒体库根目录（覆盖从 DB 读取）
 #   --movie-root <dir>  Movie 媒体库根目录（覆盖从 DB 读取）
+#   --remap <old:new>   路径前缀重映射，DB 中存储的路径前缀 -> 实际文件系统路径前缀
+#                       可多次指定。例如: --remap /media/links:/mnt/user/media/links
 #   --verbose           输出所有 OK 条目
 #
 # 示例:
 #   bash check_media_path_sanity.sh
 #   bash check_media_path_sanity.sh --log-dir /var/log/mgr --tv-root /media/links/anime_tv --movie-root /media/links/anime_movies
+#   bash check_media_path_sanity.sh --remap /media/links/anime_tv:/mnt/user/media/links/anime_tv --remap /media/links/anime_movies:/mnt/user/media/links/anime_movies
 #   bash check_media_path_sanity.sh --verbose
 
 set -euo pipefail
@@ -33,6 +36,8 @@ LOG_DIR="$PROJECT_ROOT/logs"
 TV_ROOT=""
 MOVIE_ROOT=""
 VERBOSE=0
+REMAP_FROM=()   # DB 中的路径前缀
+REMAP_TO=()     # 对应的实际路径前缀
 
 # ── 参数解析 ──────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -41,6 +46,18 @@ while [[ $# -gt 0 ]]; do
         --log-dir)    LOG_DIR="$2";    shift 2 ;;
         --tv-root)    TV_ROOT="$2";    shift 2 ;;
         --movie-root) MOVIE_ROOT="$2"; shift 2 ;;
+        --remap)
+            remap_val="$2"
+            remap_from_part="${remap_val%%:*}"
+            remap_to_part="${remap_val#*:}"
+            if [[ -z "$remap_from_part" || -z "$remap_to_part" || "$remap_from_part" == "$remap_to_part" ]]; then
+                echo "错误: --remap 格式应为 old_prefix:new_prefix，例如 /media/links:/mnt/user/media/links" >&2
+                exit 1
+            fi
+            REMAP_FROM+=("$remap_from_part")
+            REMAP_TO+=("$remap_to_part")
+            shift 2
+            ;;
         --verbose|-v) VERBOSE=1;       shift   ;;
         *) echo "未知参数: $1" >&2; exit 1 ;;
     esac
@@ -72,10 +89,32 @@ if [[ -z "$MOVIE_ROOT" ]]; then
         "SELECT target FROM sync_groups WHERE enabled=1 AND source_type='movie' LIMIT 1;")"
 fi
 
+# ── 路径重映射函数 ────────────────────────────────────────────────────────────
+# 将 DB 中存储的路径转换为实际文件系统路径
+remap_path() {
+    local path="$1"
+    local i
+    for (( i=0; i<${#REMAP_FROM[@]}; i++ )); do
+        local from="${REMAP_FROM[$i]}"
+        local to="${REMAP_TO[$i]}"
+        if [[ "$path" == "$from"* ]]; then
+            echo "${to}${path#$from}"
+            return
+        fi
+    done
+    echo "$path"
+}
+
 echo "数据库:     $DB_PATH"
 echo "日志目录:   $LOG_DIR"
 echo "TV 根目录:  ${TV_ROOT:-(未配置)}"
 echo "Movie根目录: ${MOVIE_ROOT:-(未配置)}"
+if [[ ${#REMAP_FROM[@]} -gt 0 ]]; then
+    echo "路径重映射:"
+    for (( i=0; i<${#REMAP_FROM[@]}; i++ )); do
+        echo "            ${REMAP_FROM[$i]}  ->  ${REMAP_TO[$i]}"
+    done
+fi
 echo ""
 
 # ── 解析日志 ──────────────────────────────────────────────────────────────────
@@ -124,28 +163,32 @@ while IFS='|' read -r rec_id rec_type target_path; do
     DB_TARGET_SET["$target_path"]=1
     ok=1
 
+    # 对 DB 存储路径应用重映射，得到实际文件系统路径
+    real_path="$(remap_path "$target_path")"
+
     # ── 检查1：文件是否实际存在 ───────────────────────────────────────────────
-    if [[ ! -e "$target_path" ]]; then
+    if [[ ! -e "$real_path" ]]; then
         echo "[MISSING]           id=$rec_id type=$rec_type"
-        echo "                    target=$target_path"
+        echo "                    db_path=$target_path"
+        [[ "$real_path" != "$target_path" ]] && echo "                    real_path=$real_path"
         ok=0
     else
-        # ── 检查2：type 与所在目录是否错位 ───────────────────────────────────
-        if [[ "$rec_type" == "tv" && -n "$MOVIE_ROOT" ]]; then
-            # tv 类型文件不应落在 movie 根目录下
-            if [[ "$target_path" == "$MOVIE_ROOT"/* ]]; then
+        # ── 检查2：type 与所在目录是否错位（基于重映射后的真实路径）──────────
+        real_tv_root="$(remap_path "${TV_ROOT:-}")"
+        real_movie_root="$(remap_path "${MOVIE_ROOT:-}")"
+        if [[ "$rec_type" == "tv" && -n "$real_movie_root" ]]; then
+            if [[ "$real_path" == "$real_movie_root"/* ]]; then
                 echo "[TYPE_MISMATCH tv→in→movie]  id=$rec_id"
-                echo "                    target=$target_path"
-                echo "                    movie_root=$MOVIE_ROOT"
+                echo "                    real_path=$real_path"
+                echo "                    movie_root=$real_movie_root"
                 ok=0
             fi
         fi
-        if [[ "$rec_type" == "movie" && -n "$TV_ROOT" ]]; then
-            # movie 类型文件不应落在 tv 根目录下
-            if [[ "$target_path" == "$TV_ROOT"/* ]]; then
+        if [[ "$rec_type" == "movie" && -n "$real_tv_root" ]]; then
+            if [[ "$real_path" == "$real_tv_root"/* ]]; then
                 echo "[TYPE_MISMATCH movie→in→tv]  id=$rec_id"
-                echo "                    target=$target_path"
-                echo "                    tv_root=$TV_ROOT"
+                echo "                    real_path=$real_path"
+                echo "                    tv_root=$real_tv_root"
                 ok=0
             fi
         fi
@@ -153,7 +196,7 @@ while IFS='|' read -r rec_id rec_type target_path; do
 
     if [[ $ok -eq 1 ]]; then
         (( OK++ )) || true
-        [[ $VERBOSE -eq 1 ]] && echo "  OK  id=$rec_id type=$rec_type  $target_path"
+        [[ $VERBOSE -eq 1 ]] && echo "  OK  id=$rec_id type=$rec_type  $real_path"
     else
         (( ISSUES++ )) || true
     fi
@@ -165,12 +208,13 @@ echo "检查孤立文件（日志有记录但DB无、文件仍存在）..."
 orphan_found=0
 while IFS= read -r logged_target; do
     [[ -z "$logged_target" ]] && continue
-    # 不在 DB 当前记录中
-    if [[ -z "${DB_TARGET_SET[$logged_target]+x}" ]]; then
+    real_logged="$(remap_path "$logged_target")"
+    # 不在 DB 当前记录中（同时检查原始路径和重映射后路径）
+    if [[ -z "${DB_TARGET_SET[$logged_target]+x}" && -z "${DB_TARGET_SET[$real_logged]+x}" ]]; then
         # 文件还存在于磁盘
-        if [[ -f "$logged_target" ]]; then
+        if [[ -f "$real_logged" ]]; then
             echo "[ORPHAN_FILE]       日志有记录但DB无对应条目，文件仍存在:"
-            echo "                    $logged_target"
+            echo "                    $real_logged"
             (( ISSUES++ )) || true
             (( orphan_found++ )) || true
         fi
@@ -184,6 +228,10 @@ echo "检查曾残留的旧目标目录..."
 blocked_found=0
 while IFS= read -r blocked_dir; do
     [[ -z "$blocked_dir" ]] && continue
+    real_blocked="$(remap_path "$blocked_dir")"
+    if [[ -d "$real_blocked" ]]; then
+        blocked_dir="$real_blocked"  # 后续统一用真实路径
+    fi
     if [[ -d "$blocked_dir" ]]; then
         # 统计目录内容
         total_files=$(find "$blocked_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
