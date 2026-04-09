@@ -124,6 +124,7 @@
           <div class="drawer-toolbar-right">
             <span class="selection-summary">已选 {{ selectedDrawerItems.length }} 条</span>
             <el-button plain size="small" :disabled="!selectedDrawerItems.length" @click="clearDrawerSelection">清空选择</el-button>
+            <el-button type="primary" plain size="small" :disabled="!selectedDrawerItems.length" @click="openBatchFixDialog">批量修正选中</el-button>
             <el-dropdown trigger="click" :disabled="!selectedDrawerItems.length" @command="deleteSelectedItems">
               <el-button type="warning" plain size="small">删除选中</el-button>
               <template #dropdown>
@@ -258,7 +259,7 @@
 
                 <el-table-column label="归属" width="120" align="center">
                   <template #default="{ row }">
-                    <el-tag :type="bucketTagType(row.tree_bucket)" effect="light">{{ bucketLabel(row.tree_bucket) }}</el-tag>
+                    <el-tag :type="bucketTagType(row.tree_bucket)" effect="light">{{ ownershipLabel(row) }}</el-tag>
                   </template>
                 </el-table-column>
 
@@ -342,6 +343,48 @@
       </transition>
     </teleport>
 
+    <el-dialog v-model="batchFixDialogVisible" title="批量修正选中文件" width="560px" append-to-body destroy-on-close>
+      <el-form ref="batchFixFormRef" :model="batchFixForm" label-width="110px" style="margin-top: 8px">
+        <el-form-item label="待处理文件">
+          <span class="selection-summary">共 {{ selectedDrawerItems.length }} 个已选文件</span>
+        </el-form-item>
+        <el-form-item label="媒体类型" required>
+          <el-select v-model="batchFixForm.media_type" style="width: 180px">
+            <el-option label="TV" value="tv" />
+            <el-option label="电影" value="movie" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
+          <el-input v-model="batchFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
+            <template #append>
+              <el-button @click="openTmdbSearchDialog('batch')">
+                <el-icon><Search /></el-icon>
+              </el-button>
+            </template>
+          </el-input>
+        </el-form-item>
+        <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
+          <el-input v-model="batchFixForm.title" placeholder="例如：刀剑神域：序列之争" />
+        </el-form-item>
+        <el-form-item label="年份">
+          <el-input-number v-model="batchFixForm.year" :min="1900" :max="2100" />
+        </el-form-item>
+        <el-form-item v-if="batchFixForm.media_type === 'tv'" label="强制季号">
+          <el-input-number v-model="batchFixForm.season_override" :min="0" />
+        </el-form-item>
+        <el-form-item v-if="batchFixForm.media_type === 'tv' && batchFixForm.season_override === 0" label="强制集数" required prop="episode_override" :rules="[{ required: true, type: 'number', message: '强制季号为 0 时必须填写强制集数', trigger: 'change' }]">
+          <el-input-number v-model="batchFixForm.episode_override" :min="1" />
+        </el-form-item>
+        <el-form-item v-if="batchFixForm.media_type === 'tv'" label="集号偏移">
+          <el-input-number v-model="batchFixForm.episode_offset" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchFixDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchFixing" @click="submitBatchFix">提交修正</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="fixDialogVisible" title="资源修正" width="560px" append-to-body destroy-on-close>
       <el-tabs v-model="activeFixTab" style="margin-top: -10px">
         <el-tab-pane label="识别修正" name="reidentify">
@@ -384,16 +427,18 @@
             </el-form-item>
           </el-form>
         </el-tab-pane>
-        <el-tab-pane label="季内调整" name="adjust">
+        <el-tab-pane :label="currentFixRow?.type === 'movie' ? '资源调整' : '季内调整'" name="adjust">
           <el-form ref="adjustFormRef" :model="adjustForm" label-width="110px" style="margin-top: 12px">
             <el-form-item label="待处理文件">
               <div class="path-preview" :title="currentFixRow?.original_path">{{ currentFixRow?.original_path || '-' }}</div>
             </el-form-item>
             <el-form-item label="类别">
-              <el-select v-model="adjustForm.extra_category" style="width: 220px" clearable placeholder="正片（主集数）">
-                <el-option label="正片（主集数）" :value="null" />
-                <el-option label="Season 00 · 特典/SP/OVA" value="special" />
-                <el-option label="Season 00 · OP/ED" value="oped" />
+              <el-select v-model="adjustForm.extra_category" style="width: 220px" clearable placeholder="正片（主文件）">
+                <el-option label="正片（主文件）" :value="null" />
+                <template v-if="currentFixRow?.type !== 'movie'">
+                  <el-option label="Season 00 · 特典/SP/OVA" value="special" />
+                  <el-option label="Season 00 · OP/ED" value="oped" />
+                </template>
                 <el-option label="extras · PV" value="pv" />
                 <el-option label="extras · CM" value="cm" />
                 <el-option label="extras · 预告/Trailer" value="trailer" />
@@ -404,12 +449,14 @@
                 <el-option label="extras · BD特典" value="bdextra" />
               </el-select>
             </el-form-item>
-            <el-form-item label="季号">
-              <el-input-number v-model="adjustForm.season" :min="0" style="width: 140px" />
-            </el-form-item>
-            <el-form-item v-if="adjustForm.extra_category === null" label="集号">
-              <el-input-number v-model="adjustForm.episode" :min="1" style="width: 140px" />
-            </el-form-item>
+            <template v-if="currentFixRow?.type !== 'movie'">
+              <el-form-item label="季号">
+                <el-input-number v-model="adjustForm.season" :min="0" style="width: 140px" />
+              </el-form-item>
+              <el-form-item v-if="adjustForm.extra_category === null" label="集号">
+                <el-input-number v-model="adjustForm.episode" :min="1" style="width: 140px" />
+              </el-form-item>
+            </template>
             <el-form-item v-if="adjustForm.extra_category !== null" label="标签">
               <el-input v-model="adjustForm.extra_label" placeholder="例如：SP01、OP01、PV01" style="width: 220px" clearable />
             </el-form-item>
@@ -599,6 +646,11 @@ const activeFixTab = ref('reidentify')
 const adjustFormRef = ref(null)
 const adjusting = ref(false)
 const adjustForm = reactive({ extra_category: null, season: 1, episode: 1, extra_label: '', custom_filename: '' })
+
+const batchFixDialogVisible = ref(false)
+const batchFixing = ref(false)
+const batchFixFormRef = ref(null)
+const batchFixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season_override: undefined, episode_override: undefined, episode_offset: undefined })
 
 const dirFixDialogVisible = ref(false)
 const dirFixing = ref(false)
@@ -879,12 +931,16 @@ function activeSearchMediaType() {
   if (tmdbSearchTarget.value === 'dir') {
     return dirFixForm.media_type === 'movie' ? 'movie' : 'tv'
   }
+  if (tmdbSearchTarget.value === 'batch') {
+    return batchFixForm.media_type === 'movie' ? 'movie' : 'tv'
+  }
   return fixForm.media_type === 'movie' ? 'movie' : 'tv'
 }
 
 function openTmdbSearchDialog(target) {
-  tmdbSearchTarget.value = target === 'dir' ? 'dir' : 'fix'
-  tmdbSearchKeyword.value = String(tmdbSearchTarget.value === 'dir' ? (dirFixForm.title || '') : (fixForm.title || '')).trim()
+  tmdbSearchTarget.value = target === 'dir' ? 'dir' : target === 'batch' ? 'batch' : 'fix'
+  const sourceTitle = target === 'dir' ? (dirFixForm.title || '') : target === 'batch' ? (batchFixForm.title || '') : (fixForm.title || '')
+  tmdbSearchKeyword.value = String(sourceTitle).trim()
   tmdbSearchResults.value = []
   tmdbSearchDialogVisible.value = true
 }
@@ -914,7 +970,7 @@ async function runTmdbSearch() {
 }
 
 function selectTmdbSearchItem(item) {
-  const targetForm = tmdbSearchTarget.value === 'dir' ? dirFixForm : fixForm
+  const targetForm = tmdbSearchTarget.value === 'dir' ? dirFixForm : tmdbSearchTarget.value === 'batch' ? batchFixForm : fixForm
   targetForm.tmdb_id = item?.tmdb_id ? String(item.tmdb_id) : ''
   targetForm.title = item?.title || ''
   targetForm.year = item?.year ?? undefined
@@ -925,12 +981,6 @@ function tmdbLink(item) {
   if (!item?.tmdb_id) return '#'
   const type = item.media_type === 'tv' ? 'tv' : 'movie'
   return `https://www.themoviedb.org/${type}/${item.tmdb_id}`
-}
-
-function bucketLabel(bucket) {
-  if (bucket === 'main') return '正片'
-  if (bucket === 'aux') return 'SP/Extras'
-  return 'Misc'
 }
 
 function bucketTagType(bucket) {
@@ -977,6 +1027,17 @@ function extractItemExtension(item) {
 
 function isVideoItem(item) {
   return VIDEO_FILE_EXTENSIONS.has(extractItemExtension(item))
+}
+
+function ownershipLabel(item) {
+  if (!isVideoItem(item)) {
+    if (item?.tree_bucket === 'main') return '正片附件'
+    if (item?.tree_bucket === 'aux') return 'SP附件'
+    return '附件'
+  }
+  if (item?.tree_bucket === 'main') return '正片'
+  if (item?.tree_bucket === 'aux') return 'SP/Extras'
+  return 'Misc'
 }
 
 function itemMatchesGroupFilter(item, mode, selectedIds) {
@@ -1401,24 +1462,26 @@ async function submitAdjust() {
     ElMessage.warning('请先选择待调整文件')
     return
   }
+  const isMovie = currentFixRow.value?.type === 'movie'
+  const adjustLabel = isMovie ? '资源调整' : '季内调整'
   adjusting.value = true
   openFixMonitor(
     buildFixMonitorMatchSpec({
       typePrefix: 'adjust:item:',
       targetName: extractFilename(currentFixRow.value?.original_path),
-      targetLabel: `季内调整 · ${extractFilename(currentFixRow.value?.original_path)}`,
+      targetLabel: `${adjustLabel} · ${extractFilename(currentFixRow.value?.original_path)}`,
     }),
   )
   try {
     const { data } = await mediaApi.adjust(currentFixRow.value.id, {
       extra_category: adjustForm.extra_category || null,
-      season: adjustForm.extra_category === null ? (adjustForm.season ?? undefined) : (adjustForm.season ?? undefined),
-      episode: adjustForm.extra_category === null ? (adjustForm.episode ?? undefined) : (adjustForm.episode ?? undefined),
+      season: (!isMovie && adjustForm.extra_category === null) ? (adjustForm.season ?? undefined) : (!isMovie ? (adjustForm.season ?? undefined) : undefined),
+      episode: (!isMovie && adjustForm.extra_category === null) ? (adjustForm.episode ?? undefined) : undefined,
       extra_label: adjustForm.extra_label || null,
       custom_filename: adjustForm.custom_filename || null,
     })
     await attachFixMonitorTask(data?.task_id)
-    ElMessage.success(data?.message || '季内调整任务已进入队列')
+    ElMessage.success(data?.message || `${adjustLabel}任务已进入队列`)
     fixDialogVisible.value = false
   } catch (error) {
     await refreshFixMonitorTask()
@@ -1432,6 +1495,74 @@ async function submitAdjust() {
     ElMessage.error(error?.response?.data?.detail || error?.message || '季内调整失败')
   } finally {
     adjusting.value = false
+    fixMonitorRequestPending.value = false
+    restartFixMonitorAutoRefresh()
+  }
+}
+
+function openBatchFixDialog() {
+  const firstRow = selectedDrawerItems.value[0]
+  batchFixForm.media_type = drawerResource.value?.type === 'movie' ? 'movie' : 'tv'
+  batchFixForm.tmdb_id = drawerResource.value?.tmdb_id || ''
+  const { title, year } = extractResourceTitleAndYear(drawerResource.value)
+  batchFixForm.title = title
+  batchFixForm.year = year
+  batchFixForm.season_override = firstRow?.tree_season ?? currentNode.value?.season ?? undefined
+  batchFixForm.episode_override = undefined
+  batchFixForm.episode_offset = undefined
+  tmdbSearchResults.value = []
+  batchFixDialogVisible.value = true
+}
+
+async function submitBatchFix() {
+  const ids = selectedDrawerItems.value.map((r) => r.id)
+  if (!ids.length) {
+    ElMessage.warning('请先选择待修正文件')
+    return
+  }
+  try {
+    await batchFixFormRef.value?.validate()
+  } catch {
+    return
+  }
+  if (batchFixForm.media_type === 'tv' && batchFixForm.season_override === 0 && (batchFixForm.episode_override === undefined || batchFixForm.episode_override === null)) {
+    ElMessage.warning('强制季号为 0 时必须填写强制集数')
+    return
+  }
+  batchFixing.value = true
+  openFixMonitor(
+    buildFixMonitorMatchSpec({
+      typePrefix: 'reidentify:batch:',
+      targetName: drawerResource.value?.resource_dir ? extractFilename(drawerResource.value.resource_dir) : '',
+      targetLabel: `批量修正 · ${ids.length} 个文件`,
+    }),
+  )
+  try {
+    const { data } = await mediaApi.batchReidentify({
+      item_ids: ids,
+      media_type: batchFixForm.media_type,
+      tmdb_id: Number(batchFixForm.tmdb_id),
+      title: batchFixForm.title,
+      year: batchFixForm.year ? Number(batchFixForm.year) : undefined,
+      season_override: batchFixForm.media_type === 'tv' ? (batchFixForm.season_override ?? undefined) : undefined,
+      episode_override: (batchFixForm.media_type === 'tv' && batchFixForm.season_override === 0) ? (batchFixForm.episode_override ?? undefined) : undefined,
+      episode_offset: batchFixForm.media_type === 'tv' ? (batchFixForm.episode_offset ?? undefined) : undefined,
+    })
+    await attachFixMonitorTask(data?.task_id)
+    ElMessage.success(data?.message || '批量修正任务已进入队列')
+    batchFixDialogVisible.value = false
+  } catch (error) {
+    await refreshFixMonitorTask()
+    if (fixMonitorTaskId.value) {
+      await fetchFixMonitorLogs(fixMonitorTaskId.value)
+    }
+    if (!fixMonitorTaskId.value) {
+      resetFixMonitorState()
+      fixMonitorVisible.value = false
+    }
+    ElMessage.error(error?.response?.data?.detail || error?.message || '批量修正失败')
+  } finally {
+    batchFixing.value = false
     fixMonitorRequestPending.value = false
     restartFixMonitorAutoRefresh()
   }

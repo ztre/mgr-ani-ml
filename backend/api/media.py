@@ -171,6 +171,7 @@ class PendingOrganizeRequest(BaseModel):
     episode_override: int | None = None
     episode_offset: int | None = None
     selected_paths: list[str] | None = None
+    force_extra_context: bool = False
 
 
 class BatchDeleteRequest(BaseModel):
@@ -226,6 +227,17 @@ class ReidentifyScopeRequest(BaseModel):
     season: int | None = None
     group_kind: str | None = None
     group_label: str | None = None
+    tmdb_id: int
+    title: str | None = None
+    year: int | None = None
+    season_override: int | None = None
+    episode_override: int | None = None
+    episode_offset: int | None = None
+
+
+class BatchReidentifyRequest(BaseModel):
+    item_ids: list[int]
+    media_type: Literal["tv", "movie"] | None = None
     tmdb_id: int
     title: str | None = None
     year: int | None = None
@@ -1069,6 +1081,7 @@ def _run_manual_organize_task(
             episode_override=payload.get("episode_override"),
             episode_offset=payload.get("episode_offset"),
             selected_relative_paths=payload.get("selected_paths"),
+            force_extra_context=bool(payload.get("force_extra_context")),
         )
         cleanup_rows = _manual_organize_log_cleanup_rows(
             db,
@@ -1300,10 +1313,18 @@ def _run_single_adjust(
     src = Path(row.original_path)
     ext = src.suffix.lower()
     old_target = Path(str(row.target_path))
+    is_movie = row.type == "movie"
 
-    # show_dir is always 2 levels above the file:
-    # <show_dir>/Season XX/<file>, <show_dir>/Season 00/<file>, <show_dir>/extras/<file>
-    show_dir = old_target.parent.parent
+    if is_movie:
+        # Movie target: <show_dir>/<file> (mainline) OR <show_dir>/extras/<file>
+        # Detect by checking if parent folder is "extras"
+        if old_target.parent.name.lower() == "extras":
+            show_dir = old_target.parent.parent
+        else:
+            show_dir = old_target.parent
+    else:
+        # TV target: <show_dir>/Season XX/<file>, <show_dir>/Season 00/<file>, <show_dir>/extras/<file>
+        show_dir = old_target.parent.parent
     target_root = show_dir.parent
 
     # Extract title and year from the existing show dir name: "Title (year) [tmdbid=xxx]"
@@ -1312,8 +1333,8 @@ def _run_single_adjust(
     existing_title = m.group(1).strip() if m else show_dirname.strip()
     existing_year = int(m.group(2)) if (m and m.group(2)) else None
 
-    # Parse source file to get base ParseResult (for episode index and subtitle_lang)
-    pr = parse_tv_filename(str(src)) or parse_movie_filename(str(src))
+    # Parse source file to get base ParseResult
+    pr = (parse_movie_filename(str(src)) or parse_tv_filename(str(src))) if is_movie else (parse_tv_filename(str(src)) or parse_movie_filename(str(src)))
     if not pr:
         raise HTTPException(status_code=400, detail="文件名解析失败")
 
@@ -1324,13 +1345,17 @@ def _run_single_adjust(
         extra_category=data.extra_category,
         extra_label=data.extra_label if data.extra_label is not None else None,
     )
-    if data.season is not None:
-        pr = pr._replace(season=max(0, data.season))
-    if data.episode is not None:
-        pr = pr._replace(episode=max(0, data.episode))
+    if not is_movie:
+        if data.season is not None:
+            pr = pr._replace(season=max(0, data.season))
+        if data.episode is not None:
+            pr = pr._replace(episode=max(0, data.episode))
 
     # Compute new target path
-    dst = compute_tv_target_path(target_root, pr, row.tmdb_id, ext, src_filename=src.name)
+    if is_movie:
+        dst = compute_movie_target_path(target_root, pr, row.tmdb_id, ext)
+    else:
+        dst = compute_tv_target_path(target_root, pr, row.tmdb_id, ext, src_filename=src.name)
 
     # Apply custom filename stem override
     if data.custom_filename:
@@ -1905,8 +1930,8 @@ def adjust_media(media_id: int, data: AdjustRequest, db: Session = Depends(get_d
     row = db.query(MediaRecord).filter(MediaRecord.id == media_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="记录不存在")
-    if row.type != "tv":
-        raise HTTPException(status_code=400, detail="仅支持TV类型的季内调整")
+    if row.type not in ("tv", "movie"):
+        raise HTTPException(status_code=400, detail="仅支持TV/Movie类型的调整")
     if not row.target_path:
         raise HTTPException(status_code=400, detail="记录缺少目标路径，请先完成识别")
 
@@ -2132,6 +2157,57 @@ def reidentify_scope_api(data: ReidentifyScopeRequest, db: Session = Depends(get
                     title=payload.get("title"),
                     year=payload.get("year"),
                     season_override=(payload.get("season_override") if payload.get("season_override") is not None else payload.get("season")),
+                    episode_override=payload.get("episode_override"),
+                    episode_offset=payload.get("episode_offset"),
+                )
+            )
+        },
+    )
+
+
+@router.post("/batch-reidentify")
+def batch_reidentify(data: BatchReidentifyRequest, db: Session = Depends(get_db)):
+    if not data.item_ids:
+        raise HTTPException(status_code=400, detail="item_ids 不能为空")
+    rows = db.query(MediaRecord).filter(MediaRecord.id.in_(data.item_ids)).all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="未找到待修正记录")
+    group, inferred_media_type = _resolve_reidentify_group(rows, db)
+    media_type = data.media_type or inferred_media_type
+    _validate_forced_tv_episode(media_type, data.season_override, data.episode_override)
+    item_ids_snapshot = list(data.item_ids)
+    payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+    target_name = group.name
+    return _enqueue_logged_media_task(
+        db,
+        task_type=f"reidentify:batch:{group.name}",
+        target_id=group.id,
+        target_name=target_name,
+        queued_message=f"批量修正任务已进入队列，等待执行: {len(item_ids_snapshot)} 个文件",
+        start_message=(
+            f"批量修正任务启动: group={group.name}, count={len(item_ids_snapshot)}, "
+            f"media_type={media_type}, tmdb_id={data.tmdb_id}, "
+            f"season_override={data.season_override}, episode_override={data.episode_override}, "
+            f"episode_offset={data.episode_offset}"
+        ),
+        success_message_factory=lambda result: f"批量修正完成: 成功 {int(result.get('processed') or 0)}，失败 {int(result.get('failed') or 0)}",
+        runner=lambda worker_db, _task: {
+            **(lambda scoped_result: {
+                "message": (
+                    f"批量修正完成: 成功 {int(scoped_result['processed'])}，失败 {int(scoped_result['failed'])}"
+                    + ("（存在问题项）" if bool(scoped_result['has_issues']) else "")
+                ),
+                **scoped_result,
+            })(
+                _run_reidentify_scope(
+                    db=worker_db,
+                    rows=worker_db.query(MediaRecord).filter(MediaRecord.id.in_(item_ids_snapshot)).all(),
+                    group=_require_sync_group(worker_db, group.id),
+                    media_type=media_type,
+                    tmdb_id=payload["tmdb_id"],
+                    title=payload.get("title"),
+                    year=payload.get("year"),
+                    season_override=payload.get("season_override"),
                     episode_override=payload.get("episode_override"),
                     episode_offset=payload.get("episode_offset"),
                 )

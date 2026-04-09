@@ -69,6 +69,7 @@ export const mediaApi = {
   reidentify: (id, data) => postLongTask(`/media/${id}/reidentify`, data),
   reidentifyByTargetDir: (data) => postLongTask('/media/reidentify-by-target-dir', data),
   reidentifyScope: (data) => postLongTask('/media/reidentify-scope', data),
+  batchReidentify: (data) => postLongTask('/media/batch-reidentify', data),
   adjust: (id, data) => postLongTask(`/media/${id}/adjust`, data),
   manualOrganize: (id, data) => postLongTask(`/media/${id}/manual-organize`, data),
 }
