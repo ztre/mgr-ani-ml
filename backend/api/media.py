@@ -44,7 +44,21 @@ from ..services.task_queue import enqueue_task
 router = APIRouter()
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
 ATTACHMENT_EXTS = (".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub")
-PRUNABLE_METADATA_FILENAMES = {"tvshow.nfo", "movie.nfo", "poster.jpg", "fanart.jpg"}
+PRUNABLE_METADATA_FILENAMES = {"tvshow.nfo", "movie.nfo", "season.nfo", "poster.jpg", "fanart.jpg", "banner.jpg", "backdrop.jpg"}
+
+
+def _is_prunable_metadata_file(name: str) -> bool:
+    """判断文件名是否为可清理的媒体库元数据文件（Emby/Jellyfin 刮削产物）。"""
+    lower = name.lower()
+    if lower in PRUNABLE_METADATA_FILENAMES:
+        return True
+    # 任意 .nfo 文件（如 海猫鸣泣之时 - S01E01.nfo）
+    if lower.endswith(".nfo"):
+        return True
+    # Emby 缩略图（如 海猫鸣泣之时 - S01E01-thumb.jpg）
+    if lower.endswith("-thumb.jpg") or lower.endswith("-thumb.png"):
+        return True
+    return False
 
 
 def _build_pending_mainline_relative_paths(
@@ -565,7 +579,7 @@ def _remove_prunable_metadata_files(dir_path: Path) -> list[Path]:
                 return []
         except OSError:
             return []
-        if entry.name.lower() not in PRUNABLE_METADATA_FILENAMES:
+        if not _is_prunable_metadata_file(entry.name):
             return []
         removable_files.append(entry)
 
