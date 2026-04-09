@@ -561,7 +561,16 @@ def _prune_empty_dirs_with_metadata(start_dir: Path, stop_at: Path | None) -> tu
     return removed_dirs, removed_metadata_files
 
 
+_REAL_CONTENT_EXTS = frozenset(VIDEO_EXTS) | frozenset(ATTACHMENT_EXTS)
+
+
 def _remove_prunable_metadata_files(dir_path: Path) -> list[Path]:
+    """删除目录内的 Emby/Jellyfin 元数据文件，以便后续 rmdir 能成功。
+
+    判定逻辑：目录内不含子目录、不含真实媒体文件（视频/字幕），
+    则所有剩余文件均视为可清理的元数据（刮削产物）。
+    这样能覆盖 season01-poster.jpg / clearart.png / logo.png 等任意命名的刮削文件。
+    """
     try:
         entries = list(dir_path.iterdir())
     except OSError:
@@ -579,7 +588,8 @@ def _remove_prunable_metadata_files(dir_path: Path) -> list[Path]:
                 return []
         except OSError:
             return []
-        if not _is_prunable_metadata_file(entry.name):
+        # 真实媒体内容不能删除
+        if entry.suffix.lower() in _REAL_CONTENT_EXTS:
             return []
         removable_files.append(entry)
 
