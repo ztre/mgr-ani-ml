@@ -1686,8 +1686,25 @@ def stats(db: Session = Depends(get_db)):
     total_media = q.count()
     tv_count = q.filter(MediaRecord.type == "tv").count()
     movie_count = q.filter(MediaRecord.type == "movie").count()
-    pending_manual_count = db.query(MediaRecord).filter(MediaRecord.status == "pending_manual").count()
     total_size = q.with_entities(func.sum(MediaRecord.size)).scalar() or 0
+
+    # 与 list_pending 保持一致：只统计有可见正片文件的待办条目
+    raw_pending = db.query(MediaRecord).filter(MediaRecord.status == "pending_manual").all()
+    group_ids = {int(row.sync_group_id) for row in raw_pending if getattr(row, "sync_group_id", None) is not None}
+    groups_by_id = _load_sync_group_map(db, group_ids)
+    processed_by_group = _load_processed_original_paths_by_group(db, group_ids)
+    pending_manual_count = 0
+    for row in raw_pending:
+        group = groups_by_id.get(int(row.sync_group_id)) if getattr(row, "sync_group_id", None) is not None else None
+        if not group:
+            pending_manual_count += 1
+            continue
+        if _pending_has_visible_mainline_files_fast(
+            row,
+            group,
+            processed_paths=processed_by_group.get(int(group.id), set()),
+        ):
+            pending_manual_count += 1
 
     return {
         "total_media": total_media,
