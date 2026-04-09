@@ -25,7 +25,7 @@ from ..config import settings
 from ..database import SessionLocal
 from ..models import DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
 from .emby import refresh_emby_library
-from .group_routing import resolve_movie_target_root
+from .group_routing import resolve_movie_target_root, resolve_tv_target_root
 from .linker import get_inode, is_same_inode, path_excluded
 from .metadata import scrape_movie_metadata, scrape_tv_metadata
 from .search_name_builder import build_search_name
@@ -814,8 +814,10 @@ def _run_manual_organize_core(
     if not tmdb_data:
         raise DirectoryProcessError(f"TMDB 条目不存在: {tmdb_id}")
 
-    tv_target_root = Path(group.target)
+    tv_target_root, tv_route_reason = resolve_tv_target_root(db, group, source_path=root_dir)
     movie_target_root, movie_route_reason = resolve_movie_target_root(db, group, source_path=root_dir)
+    if media_type == "tv" and tv_target_root is None:
+        raise DirectoryProcessError(f"TV 目标路径不可决策: {tv_route_reason}")
     if media_type == "movie" and movie_target_root is None:
         raise DirectoryProcessError(f"电影目标路径不可决策: {movie_route_reason}")
 
@@ -1168,8 +1170,10 @@ def _handle_media_task(db: Session, task: MediaTask, force_recompute_names: bool
         _log_cancel_phase("directory-start", f"dir={task.path}")
         return False
     source = Path(group.source)
-    tv_target_root = Path(group.target)
+    tv_target_root, tv_route_reason = resolve_tv_target_root(db, group)
     movie_target_root, movie_route_reason = resolve_movie_target_root(db, group)
+    if tv_route_reason and group.source_type != "tv":
+        append_log(f"Movie组TV目标路径路由: {tv_route_reason}: {tv_target_root}")
     if movie_route_reason:
         append_log(f"TV转移电影目标路径路由: {movie_route_reason}: {movie_target_root}")
 

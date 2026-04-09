@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h1 class="page-title">人工修正日志</h1>
-        <p class="page-subtitle">查看 `pending / 未处理项 / 人工修正` 日志，并登记人工处理结果。</p>
+        <p class="page-subtitle">查看 `待办 / 未处理项 / 人工修正` 日志，并登记人工处理结果。</p>
       </div>
       <div class="page-actions">
         <el-input

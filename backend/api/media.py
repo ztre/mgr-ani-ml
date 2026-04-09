@@ -20,7 +20,7 @@ from .logs import append_log
 from ..config import settings
 from ..database import get_db
 from ..models import DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
-from ..services.group_routing import resolve_movie_target_root
+from ..services.group_routing import resolve_movie_target_root, resolve_tv_target_root
 from ..services.linker import get_inode, path_excluded
 from ..services.parser import classify_extra_from_text, parse_movie_filename, parse_tv_filename
 from ..services.resource_tree import build_resource_summaries, build_resource_tree
@@ -510,6 +510,10 @@ def _group_target_root(db: Session, group_id: int | None, media_type: str) -> Pa
         movie_root, _reason = resolve_movie_target_root(db, group)
         if movie_root is not None:
             return movie_root
+    else:
+        tv_root, _reason = resolve_tv_target_root(db, group)
+        if tv_root is not None:
+            return tv_root
     target_value = str(group.target or "").strip()
     return Path(target_value) if target_value else None
 
@@ -1252,8 +1256,12 @@ def _run_single_reidentify(
         adjusted = pr.episode + int(data.episode_offset)
         pr = pr._replace(episode=max(1, adjusted))
 
-    target_root = Path(group.target)
-    if media_type == "movie":
+    if media_type == "tv":
+        tv_root, tv_reason = resolve_tv_target_root(db, group)
+        if tv_root is None:
+            raise HTTPException(status_code=400, detail=f"TV 目标路径不可决策: {tv_reason}")
+        target_root = tv_root
+    else:
         movie_root, reason = resolve_movie_target_root(db, group)
         if movie_root is None:
             raise HTTPException(status_code=400, detail=f"电影目标路径不可决策: {reason}")
@@ -1269,11 +1277,12 @@ def _run_single_reidentify(
     # 记录旧目标路径，用于后续清理（类型变更时旧目录可能在另一个媒体库根目录下）
     old_target_value = str(row.target_path or "").strip()
     old_target = Path(old_target_value) if old_target_value else None
-    old_target_root = Path(group.target)
     if str(row.type or "") == "movie":
-        old_movie_root, _ = resolve_movie_target_root(db, group)
-        if old_movie_root is not None:
-            old_target_root = old_movie_root
+        old_target_root_val, _ = resolve_movie_target_root(db, group)
+        old_target_root = old_target_root_val or Path(group.target)
+    else:
+        old_target_root_val, _ = resolve_tv_target_root(db, group)
+        old_target_root = old_target_root_val or Path(group.target)
 
     _link_or_fail(src, dst)
 
