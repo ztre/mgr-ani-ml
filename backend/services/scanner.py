@@ -4164,11 +4164,15 @@ def _detect_bracket_variant_as_special(filename: str) -> tuple[str | None, str |
     的文件提前降级为特典，避免其先于正片占据主视频目标槽位。
     仅在文件有集号（正片解析成功）且括号内含明确 variant 关键词时才触发。
     """
-    bracket_tokens = re.findall(r"\[([^\]]+)\]|\(([^)]+)\)", filename or "")
-    token_count = len(bracket_tokens)
-    for groups in bracket_tokens:
-        raw = next((g for g in groups if g), "")
+    fname = filename or ""
+    bracket_matches = list(re.finditer(r"\[([^\]]+)\]|\(([^)]+)\)", fname))
+    token_count = len(bracket_matches)
+    for bm in bracket_matches:
+        raw = bm.group(1) if bm.group(1) is not None else (bm.group(2) or "")
         if not raw:
+            continue
+        # 文件名开头位置 0 的 [方括号] 必然是 fansubber/release group 前缀，直接跳过
+        if bm.group(1) is not None and bm.start() == 0:
             continue
         if _is_noise_or_group_bracket_token(raw):
             continue
@@ -4204,6 +4208,8 @@ def _is_noise_or_group_bracket_token(raw: str) -> bool:
     if not token:
         return True
     compact = re.sub(r"[\s._\-]+", " ", token).strip().lower()
+    # 合并被点/空格分割的编码标签（如 "x.264" → "x 264" → "x264"）
+    compact = re.sub(r"\b([xh]) (\d{3})\b", r"\1\2", compact)
     noise_patterns = [
         r"\d{3,4}p",
         r"\d{3,4}x\d{3,4}",
