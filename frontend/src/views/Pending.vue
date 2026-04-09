@@ -123,6 +123,9 @@
             <el-form-item v-if="form.media_type === 'tv'" label="集号偏移">
               <el-input-number v-model="form.episode_offset" />
             </el-form-item>
+            <el-form-item label="强制特典模式">
+              <el-checkbox v-model="form.force_extra_context">将所选文件识别为 SP / Extra</el-checkbox>
+            </el-form-item>
           </el-form>
         </div>
 
@@ -356,6 +359,7 @@ const form = reactive({
   season: undefined,
   episode_override: undefined,
   episode_offset: undefined,
+  force_extra_context: false,
 })
 
 function normalizePendingPath(path) {
@@ -377,7 +381,7 @@ const filteredPendingFileItems = computed(() => {
   return [...pendingFileItems.value]
 })
 
-const pendingFilesTableKey = computed(() => `${Number(currentRow.value?.id || 0)}:${pendingFileView.value}:${filteredPendingFileItems.value.length}:${selectedPendingFileCount.value}`)
+const pendingFilesTableKey = computed(() => `${Number(currentRow.value?.id || 0)}:${pendingFileView.value}:${filteredPendingFileItems.value.length}`)
 
 const allFilteredPendingFilesSelected = computed(() => {
   if (!filteredPendingFileItems.value.length) return false
@@ -649,6 +653,7 @@ async function openOrganizeDialog(row) {
   form.season = undefined
   form.episode_override = undefined
   form.episode_offset = undefined
+  form.force_extra_context = false
   pendingFileItems.value = []
   pendingFilesError.value = ''
   selectedPendingPaths.value = []
@@ -773,6 +778,7 @@ async function submitOrganize() {
       episode_override: (form.media_type === 'tv' && form.season === 0) ? (form.episode_override ?? null) : null,
       episode_offset: form.media_type === 'tv' ? (form.episode_offset ?? null) : null,
       selected_paths: selectedPendingFileCount.value ? [...selectedPendingPayloadPaths.value] : null,
+      force_extra_context: form.force_extra_context || false,
     }
     dialogVisible.value = false
     const { data } = await mediaApi.manualOrganize(currentRow.value.id, payload)

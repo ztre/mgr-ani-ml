@@ -797,6 +797,7 @@ def _run_manual_organize_core(
     selected_relative_paths: list[str] | None = None,
     pending: MediaRecord | None = None,
     action_label: str = "手动整理",
+    force_extra_context: bool = False,
 ) -> tuple[int, int, bool, int]:
     task_id = current_task_id.get()
 
@@ -849,8 +850,8 @@ def _run_manual_organize_core(
         "forced_episode": (max(1, int(episode_override)) if episode_override is not None else None),
         "special_hint": False,
         "record_status": "manual_fixed",
-        "extra_context": bool(detect_special_dir_context(root_dir)[0]),
-        "strong_extra_context": bool(detect_strong_special_dir_context(root_dir)[0]),
+        "extra_context": bool(detect_special_dir_context(root_dir)[0]) or force_extra_context,
+        "strong_extra_context": bool(detect_strong_special_dir_context(root_dir)[0]) or force_extra_context,
         "_has_issues": False,
         "episode_offset": int(episode_offset) if episode_offset is not None else None,
     }
@@ -874,8 +875,16 @@ def _run_manual_organize_core(
         sum(1 for path in explicit_selected_files if _classify_manual_video_role(path, media_type) == "mainline")
         if selection_mode else 0
     )
+    _allowed_scopes_for_log: set[Path] = {
+        _resolve_manual_scope(p, source_root)
+        for p in explicit_selected_files
+        if p.suffix.lower() in VIDEO_EXTS
+    } if selection_mode else set()
     auto_selected_special_files = (
-        _collect_manual_selected_special_videos(all_media_files, explicit_selected_files, media_type=media_type)
+        _collect_manual_selected_special_videos(
+            all_media_files, explicit_selected_files, media_type=media_type,
+            source_root=source_root, allowed_scopes=_allowed_scopes_for_log,
+        )
         if selection_mode else []
     )
     media_files, auto_selected_specials, auto_selected_attachments = _expand_manual_selected_media_files(
@@ -883,6 +892,7 @@ def _run_manual_organize_core(
         root_dir,
         selected_relative_paths,
         media_type=media_type,
+        source_root=source_root,
     )
     if selection_mode and not media_files:
         raise DirectoryProcessError("未选择可处理媒体文件")
@@ -1022,6 +1032,7 @@ def run_manual_organize(
     episode_override: int | None = None,
     episode_offset: int | None = None,
     selected_relative_paths: list[str] | None = None,
+    force_extra_context: bool = False,
 ) -> tuple[int, int, bool, int]:
     return _run_manual_organize_core(
         db,
@@ -1036,6 +1047,7 @@ def run_manual_organize(
         episode_override=episode_override,
         episode_offset=episode_offset,
         selected_relative_paths=selected_relative_paths,
+        force_extra_context=force_extra_context,
         action_label="手动整理",
     )
 
@@ -2943,6 +2955,8 @@ def _collect_manual_selected_special_videos(
     selected_files: list[Path],
     *,
     media_type: str,
+    source_root: Path | None = None,
+    allowed_scopes: set[Path] | None = None,
 ) -> list[Path]:
     has_selected_mainline = any(
         _classify_manual_video_role(path, media_type) == "mainline"
@@ -2957,6 +2971,9 @@ def _collect_manual_selected_special_videos(
     for file_path in sorted(media_files or [], key=lambda value: value.as_posix()):
         if file_path in seen_paths or file_path.suffix.lower() not in VIDEO_EXTS:
             continue
+        if allowed_scopes and source_root is not None:
+            if _resolve_manual_scope(file_path, source_root) not in allowed_scopes:
+                continue
         if _classify_manual_video_role(file_path, media_type) != "special":
             continue
         auto_selected.append(file_path)
@@ -3013,15 +3030,26 @@ def _expand_manual_selected_media_files(
     selected_relative_paths: list[str] | None,
     *,
     media_type: str,
+    source_root: Path | None = None,
 ) -> tuple[list[Path], int, int]:
     selected_files = _select_manual_media_files(media_files, root_dir, selected_relative_paths)
     if not selected_relative_paths:
         return selected_files, 0, 0
 
+    _source_root = source_root or root_dir
+    # 基于显式选中的视频文件计算允许的 scope 集合，防止跨资源自动纳入
+    allowed_scopes: set[Path] = {
+        _resolve_manual_scope(p, _source_root)
+        for p in selected_files
+        if p.suffix.lower() in VIDEO_EXTS
+    }
+
     auto_selected_specials = _collect_manual_selected_special_videos(
         media_files,
         selected_files,
         media_type=media_type,
+        source_root=_source_root,
+        allowed_scopes=allowed_scopes,
     )
     selected_files = list(selected_files) + auto_selected_specials
 
@@ -3034,6 +3062,8 @@ def _expand_manual_selected_media_files(
     auto_included = 0
     for file_path in sorted(media_files or [], key=lambda value: value.as_posix()):
         if file_path in seen_paths or file_path.suffix.lower() not in ATTACHMENT_EXTS:
+            continue
+        if allowed_scopes and _resolve_manual_scope(file_path, _source_root) not in allowed_scopes:
             continue
         if not _should_auto_include_manual_attachment(
             file_path,
@@ -4188,6 +4218,8 @@ def _is_noise_or_group_bracket_token(raw: str) -> bool:
         r"av1",
         r"ma10p",
         r"hi10p",
+        r"ma\d{1,4}",
+        r"\d{1,2}p",
         r"vfr",
         r"yuv\d+p?\d*",
         r"(?:flac|aac|ac3|dts|eac3|pcm|opus)(?:x\d+)?",
@@ -4284,6 +4316,14 @@ def _is_release_group_phrase(text: str) -> bool:
         groupish_count = 0
         for tok in tokens:
             if re.fullmatch(r"(?:\d{3,4}p|\d{3,4}x\d{3,4}|\d+(?:\.\d+)?fps)", tok, flags=re.I):
+                continue
+            # 短独立数字（如 "YUI-7" 拆分出的 "7"）是组名的一部分，视为 groupish
+            if re.fullmatch(r"\d{1,2}", tok):
+                groupish_count += 1
+                continue
+            # 单字母缩写（如 "VCB-S" 拆分出的 "S"）是组名缩写的一部分，视为 groupish
+            if re.fullmatch(r"[a-z]", tok, flags=re.I):
+                groupish_count += 1
                 continue
             if re.search(r"(?:sub|studio|raws?|fansub)$", tok, flags=re.I):
                 indicator_count += 1
@@ -4903,10 +4943,27 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         and season_hint_confidence != "high"
         and _ova_dir_pattern.search(media_dir.name)
     ):
-        chosen = 0
-        append_log(
-            f"INFO: 目录名含 OVA/OAD/-hen 关键词且 TMDB 存在 Season 0，映射 season=0: dir={media_dir.name!r}"
-        )
+        # 保护：若目录内存在大量带括号集号的正片（≥5），说明这是剧情弧名目录而非 OVA 目录，
+        # 跳过 season=0 映射，避免将「幽廓篇」「无限列车篇」等常规集数误判为 Season 00。
+        _OVA_MAINLINE_THRESHOLD = 5
+        try:
+            _mainline_ep_count = sum(
+                1 for f in media_dir.iterdir()
+                if f.is_file()
+                and f.suffix.lower() in VIDEO_EXTS
+                and re.search(r"\[\d{1,3}\]", f.name)
+            )
+        except OSError:
+            _mainline_ep_count = 0
+        if _mainline_ep_count >= _OVA_MAINLINE_THRESHOLD:
+            append_log(
+                f"INFO: 目录名含 OVA/-hen 关键词但存在 {_mainline_ep_count} 个带括号集号正片（≥{_OVA_MAINLINE_THRESHOLD}），跳过 season=0 映射: dir={media_dir.name!r}"
+            )
+        else:
+            chosen = 0
+            append_log(
+                f"INFO: 目录名含 OVA/OAD/-hen 关键词且 TMDB 存在 Season 0，映射 season=0: dir={media_dir.name!r}"
+            )
 
     append_log(
         f"INFO: [season稳定] 开始: dir={media_dir.name!r}, "

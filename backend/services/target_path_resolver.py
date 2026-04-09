@@ -909,7 +909,7 @@ def _extract_attachment_distinguish_token(stem: str) -> str:
         if not text:
             continue
         lower = text.lower()
-        if re.search(r"(?:2160p|1080p|720p|x26[45]|h26[45]|hevc|av1|ma\d+p(?:[_-]?\d{3,4}p)?|flac|aac|ac3|dts|vcb|studio)", lower):
+        if re.search(r"(?:2160p|1080p|720p|x26[45]|h26[45]|hevc|av1|ma\d+p(?:[_-]?\d{3,4}p)?|main\d+|hi\d+p+|flac|aac|ac3|dts|vcb|studio)", lower):
             continue
         text = re.sub(r"\((?:NC|On\s*Air)\s*Ver\.?\)", "", text, flags=re.I).strip(" -_")
         if not text:

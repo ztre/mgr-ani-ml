@@ -160,7 +160,7 @@
 
                 <el-table-column label="归属" width="120" align="center">
                   <template #default="{ row }">
-                    <el-tag :type="bucketTagType(row.tree_bucket)" effect="light">{{ bucketLabel(row.tree_bucket) }}</el-tag>
+                    <el-tag :type="bucketTagType(row.tree_bucket)" effect="light">{{ ownershipLabel(row) }}</el-tag>
                   </template>
                 </el-table-column>
 
@@ -213,6 +213,10 @@ import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirm
 import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
 import { useResourcePoster } from '../utils/resourcePosterStore'
 
+const VIDEO_FILE_EXTENSIONS = new Set([
+  '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts', '.m2ts',
+])
+
 const loading = ref(false)
 const cleaning = ref(false)
 const syncGroups = ref([])
@@ -260,16 +264,33 @@ function formatTime(value) {
   return dayjs(value).format('YYYY-MM-DD HH:mm')
 }
 
-function bucketLabel(bucket) {
-  if (bucket === 'main') return '正片'
-  if (bucket === 'aux') return 'SP/Extras'
-  return 'Misc'
-}
-
 function bucketTagType(bucket) {
   if (bucket === 'main') return 'primary'
   if (bucket === 'aux') return 'warning'
   return 'info'
+}
+
+function extractItemExtension(item) {
+  const path = String(item?.target_path || item?.source_path || '').split('?')[0]
+  const filename = extractFilename(path)
+  const dotIndex = filename.lastIndexOf('.')
+  if (dotIndex < 0) return ''
+  return filename.slice(dotIndex).toLowerCase()
+}
+
+function isVideoItem(item) {
+  return VIDEO_FILE_EXTENSIONS.has(extractItemExtension(item))
+}
+
+function ownershipLabel(item) {
+  if (!isVideoItem(item)) {
+    if (item?.tree_bucket === 'main') return '正片附件'
+    if (item?.tree_bucket === 'aux') return 'SP附件'
+    return '附件'
+  }
+  if (item?.tree_bucket === 'main') return '正片'
+  if (item?.tree_bucket === 'aux') return 'SP/Extras'
+  return 'Misc'
 }
 
 function itemMatchesSearch(item, keyword) {
