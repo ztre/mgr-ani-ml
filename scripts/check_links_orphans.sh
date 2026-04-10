@@ -43,7 +43,6 @@ MOVIE_ROOT=""
 MAX_DEPTH=8
 NO_ATTACHMENTS=0
 SKIP_ORPHAN_CHECK=0
-VERBOSE=0
 REMAP_FROM=()
 REMAP_TO=()
 
@@ -56,7 +55,6 @@ while [[ $# -gt 0 ]]; do
         --max-depth)       MAX_DEPTH="$2";    shift 2 ;;
         --no-attachments)  NO_ATTACHMENTS=1;  shift   ;;
         --skip-orphan-check) SKIP_ORPHAN_CHECK=1; shift ;;
-        --verbose|-v)      VERBOSE=1;         shift   ;;
         --remap)
             remap_val="$2"
             remap_from_part="${remap_val%%:*}"
@@ -251,7 +249,6 @@ scan_root() {
 
         if [[ -n "${DB_REAL_PATHS[$fs_file]+x}" ]]; then
             (( ok_files++ )) || true
-            [[ $VERBOSE -eq 1 ]] && echo "    OK  $fs_file"
         else
             (( orphan_files++ )) || true
             show_orphan_count["$show_dir"]=$(( ${show_orphan_count["$show_dir"]:-0} + 1 ))
@@ -272,9 +269,9 @@ scan_root() {
 
     if [[ $orphan_files -gt 0 ]]; then
         echo "  ── 孤立文件按 show 目录汇总 ──────────────────────────────────"
-        # 遍历有孤立文件的 show 目录
-        for show_dir in $(printf '%s\n' "${!show_orphan_count[@]}" | sort); do
-            orphan_cnt="${show_orphan_count[$show_dir]}"
+        # 遍历有孤立文件的 show 目录（null 分隔避免路径含空格被词拆分）
+        while IFS= read -r -d '' show_dir; do
+            orphan_cnt="${show_orphan_count[$show_dir]:-0}"
             total_cnt="${show_total_count[$show_dir]:-0}"
             show_name="${show_dir##*/}"
 
@@ -291,7 +288,7 @@ scan_root() {
                     sed 's/^/                 /' || true
             fi
             echo ""
-        done
+        done < <(printf '%s\0' "${!show_orphan_count[@]}" | sort -z)
     else
         echo "  (该目录下无孤立文件)"
         echo ""
@@ -352,8 +349,6 @@ if [[ $SKIP_ORPHAN_CHECK -eq 0 ]]; then
             echo "                   db_path   = $db_path"
             [[ "$real_path" != "$db_path" ]] && echo "                   real_path = $real_path"
             (( broken_count++ )) || true
-        else
-            [[ $VERBOSE -eq 1 ]] && echo "  OK  $real_path"
         fi
     done < "$TMP_DB_PATHS"
 
