@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 
-from .api import auth, config as config_api, emby, inodes, logs, media, scan, sync_groups, tasks
+from .api import auth, checks, config as config_api, emby, inodes, logs, media, scan, sync_groups, tasks
 from .api.logs import cleanup_logs_if_needed
 from .config import settings
 from .database import RequestSessionLocal, SessionLocal, init_db
@@ -57,6 +57,7 @@ app.include_router(emby.router, prefix="/api/emby", tags=["emby"], dependencies=
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"], dependencies=[Depends(require_auth)])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"], dependencies=[Depends(require_auth)])
 app.include_router(inodes.router, prefix="/api/inodes", tags=["inodes"], dependencies=[Depends(require_auth)])
+app.include_router(checks.router, prefix="/api/checks", tags=["checks"], dependencies=[Depends(require_auth)])
 
 
 @app.get("/api/health")

@@ -186,7 +186,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
-import { configApi, embyApi, inodesApi, mediaApi, tasksApi } from '../api/client'
+import { checksApi, configApi, embyApi, inodesApi, mediaApi, tasksApi } from '../api/client'
 
 const form = ref({
   bangumi_api_key: '',
@@ -350,7 +350,7 @@ async function changePassword() {
 async function resetSystem() {
   try {
     await ElMessageBox.confirm(
-      '危险操作：将删除媒体记录、扫描任务与 Inode 缓存。是否继续？',
+      '危险操作：将删除媒体记录、扫描任务、Inode 缓存与检查中心数据。是否继续？',
       '第一次确认',
       { type: 'warning', confirmButtonText: '继续', cancelButtonText: '取消' }
     )
@@ -376,7 +376,7 @@ async function resetSystem() {
     )
 
     resetting.value = true
-    await Promise.all([mediaApi.deleteAll(), inodesApi.deleteAll(), tasksApi.deleteAll()])
+    await Promise.all([mediaApi.deleteAll(), inodesApi.deleteAll(), tasksApi.deleteAll(), checksApi.deleteAll()])
     ElMessage.success('系统已重置')
   } catch (e) {
     if (e !== 'cancel') {

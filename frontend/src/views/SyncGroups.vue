@@ -27,10 +27,13 @@
             <el-switch v-model="row.enabled" @change="updateGroup(row)" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" @click="openDialog(row)">编辑</el-button>
-            <el-button size="small" type="danger" @click="deleteGroup(row)">删除</el-button>
+            <el-button-group size="small">
+              <el-button @click="openDialog(row)">编辑</el-button>
+              <el-button type="info" @click="runGroupCheck(row)">检查</el-button>
+              <el-button type="danger" @click="deleteGroup(row)">删除</el-button>
+            </el-button-group>
           </template>
         </el-table-column>
       </el-table>
@@ -67,6 +70,13 @@
         <el-form-item label="启用">
           <el-switch v-model="form.enabled" />
         </el-form-item>
+        <el-form-item label="检查器">
+          <el-checkbox-group v-model="form.enabled_checks_arr">
+            <el-checkbox label="source_unrecorded">源文件未录制</el-checkbox>
+            <el-checkbox label="links_orphans">孤立链接</el-checkbox>
+            <el-checkbox label="media_path_sanity">目标路径健康</el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -80,7 +90,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
-import { syncGroupsApi } from '../api/client'
+import { syncGroupsApi, checksApi } from '../api/client'
 import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 
 const groups = ref([])
@@ -95,7 +105,25 @@ const form = ref({
   include: '',
   exclude: '',
   enabled: true,
+  enabled_checks_arr: ['source_unrecorded', 'links_orphans', 'media_path_sanity'],
 })
+
+const ALL_CHECKS = ['source_unrecorded', 'links_orphans', 'media_path_sanity']
+
+function checksArrToList(arr) {
+  if (!arr || arr.length === ALL_CHECKS.length) return null // null = use defaults
+  return arr
+}
+
+function checksToArr(enabled_checks) {
+  if (!enabled_checks) return [...ALL_CHECKS]
+  try {
+    const parsed = typeof enabled_checks === 'string' ? JSON.parse(enabled_checks) : enabled_checks
+    return Array.isArray(parsed) ? parsed : [...ALL_CHECKS]
+  } catch {
+    return [...ALL_CHECKS]
+  }
+}
 
 async function loadGroups() {
   const { data } = await syncGroupsApi.list()
@@ -109,6 +137,7 @@ function openDialog(row) {
         ...row,
         include: row.include || '',
         exclude: row.exclude || '',
+        enabled_checks_arr: checksToArr(row.enabled_checks),
       }
     : {
         name: '',
@@ -118,6 +147,7 @@ function openDialog(row) {
         include: '',
         exclude: '',
         enabled: true,
+        enabled_checks_arr: [...ALL_CHECKS],
       }
   dialogVisible.value = true
 }
@@ -125,11 +155,13 @@ function openDialog(row) {
 async function save() {
   saving.value = true
   try {
+    const payload = { ...form.value, enabled_checks: checksArrToList(form.value.enabled_checks_arr) }
+    delete payload.enabled_checks_arr
     if (editing.value) {
-      await syncGroupsApi.update(form.value.id, form.value)
+      await syncGroupsApi.update(form.value.id, payload)
       ElMessage.success('更新成功')
     } else {
-      await syncGroupsApi.create(form.value)
+      await syncGroupsApi.create(payload)
       ElMessage.success('创建成功')
     }
     dialogVisible.value = false
@@ -138,6 +170,15 @@ async function save() {
     ElMessage.error(e.response?.data?.detail || '保存失败')
   } finally {
     saving.value = false
+  }
+}
+
+async function runGroupCheck(row) {
+  try {
+    await checksApi.runGroup(row.id)
+    ElMessage.success(`检查任务「${row.name}」已入队`)
+  } catch {
+    ElMessage.error('启动失败')
   }
 }
 

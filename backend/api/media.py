@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections import defaultdict
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session, object_session
 from .logs import append_log
 from ..config import settings
 from ..database import get_db
-from ..models import DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
+from ..models import CheckIssue, DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
 from ..services.group_routing import resolve_movie_target_root, resolve_tv_target_root
 from ..services.linker import get_inode, path_excluded
 from ..services.parser import classify_extra_from_text, parse_movie_filename, parse_tv_filename
@@ -37,11 +38,13 @@ from ..services.scanner import (
     pop_scan_cancel_flag,
     reidentify_by_target_dir,
     run_manual_organize,
+    run_source_dir_organize,
     tag_task_type_with_issue,
 )
 from ..services.task_queue import enqueue_task
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 VIDEO_EXTS = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv")
 ATTACHMENT_EXTS = (".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub")
 PRUNABLE_METADATA_FILENAMES = {"tvshow.nfo", "movie.nfo", "season.nfo", "poster.jpg", "fanart.jpg", "banner.jpg", "backdrop.jpg"}
@@ -1158,6 +1161,7 @@ def _run_reidentify_scope(
         raise HTTPException(status_code=404, detail="待修正记录不存在")
 
     staged = _stage_batch_delete(db, rows, delete_files=True)
+    _cleanup_check_issues_for_records(db, rows)
     effective_season_override = season_override if season_override is not None else season
     try:
         processed, failed, has_issues = reidentify_by_target_dir(
@@ -1301,6 +1305,8 @@ def _run_single_reidentify(
         except OSError:
             pass
 
+    # Clean up check issues that pointed at the old target path (before overwriting it)
+    _cleanup_check_issues_for_records(db, [row])
     row.tmdb_id = data.tmdb_id
     row.type = media_type
     row.target_path = str(dst)
@@ -2372,6 +2378,7 @@ def delete_all_media(db: Session = Depends(get_db)):
 @router.post("/deduplicate")
 def deduplicate_media(db: Session = Depends(get_db)):
     # keep newest row per (sync_group_id, original_path)
+    # NOTE: preserved for backwards compatibility; new UI uses /wash/* instead.
     sql = text(
         """
         DELETE FROM media_records
@@ -2392,6 +2399,331 @@ def deduplicate_media(db: Session = Depends(get_db)):
     db.commit()
     deleted = result.rowcount or 0
     return {"message": f"去重完成，删除 {deleted} 条重复记录", "deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# Active wash (洗版) endpoints
+# ---------------------------------------------------------------------------
+
+class WashExecuteRequest(BaseModel):
+    sync_group_id: int | None = None
+    tmdb_id: int
+    season: int | None = None
+    keep_ids: list[int]
+
+
+@router.get("/wash/candidates")
+def get_wash_candidates_endpoint(
+    tmdb_id: int = Query(...),
+    sync_group_id: int | None = Query(default=None),
+    season: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    from ..services.wash import get_wash_candidates
+
+    result = get_wash_candidates(db, sync_group_id, tmdb_id, season)
+    return {
+        "sync_group_id": result.sync_group_id,
+        "tmdb_id": result.tmdb_id,
+        "season": result.season,
+        "total_records": result.total_records,
+        "candidate_groups": [
+            {
+                "key": cg.key,
+                "label": cg.label,
+                "records": cg.records,
+                "recommended": cg.recommended,
+                "record_count": cg.record_count,
+                "size_human": cg.size_human,
+                "total_size": cg.total_size,
+            }
+            for cg in result.candidate_groups
+        ],
+    }
+
+
+@router.get("/wash/source-scan")
+def get_wash_source_scan(
+    tmdb_id: int = Query(...),
+    sync_group_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Scan sync-group source directories for all dirs related to tmdb_id.
+
+    Returns structured entries for both recorded and unrecorded directories,
+    each with a list of contained video files.
+    """
+    from ..services.wash import scan_source_dirs_for_tmdb
+
+    entries = scan_source_dirs_for_tmdb(db, tmdb_id, sync_group_id)
+    return {
+        "tmdb_id": tmdb_id,
+        "total": len(entries),
+        "entries": [
+            {
+                "dir_path": e.dir_path,
+                "sync_group_id": e.sync_group_id,
+                "is_recorded": e.is_recorded,
+                "record_count": e.record_count,
+                "group_key": e.group_key,
+                "video_count": e.video_count,
+                "video_files": e.video_files,
+            }
+            for e in entries
+        ],
+    }
+
+
+@router.post("/wash/execute")
+def execute_wash_endpoint(req: WashExecuteRequest, db: Session = Depends(get_db)):
+    from ..services.wash import execute_wash
+
+    if not req.keep_ids:
+        raise HTTPException(status_code=400, detail="keep_ids 不能为空")
+
+    _sync_group_id = req.sync_group_id
+    _tmdb_id = req.tmdb_id
+    _season = req.season
+    _keep_ids = list(req.keep_ids)
+
+    # Derive a human-readable task label from the sync group if known
+    if _sync_group_id is not None:
+        group = db.query(SyncGroup).filter(SyncGroup.id == _sync_group_id).first()
+        _group_name = group.name if group else str(_sync_group_id)
+    else:
+        _group_name = f"tmdb:{_tmdb_id}"
+
+    task_type = (
+        f"wash:season:{_group_name}"
+        if _season is not None
+        else f"wash:resource:{_group_name}"
+    )
+
+    from ..services.task_queue import enqueue_task
+
+    def _runner(worker_db, _task):
+        execute_wash(worker_db, _sync_group_id, _tmdb_id, _season, _keep_ids)
+
+    task = enqueue_task(
+        db,
+        task_type=task_type,
+        target_id=_sync_group_id,
+        target_name=_group_name,
+        runner=_runner,
+        queued_message=f"洗版任务「{_group_name}」已进入队列",
+    )
+    return {"task_id": task.id, "status": task.status}
+
+
+# ---------------------------------------------------------------------------
+# Wash: source-dir organize (对扫描发现的未记录源目录执行修正整理)
+# ---------------------------------------------------------------------------
+
+class SourceDirOrganizeRequest(BaseModel):
+    source_dir: str
+    sync_group_id: int
+    media_type: str
+    tmdb_id: int
+    title: str | None = None
+    year: int | None = None
+    season_override: int | None = None
+    episode_override: int | None = None
+    episode_offset: int | None = None
+    # If True, execute wash (delete existing records/hardlinks) before organize
+    pre_wash: bool = False
+    # Record IDs to KEEP during pre-wash; empty list = delete all existing records
+    wash_keep_ids: list[int] = []
+
+
+def _run_source_dir_organize_task(
+    db: Session,
+    *,
+    task: ScanTask,
+    group: SyncGroup,
+    payload: dict,
+) -> dict:
+    from ..services.wash import execute_wash
+
+    source_dir = payload["source_dir"]
+    tmdb_id = payload["tmdb_id"]
+    init_scan_cancel_flag(task.id)
+    try:
+        wash_result = None
+        if payload.get("pre_wash"):
+            wash_keep_ids: list[int] = payload.get("wash_keep_ids") or []
+            wash_season: int | None = payload.get("season_override")
+            wash_result = execute_wash(
+                db,
+                sync_group_id=group.id,
+                tmdb_id=tmdb_id,
+                season=wash_season,
+                keep_ids=wash_keep_ids,
+            )
+            _log.info(
+                "Pre-wash before source-dir organize: deleted %d records, %d hardlinks (tmdb_id=%d season=%s)",
+                len(wash_result.deleted_record_ids), wash_result.deleted_hardlinks,
+                tmdb_id, wash_season,
+            )
+
+        processed, failed, has_issues = run_source_dir_organize(
+            db,
+            group=group,
+            media_type=payload["media_type"],
+            tmdb_id=tmdb_id,
+            source_dir=source_dir,
+            title_override=payload.get("title"),
+            year_override=payload.get("year"),
+            season_override=payload.get("season_override"),
+            episode_override=payload.get("episode_override"),
+            episode_offset=payload.get("episode_offset"),
+        )
+        summary = f"源目录修正完成: 成功 {processed}，失败 {failed}"
+        if wash_result:
+            summary += f"（洗版已清理旧记录 {len(wash_result.deleted_record_ids)} 条）"
+        return {
+            "message": summary,
+            "processed": processed,
+            "failed": failed,
+            "has_issues": has_issues,
+        }
+    except TaskCancelledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DirectoryProcessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        pop_scan_cancel_flag(task.id)
+
+
+@router.post("/wash/source-dir-organize")
+def source_dir_organize_endpoint(req: SourceDirOrganizeRequest, db: Session = Depends(get_db)):
+    source_dir = (req.source_dir or "").strip()
+    if not source_dir:
+        raise HTTPException(status_code=400, detail="source_dir 不能为空")
+    group = _require_sync_group(db, req.sync_group_id)
+
+    payload = req.model_dump()
+    payload["source_dir"] = source_dir
+    dir_name = Path(source_dir).name or source_dir
+
+    return _enqueue_logged_media_task(
+        db,
+        task_type=f"reidentify:source:{group.name}",
+        target_id=group.id,
+        target_name=dir_name,
+        start_message=f"开始源目录修正整理: {dir_name}",
+        queued_message=f"源目录修正整理任务已进入队列: {dir_name}",
+        success_message_factory=lambda r: r.get("message", "源目录修正整理完成"),
+        runner=lambda worker_db, task: _run_source_dir_organize_task(
+            worker_db,
+            task=task,
+            group=group,
+            payload=payload,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Manual record import (手动新增成品记录)
+# ---------------------------------------------------------------------------
+
+class ManualRecordIn(BaseModel):
+    sync_group_id: int
+    original_path: str
+    target_path: str
+    season: int | None = None
+    category: Literal["episode", "special", "extra"] | None = None
+    file_type: Literal["video", "attachment"] | None = None
+
+
+@router.post("/manual-record")
+def create_manual_record(req: ManualRecordIn, db: Session = Depends(get_db)):
+    from ..services.manual_record import import_manual_record
+
+    try:
+        result = import_manual_record(
+            db,
+            sync_group_id=req.sync_group_id,
+            original_path=req.original_path,
+            target_path=req.target_path,
+            season=req.season,
+            category=req.category,
+            file_type=req.file_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "id": result.id,
+        "status": result.status,
+        "idempotent": result.idempotent,
+        "closed_issues_count": result.closed_issues_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Filesystem path autocomplete (fs/list)
+# ---------------------------------------------------------------------------
+
+@router.get("/fs/list")
+def fs_list(prefix: str = Query("", description="Path prefix to list under")) -> dict:
+    """Return immediate children of the directory matching *prefix*.
+
+    If *prefix* ends with a path separator (or is empty) we list that directory.
+    Otherwise we list the parent and filter entries that start with the basename
+    of *prefix*.  Used by the path autocomplete pickers in the UI.
+
+    Returns at most 200 entries for performance.
+    """
+    import os as _os
+
+    prefix = (prefix or "").strip()
+
+    # Determine which directory to scan and what filter to apply
+    if not prefix:
+        # Root-level: list filesystem roots (/ on Linux, drives on Windows)
+        roots = []
+        if os.name == "nt":
+            import string as _string
+            roots = [f"{d}:\\" for d in _string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+        else:
+            roots = ["/"]
+        return {"entries": [{"path": r, "is_dir": True, "name": r} for r in roots], "parent": ""}
+
+    # Normalize separators
+    prefix_norm = prefix.replace("\\", "/")
+
+    if prefix_norm.endswith("/"):
+        scan_dir = prefix_norm.rstrip("/") or "/"
+        filter_prefix = ""
+    else:
+        scan_dir = str(Path(prefix_norm).parent)
+        filter_prefix = Path(prefix_norm).name.lower()
+
+    scan_path = Path(scan_dir)
+    if not scan_path.exists() or not scan_path.is_dir():
+        return {"entries": [], "parent": scan_dir}
+
+    try:
+        entries = []
+        with _os.scandir(scan_path) as it:
+            for entry in it:
+                if filter_prefix and not entry.name.lower().startswith(filter_prefix):
+                    continue
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=True)
+                    full = entry.path.replace("\\", "/")
+                    if is_dir and not full.endswith("/"):
+                        full += "/"
+                    entries.append({"path": full, "name": entry.name, "is_dir": is_dir})
+                except OSError:
+                    continue
+                if len(entries) >= 200:
+                    break
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+    except PermissionError:
+        return {"entries": [], "parent": scan_dir}
+
+    return {"entries": entries, "parent": scan_dir}
 
 
 def _tmdb_get_by_id(media_type: str, tmdb_id: int) -> dict | None:
@@ -2589,6 +2921,90 @@ def _cleanup_nonreview_pending_logs(rows: list[MediaRecord]) -> dict[str, int]:
         "pending_logs_removed": pending_removed,
         "unprocessed_logs_removed": unprocessed_removed,
     }
+
+def _cleanup_check_issues_for_records(db: Session, rows: list[MediaRecord]) -> int:
+    """Delete CheckIssue rows that are associated with the given MediaRecords.
+
+    Matches on:
+    - resource_dir equals the parent of any record's target_path  (covers reidentify old dirs)
+    - target_path prefix matches any record's target_path  (covers individual file issues)
+    - tmdb_id + season + sync_group_id  (covers wash-scope issues)
+    Returns the number of deleted issues.
+    """
+    if not rows:
+        return 0
+
+    # Collect resource dirs (parent of target_path) and exact target paths from the rows
+    resource_dirs: set[str] = set()
+    target_paths: set[str] = set()
+    tmdb_season_keys: set[tuple] = set()  # (sync_group_id, tmdb_id, season | None)
+
+    for r in rows:
+        if r.target_path:
+            tp = str(r.target_path).replace("\\", "/").rstrip("/")
+            target_paths.add(tp)
+            resource_dirs.add(str(Path(r.target_path).parent).replace("\\", "/").rstrip("/"))
+        if r.tmdb_id:
+            tmdb_season_keys.add((r.sync_group_id, r.tmdb_id, r.season if hasattr(r, 'season') else None))
+
+    # Also capture season from target_path (e.g. ".../Season 01/...") as a hint
+    # but we'll rely on direct field matching only to stay precise.
+
+    issues_q = db.query(CheckIssue)
+
+    # Build per-record conditions: resource_dir match OR target_path prefix match
+    from sqlalchemy import or_ as _or
+    conditions = []
+
+    for rd in resource_dirs:
+        conditions.append(CheckIssue.resource_dir == rd)
+
+    for tp in target_paths:
+        normalized_tp = tp.lower()
+        # exact match or sub-path (e.g. subs/attachments under same target dir)
+        conditions.append(
+            func.lower(func.replace(func.coalesce(CheckIssue.target_path, ""), "\\\\", "/")) == normalized_tp
+        )
+        conditions.append(
+            func.lower(func.replace(func.coalesce(CheckIssue.source_path, ""), "\\\\", "/")) == normalized_tp
+        )
+
+    if not conditions:
+        return 0
+
+    to_delete = db.query(CheckIssue).filter(_or(*conditions)).all()
+    count = len(to_delete)
+    for issue in to_delete:
+        db.delete(issue)
+    if count:
+        _log.info("Cleaned up %d CheckIssue record(s) for %d affected media records", count, len(rows))
+    return count
+
+
+def _cleanup_check_issues_for_tmdb(
+    db: Session,
+    sync_group_id: int | None,
+    tmdb_id: int,
+    season: int | None,
+) -> int:
+    """Delete CheckIssue rows by tmdb_id + optional season + optional sync_group_id.
+    Used after wash operations."""
+    q = db.query(CheckIssue).filter(CheckIssue.tmdb_id == tmdb_id)
+    if sync_group_id is not None:
+        q = q.filter(CheckIssue.sync_group_id == sync_group_id)
+    if season is not None:
+        q = q.filter(CheckIssue.season == season)
+    issues = q.all()
+    count = len(issues)
+    for issue in issues:
+        db.delete(issue)
+    if count:
+        _log.info(
+            "Cleaned up %d CheckIssue record(s) for tmdb_id=%d season=%s sync_group_id=%s",
+            count, tmdb_id, season, sync_group_id,
+        )
+    return count
+
 
 def _media_to_dict(row: MediaRecord) -> dict:
     is_dir_pending = False

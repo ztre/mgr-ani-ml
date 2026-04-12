@@ -8,6 +8,7 @@ const routes = [
   { path: '/pending', component: () => import('../views/Pending.vue'), meta: { title: '待办清单' } },
   { path: '/pending-logs', component: () => import('../views/PendingLogs.vue'), meta: { title: '人工修正日志' } },
   { path: '/media', component: () => import('../views/Media.vue'), meta: { title: '媒体记录' } },
+  { path: '/checks', component: () => import('../views/Checks.vue'), meta: { title: '检查中心' } },
   { path: '/inodes', component: () => import('../views/Inodes.vue'), meta: { title: 'Inode 管理' } },
   { path: '/config', component: () => import('../views/Config.vue'), meta: { title: '配置' } },
 ]

@@ -24,7 +24,6 @@
         <el-button :loading="loading" @click="loadResources">
           <el-icon><Refresh /></el-icon>
         </el-button>
-        <el-button type="warning" plain @click="deduplicateRecords">记录去重</el-button>
       </div>
     </div>
 
@@ -120,6 +119,12 @@
             <el-button v-if="drawerResource?.type === 'movie'" type="primary" plain :disabled="!drawerResource?.resource_dir" @click="openDirFixDialog">
               修正整个资源
             </el-button>
+            <el-button v-if="drawerResource?.type === 'movie'" type="warning" plain :disabled="!drawerResource?.tmdb_id" @click="openWashDialog(drawerResource, null)">
+              发起洗版
+            </el-button>
+            <el-button type="success" plain :disabled="!drawerResource" @click="openManualRecordDialog(drawerResource)">
+              新增记录
+            </el-button>
           </div>
           <div class="drawer-toolbar-right">
             <span class="selection-summary">已选 {{ selectedDrawerItems.length }} 条</span>
@@ -174,6 +179,15 @@
                 @click="openSeasonFixDialog(currentNode)"
               >
                 修正该 Season
+              </el-button>
+              <el-button
+                v-if="currentNode.scope?.scope_level === 'season' && drawerResource?.tmdb_id"
+                type="warning"
+                plain
+                size="small"
+                @click="openWashDialog(drawerResource, currentNode.season)"
+              >
+                洗版该 Season
               </el-button>
               <el-dropdown trigger="click" @command="(cmd) => onDeleteNodeCommand(currentNode, cmd)">
                 <el-button type="danger" plain size="small">删除 {{ currentNode.season != null ? 'Season' : '节点' }}</el-button>
@@ -475,15 +489,15 @@
 
     <el-dialog
       v-model="dirFixDialogVisible"
-      :title="dirFixMode === 'season' ? 'Season 修正重整' : '整组资源修正'"
+      :title="dirFixMode === 'source' ? '源目录修正整理' : dirFixMode === 'season' ? 'Season 修正重整' : '整组资源修正'"
       width="560px"
       append-to-body
       destroy-on-close
     >
       <el-form ref="dirFixFormRef" :model="dirFixForm" label-width="110px">
         <el-form-item label="待办目录">
-          <div class="path-preview" :title="dirFixMode === 'season' ? currentNode?.label : drawerResource?.resource_dir">
-            {{ dirFixMode === 'season' ? `${drawerResource?.resource_dir || '-'} / ${currentNode?.label || '-'}` : (drawerResource?.resource_dir || '-') }}
+          <div class="path-preview" :title="dirFixMode === 'source' ? dirFixSourceEntry?.dir_path : dirFixMode === 'season' ? currentNode?.label : drawerResource?.resource_dir">
+            {{ dirFixMode === 'source' ? (dirFixSourceEntry?.dir_path || '-') : dirFixMode === 'season' ? `${drawerResource?.resource_dir || '-'} / ${currentNode?.label || '-'}` : (drawerResource?.resource_dir || '-') }}
           </div>
         </el-form-item>
         <el-form-item label="媒体类型" required>
@@ -597,6 +611,178 @@
         </el-scrollbar>
       </div>
     </el-dialog>
+
+    <!-- Wash Candidates Dialog -->
+    <el-dialog
+      v-model="washDialogVisible"
+      title="洗版候选预览"
+      width="860px"
+      append-to-body
+      destroy-on-close
+    >
+      <!-- ── Source directory scan (auto-triggered, top-5 unrecorded by name match) ── -->
+      <div class="wash-section-title">
+        <span>目录深度扫描</span>
+        <el-tag size="small" type="warning" effect="plain">未记录新目录 · 匹配度倒序前5</el-tag>
+        <el-button
+          size="small"
+          :loading="washScanLoading"
+          style="margin-left:auto"
+          @click="runWashSourceScan"
+        >重新扫描</el-button>
+      </div>
+
+      <div v-if="washScanLoading" v-loading="true" style="min-height:80px"></div>
+      <template v-else-if="washScanEntries !== null">
+        <el-alert
+          v-if="!washScanTopEntries.length"
+          type="success"
+          title="source 目录下未发现含视频文件的未记录子目录。"
+          show-icon
+          :closable="false"
+        />
+        <el-table
+          v-else
+          :data="washScanTopEntries"
+          style="width:100%"
+          row-key="dir_path"
+          @expand-change="onWashScanExpand"
+        >
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="wash-scan-files">
+                <div
+                  v-for="f in row.video_files"
+                  :key="f.rel_path"
+                  class="wash-scan-file-row"
+                >
+                  <el-icon class="wash-scan-file-icon"><Film /></el-icon>
+                  <span class="wash-scan-file-name" :title="f.rel_path">{{ f.rel_path }}</span>
+                  <span class="wash-scan-file-size">{{ f.size_human }}</span>
+                </div>
+                <div v-if="!row.video_files?.length" class="wash-scan-empty">无正片文件</div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="目录" min-width="300">
+            <template #default="{ row }">
+              <span class="wash-scan-dir-path" :title="row.dir_path">{{ row.dir_path }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="正片数" width="80" align="center">
+            <template #default="{ row }">{{ row.video_count }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="100" align="center">
+            <template #default="{ row }">
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                @click="openScanEntryFixDialog(row)"
+              >修正整理</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+
+      <template #footer>
+        <el-button @click="washDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Manual Record Dialog -->
+    <el-dialog
+      v-model="manualRecordDialogVisible"
+      title="手动新增成品记录"
+      width="560px"
+      append-to-body
+      destroy-on-close
+    >
+      <el-form ref="manualRecordFormRef" :model="manualRecordForm" label-width="100px">
+        <el-form-item
+          label="源文件路径"
+          prop="original_path"
+          :rules="[{ required: true, message: '请填写源文件路径', trigger: 'blur' }]"
+        >
+          <el-autocomplete
+            v-model="manualRecordForm.original_path"
+            placeholder="源文件绝对路径"
+            :fetch-suggestions="(q, cb) => fetchPathSuggestions(q, cb)"
+            value-key="path"
+            :trigger-on-focus="false"
+            highlight-first-item
+            style="width: 100%"
+            @select="(item) => { manualRecordForm.original_path = item.path }"
+          >
+            <template #default="{ item }">
+              <span style="margin-right:6px">{{ item.is_dir ? '📁' : '📄' }}</span>
+              <span>{{ item.name }}</span>
+            </template>
+          </el-autocomplete>
+        </el-form-item>
+        <el-form-item
+          label="目标路径"
+          prop="target_path"
+          :rules="[{ required: true, message: '请填写目标路径', trigger: 'blur' }]"
+        >
+          <el-autocomplete
+            v-model="manualRecordForm.target_path"
+            placeholder="硬链接目标绝对路径"
+            :fetch-suggestions="(q, cb) => fetchPathSuggestions(q, cb)"
+            value-key="path"
+            :trigger-on-focus="false"
+            highlight-first-item
+            style="width: 100%"
+            @select="(item) => { manualRecordForm.target_path = item.path }"
+          >
+            <template #default="{ item }">
+              <span style="margin-right:6px">{{ item.is_dir ? '📁' : '📄' }}</span>
+              <span>{{ item.name }}</span>
+            </template>
+          </el-autocomplete>
+        </el-form-item>
+        <el-form-item
+          label="文件类型"
+          prop="file_type"
+          :rules="[{ required: true, message: '请选择文件类型', trigger: 'change' }]"
+        >
+          <el-radio-group v-model="manualRecordForm.file_type">
+            <el-radio value="video">视频</el-radio>
+            <el-radio value="attachment">附件</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item 
+          label="内容分类"
+          prop="category"
+          :rules="[{ required: true, message: '请选择内容分类', trigger: 'change' }]"
+        >
+          <el-select v-model="manualRecordForm.category" placeholder="请选择" clearable style="width: 180px">
+            <el-option label="正片" value="episode" />
+            <el-option label="SP / 特典" value="special" />
+            <el-option label="Extra" value="extra" />
+          </el-select>
+        </el-form-item>
+        <el-form-item
+          label="季度"
+          prop="season"
+          :rules="[{ required: true, message: '请填写季度', trigger: 'change' }]"
+        >
+          <el-input-number
+            v-model="manualRecordForm.season"
+            :min="1"
+            :max="99"
+            :step="1"
+            controls-position="right"
+            placeholder="季度"
+            style="width: 120px"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="manualRecordDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="manualRecordSaving" @click="submitManualRecord">提交记录</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -605,7 +791,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, r
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Film, Monitor, Refresh, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { mediaApi, tasksApi } from '../api/client'
+import { mediaApi, syncGroupsApi, tasksApi, washApi, manualRecordApi } from '../api/client'
 import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
 import { useResourcePoster } from '../utils/resourcePosterStore'
@@ -656,8 +842,80 @@ const dirFixDialogVisible = ref(false)
 const dirFixing = ref(false)
 const dirFixMode = ref('resource')
 const dirFixScope = ref(null)
+const dirFixSourceEntry = ref(null)
 const dirFixFormRef = ref(null)
 const dirFixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: undefined, season: undefined, episode_override: undefined, episode_offset: undefined })
+
+// Wash dialog
+const washDialogVisible = ref(false)
+const washParams = ref({ sync_group_id: null, tmdb_id: null, season: null })
+const washScanEntries = ref(null)   // null = not yet scanned
+const washScanLoading = ref(false)
+
+function _scoreNameMatch(dirPath, ...refs) {
+  if (!dirPath) return 0
+  const _basename = (s) => (s || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || s || ''
+  const _normalize = (s) => (s || '').toLowerCase()
+    .replace(/\[tmdbid=[^\]]*\]/gi, '')
+    .replace(/[\s\[\]()\-_&+,.。·！!【】「」〔〕《》]/g, ' ')
+    .replace(/\s+/g, ' ').trim()
+  const _tokens = (s) => s.split(' ').filter((t) => t.length > 0)
+  const _bigrams = (s) => {
+    const bg = new Set()
+    const clean = s.replace(/ /g, '')
+    for (let i = 0; i < clean.length - 1; i++) bg.add(clean.slice(i, i + 2))
+    return bg
+  }
+
+  const targetNorm = _normalize(_basename(dirPath))
+  if (!targetNorm) return 0
+  const targetTokenSet = new Set(_tokens(targetNorm))
+  const targetBg = _bigrams(targetNorm)
+
+  let best = 0
+  for (const ref of refs) {
+    if (!ref) continue
+    const refNorm = _normalize(ref)
+    if (!refNorm) continue
+
+    // Jaccard on tokens
+    const refTokens = _tokens(refNorm)
+    if (refTokens.length) {
+      const intersection = refTokens.filter((t) => targetTokenSet.has(t)).length
+      const union = new Set([...refTokens, ...targetTokenSet]).size
+      if (union) best = Math.max(best, intersection / union)
+    }
+
+    // Jaccard on character bi-grams (better for CJK cross-language matching)
+    const refBg = _bigrams(refNorm)
+    if (refBg.size && targetBg.size) {
+      let inter = 0
+      for (const bg of refBg) { if (targetBg.has(bg)) inter++ }
+      best = Math.max(best, inter / (refBg.size + targetBg.size - inter))
+    }
+  }
+  return best
+}
+
+const washScanTopEntries = computed(() => {
+  if (!washScanEntries.value) return []
+  const { title } = extractResourceTitleAndYear(drawerResource.value)
+  const resourceDirBase = drawerResource.value?.resource_dir
+    ? drawerResource.value.resource_dir.replace(/\\/g, '/').split('/').filter(Boolean).pop()
+    : ''
+  return washScanEntries.value
+    .filter((e) => !e.is_recorded)
+    .map((e) => ({ ...e, _score: _scoreNameMatch(e.dir_path, title, resourceDirBase) }))
+    .sort((a, b) => b._score - a._score || a.dir_path.localeCompare(b.dir_path))
+    .slice(0, 5)
+})
+
+// Manual record dialog
+const manualRecordDialogVisible = ref(false)
+const manualRecordSaving = ref(false)
+const manualRecordFormRef = ref(null)
+const manualRecordForm = reactive({ sync_group_id: null, original_path: '', target_path: '', season: null, category: null, file_type: null })
+const syncGroupOptions = ref([])
 const tmdbSearchDialogVisible = ref(false)
 const tmdbSearchLoading = ref(false)
 const tmdbSearchKeyword = ref('')
@@ -720,7 +978,9 @@ function onFloatingPosterLeave(el, done) {
 
 function formatTime(value) {
   if (!value) return '-'
-  return dayjs(value).format('YYYY-MM-DD HH:mm')
+  const s = String(value)
+  const normalized = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z'
+  return dayjs(normalized).format('YYYY-MM-DD HH:mm')
 }
 
 function formatSize(size) {
@@ -1599,8 +1859,12 @@ function openSeasonFixDialog(node) {
 }
 
 async function submitDirFix() {
-  if (!drawerResource.value?.resource_dir) {
+  if (dirFixMode.value !== 'source' && !drawerResource.value?.resource_dir) {
     ElMessage.warning('当前资源目录不可用')
+    return
+  }
+  if (dirFixMode.value === 'source' && !dirFixSourceEntry.value?.dir_path) {
+    ElMessage.warning('源目录信息不可用')
     return
   }
   try {
@@ -1613,17 +1877,28 @@ async function submitDirFix() {
     return
   }
   dirFixing.value = true
-  openFixMonitor(
-    buildFixMonitorMatchSpec({
-      typePrefix: dirFixMode.value === 'season' ? 'reidentify:season:' : 'reidentify:resource:',
-      targetName: dirFixMode.value === 'season'
-        ? buildScopedFixMonitorTargetName(drawerResource.value?.resource_dir, dirFixScope.value?.group_label || currentNode.value?.label || '')
-        : extractFilename(drawerResource.value?.resource_dir),
-      targetLabel: dirFixMode.value === 'season'
-        ? `季度修正 · ${buildScopedFixMonitorTargetName(drawerResource.value?.resource_dir, dirFixScope.value?.group_label || currentNode.value?.label || '')}`
-        : `整组修正 · ${extractFilename(drawerResource.value?.resource_dir)}`,
-    }),
-  )
+  if (dirFixMode.value === 'source') {
+    const entryName = dirFixSourceEntry.value.dir_path.split('/').filter(Boolean).pop() || dirFixSourceEntry.value.dir_path
+    openFixMonitor(
+      buildFixMonitorMatchSpec({
+        typePrefix: 'reidentify:source:',
+        targetName: entryName,
+        targetLabel: `源目录修正 · ${entryName}`,
+      }),
+    )
+  } else {
+    openFixMonitor(
+      buildFixMonitorMatchSpec({
+        typePrefix: dirFixMode.value === 'season' ? 'reidentify:season:' : 'reidentify:resource:',
+        targetName: dirFixMode.value === 'season'
+          ? buildScopedFixMonitorTargetName(drawerResource.value?.resource_dir, dirFixScope.value?.group_label || currentNode.value?.label || '')
+          : extractFilename(drawerResource.value?.resource_dir),
+        targetLabel: dirFixMode.value === 'season'
+          ? `季度修正 · ${buildScopedFixMonitorTargetName(drawerResource.value?.resource_dir, dirFixScope.value?.group_label || currentNode.value?.label || '')}`
+          : `整组修正 · ${extractFilename(drawerResource.value?.resource_dir)}`,
+      }),
+    )
+  }
   try {
     const payload = {
       media_type: dirFixForm.media_type,
@@ -1634,18 +1909,35 @@ async function submitDirFix() {
       episode_override: (dirFixForm.media_type === 'tv' && dirFixForm.season === 0) ? (dirFixForm.episode_override ?? undefined) : undefined,
       episode_offset: dirFixForm.media_type === 'tv' ? (dirFixForm.episode_offset ?? undefined) : undefined,
     }
-    const { data } = dirFixMode.value === 'season'
-      ? await mediaApi.reidentifyScope({
+    let data
+    if (dirFixMode.value === 'source') {
+      // Always pre-wash: delete all existing records for this tmdb_id first
+      // to free target paths before organizing the new source directory.
+      // wash_keep_ids=[] means delete all (the new directory has no DB records yet).
+      ;({ data } = await washApi.sourceOrganize({
+        source_dir: dirFixSourceEntry.value.dir_path,
+        sync_group_id: dirFixSourceEntry.value.sync_group_id,
+        pre_wash: true,
+        wash_keep_ids: [],
+        ...payload,
+      }))
+    } else if (dirFixMode.value === 'season') {
+      ;({ data } = await mediaApi.reidentifyScope({
           ...(dirFixScope.value || {}),
           scope_tmdb_id: dirFixScope.value?.tmdb_id ?? drawerResource.value?.tmdb_id ?? undefined,
           ...payload,
-        })
-      : await mediaApi.reidentifyByTargetDir({
+        }))
+    } else {
+      ;({ data } = await mediaApi.reidentifyByTargetDir({
           target_dir: drawerResource.value.resource_dir,
           ...payload,
-        })
+        }))
+    }
     await attachFixMonitorTask(data?.task_id)
-    ElMessage.success(data?.message || (dirFixMode.value === 'season' ? 'Season 修正任务已进入队列' : '整组修正任务已进入队列'))
+    const successMsg = dirFixMode.value === 'source'
+      ? '源目录修正整理任务已进入队列'
+      : dirFixMode.value === 'season' ? 'Season 修正任务已进入队列' : '整组修正任务已进入队列'
+    ElMessage.success(data?.message || successMsg)
     dirFixDialogVisible.value = false
   } catch (error) {
     await refreshFixMonitorTask()
@@ -1656,7 +1948,10 @@ async function submitDirFix() {
       resetFixMonitorState()
       fixMonitorVisible.value = false
     }
-    ElMessage.error(error?.response?.data?.detail || error?.message || (dirFixMode.value === 'season' ? 'Season 修正失败' : '整组修正失败'))
+    const errMsg = dirFixMode.value === 'source'
+      ? '源目录修正失败'
+      : dirFixMode.value === 'season' ? 'Season 修正失败' : '整组修正失败'
+    ElMessage.error(error?.response?.data?.detail || error?.message || errMsg)
   } finally {
     dirFixing.value = false
     fixMonitorRequestPending.value = false
@@ -1664,15 +1959,117 @@ async function submitDirFix() {
   }
 }
 
-async function deduplicateRecords() {
+
+
+// ── Wash handlers ────────────────────────────────────────────────────────────
+
+async function openWashDialog(resource, season) {
+  if (!resource?.tmdb_id) return
+  washParams.value = { sync_group_id: resource.sync_group_id ?? null, tmdb_id: resource.tmdb_id, season: season ?? null }
+  washScanEntries.value = null
+  washDialogVisible.value = true
+  await runWashSourceScan()
+}
+
+
+
+// ── Manual Record handlers ────────────────────────────────────────────────────
+
+async function runWashSourceScan() {
+  if (!washParams.value.tmdb_id) return
+  washScanLoading.value = true
   try {
-    await ElMessageBox.confirm('将按原始路径保留最新记录并删除重复项，是否继续？', '记录去重', { type: 'warning' })
-    const { data } = await mediaApi.deduplicate()
-    ElMessage.success(data?.message || '去重完成')
+    const params = { tmdb_id: washParams.value.tmdb_id }
+    if (washParams.value.sync_group_id != null) params.sync_group_id = washParams.value.sync_group_id
+    const { data } = await washApi.sourceScan(params)
+    washScanEntries.value = data.entries || []
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '目录扫描失败')
+    washScanEntries.value = []
+  } finally {
+    washScanLoading.value = false
+  }
+}
+
+function onWashScanExpand(_row, _expandedRows) {
+  // no-op; el-table handles expand state internally
+}
+
+function openScanEntryFixDialog(entry) {
+  dirFixSourceEntry.value = entry
+  dirFixMode.value = 'source'
+  dirFixScope.value = null
+  dirFixForm.media_type = drawerResource.value?.type === 'movie' ? 'movie' : 'tv'
+  dirFixForm.tmdb_id = washParams.value?.tmdb_id || drawerResource.value?.tmdb_id || ''
+  const { title, year } = extractResourceTitleAndYear(drawerResource.value)
+  dirFixForm.title = title
+  dirFixForm.year = year
+  dirFixForm.season = washParams.value?.season ?? undefined
+  dirFixForm.episode_override = undefined
+  dirFixForm.episode_offset = undefined
+  tmdbSearchResults.value = []
+  dirFixDialogVisible.value = true
+}
+
+async function openManualRecordDialog(resource) {
+  Object.assign(manualRecordForm, {
+    sync_group_id: resource?.sync_group_id ?? null,
+    original_path: '',
+    target_path: '',
+    season: null,
+    category: null,
+    file_type: null,
+  })
+  manualRecordDialogVisible.value = true
+  if (!syncGroupOptions.value.length) {
+    try {
+      const { data } = await syncGroupsApi.list()
+      syncGroupOptions.value = data || []
+    } catch {
+      // non-critical; user can still type paths
+    }
+  }
+}
+
+let _fsListTimer = null
+function fetchPathSuggestions(queryString, cb) {
+  clearTimeout(_fsListTimer)
+  _fsListTimer = setTimeout(async () => {
+    try {
+      const { data } = await mediaApi.fsList(queryString)
+      const entries = (data.entries || []).map(e => ({ ...e, value: e.path }))
+      cb(entries)
+    } catch {
+      cb([])
+    }
+  }, 250)
+}
+
+async function submitManualRecord() {
+  if (!manualRecordFormRef.value) return
+  try {
+    await manualRecordFormRef.value.validate()
+  } catch {
+    return
+  }
+  manualRecordSaving.value = true
+  try {
+    const body = {
+      sync_group_id: manualRecordForm.sync_group_id,
+      original_path: manualRecordForm.original_path,
+      target_path: manualRecordForm.target_path,
+    }
+    if (manualRecordForm.season != null) body.season = manualRecordForm.season
+    if (manualRecordForm.category) body.category = manualRecordForm.category
+    if (manualRecordForm.file_type) body.file_type = manualRecordForm.file_type
+    const { data } = await manualRecordApi.create(body)
+    ElMessage.success(data?.message || '记录已创建')
+    manualRecordDialogVisible.value = false
     await Promise.all([loadResources(), reloadDrawer()])
   } catch (error) {
-    if (error === 'cancel') return
-    ElMessage.error(error?.response?.data?.detail || error?.message || '去重失败')
+    ElMessage.error(error?.response?.data?.detail || error?.message || '创建记录失败')
+  } finally {
+    manualRecordSaving.value = false
   }
 }
 
@@ -2177,5 +2574,129 @@ onBeforeUnmount(() => {
     align-items: flex-start;
     flex-direction: column;
   }
+}
+
+/* ── Wash dialog ── */
+.wash-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  margin-bottom: 10px;
+}
+
+.wash-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.wash-group-card {
+  width: 100%;
+  border: 2px solid transparent;
+  transition: border-color 0.2s;
+}
+
+.wash-group-card.wash-recommended {
+  border-color: var(--el-color-success-light-5);
+}
+
+.wash-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wash-group-label {
+  font-size: 13px;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.wash-group-meta {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+}
+
+.wash-records {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.wash-record-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.wash-record-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--el-text-color-secondary);
+}
+
+.wash-record-size {
+  white-space: nowrap;
+  color: var(--el-text-color-placeholder);
+  font-size: 11px;
+}
+
+/* Scan table expanded rows */
+.wash-scan-files {
+  padding: 8px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wash-scan-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.wash-scan-file-icon {
+  color: var(--el-color-primary);
+  flex-shrink: 0;
+}
+
+.wash-scan-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--el-text-color-primary);
+}
+
+.wash-scan-file-size {
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+
+.wash-scan-dir-path {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.wash-scan-empty {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
 }
 </style>

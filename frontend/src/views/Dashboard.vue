@@ -14,6 +14,10 @@
           <el-icon><Refresh /></el-icon>
           全量扫描
         </el-button>
+        <el-button type="info" :loading="checkingFull" @click="runFullCheck">
+          <el-icon><Search /></el-icon>
+          全量检查
+        </el-button>
         <el-button type="success" :loading="refreshing" @click="refreshEmby">
           <el-icon><VideoPlay /></el-icon>
           刷新 Emby
@@ -245,8 +249,8 @@
 <script setup>
 import { defineAsyncComponent, ref, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { DataLine, Film, Monitor, MoonNight, Refresh, Setting, Sunny, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
-import { syncGroupsApi, scanApi, embyApi, tasksApi, mediaApi } from '../api/client'
+import { DataLine, Film, Monitor, MoonNight, Refresh, Search, Setting, Sunny, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
+import { syncGroupsApi, scanApi, embyApi, tasksApi, mediaApi, checksApi } from '../api/client'
 import dayjs from 'dayjs'
 
 const TaskLogMonitorDrawer = defineAsyncComponent(() => import('../components/TaskLogMonitorDrawer.vue'))
@@ -258,6 +262,7 @@ const taskPage = ref(1)
 const taskPageSize = ref(10)
 const taskStatusFilter = ref('')
 const scanning = ref(false)
+const checkingFull = ref(false)
 const refreshing = ref(false)
 const scanningGroup = ref(null)
 const toggling = ref(null)
@@ -379,6 +384,19 @@ async function toggleGroup(group, val) {
     ElMessage.error('更新失败')
   } finally {
     toggling.value = null
+  }
+}
+
+async function runFullCheck() {
+  checkingFull.value = true
+  try {
+    await checksApi.runFull()
+    ElMessage.success('全量检查任务已入队')
+    setTimeout(loadTasks, 1000)
+  } catch (e) {
+    ElMessage.error('启动检查失败')
+  } finally {
+    checkingFull.value = false
   }
 }
 
@@ -565,6 +583,21 @@ function taskTypeText(row) {
     const groupName = type.slice('adjust:item:'.length) || '未知同步组'
     return withIssueTag(`${groupName} · 季内调整`)
   }
+  if (type === 'check:full') {
+    return withIssueTag('全量检查')
+  }
+  if (type.startsWith('check:group:')) {
+    const groupName = type.slice('check:group:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · 检查`)
+  }
+  if (type.startsWith('wash:resource:')) {
+    const groupName = type.slice('wash:resource:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · 资源洗版`)
+  }
+  if (type.startsWith('wash:season:')) {
+    const groupName = type.slice('wash:season:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · Season 洗版`)
+  }
   if (type === 'group') {
     const group = groups.value.find((g) => g.id === row?.target_id)
     const text = group?.name || '单组扫描'
@@ -586,6 +619,8 @@ function taskTypeTag(row) {
   if (type.startsWith('webhook_scan:')) return 'primary'
   if (type.startsWith('reidentify:')) return 'warning'
   if (type.startsWith('adjust:')) return 'warning'
+  if (type.startsWith('check:')) return 'info'
+  if (type.startsWith('wash:')) return 'warning'
   if (type === 'full') return 'success'
   return 'info'
 }
