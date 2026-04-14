@@ -78,7 +78,7 @@ def list_tasks(
     status: str | None = Query(None),
 ):
     cleanup_logs_if_needed()
-    query = db.query(ScanTask)
+    query = db.query(ScanTask).filter(~ScanTask.type.startswith("check:"))
     raw_status = status if isinstance(status, str) or status is None else getattr(status, "default", None)
     normalized_status = str(raw_status or "").strip()
     if normalized_status:

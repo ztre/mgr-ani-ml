@@ -72,9 +72,10 @@
         </el-form-item>
         <el-form-item label="检查器">
           <el-checkbox-group v-model="form.enabled_checks_arr">
-            <el-checkbox label="source_unrecorded">源文件未录制</el-checkbox>
+            <el-checkbox label="source_unrecorded">源文件未使用</el-checkbox>
             <el-checkbox label="links_orphans">孤立链接</el-checkbox>
             <el-checkbox label="media_path_sanity">目标路径健康</el-checkbox>
+            <el-checkbox label="target_no_source">目标文件无源</el-checkbox>
           </el-checkbox-group>
         </el-form-item>
       </el-form>
@@ -105,10 +106,10 @@ const form = ref({
   include: '',
   exclude: '',
   enabled: true,
-  enabled_checks_arr: ['source_unrecorded', 'links_orphans', 'media_path_sanity'],
+  enabled_checks_arr: ['source_unrecorded', 'links_orphans', 'media_path_sanity', 'target_no_source'],
 })
 
-const ALL_CHECKS = ['source_unrecorded', 'links_orphans', 'media_path_sanity']
+const ALL_CHECKS = ['source_unrecorded', 'links_orphans', 'media_path_sanity', 'target_no_source']
 
 function checksArrToList(arr) {
   if (!arr || arr.length === ALL_CHECKS.length) return null // null = use defaults

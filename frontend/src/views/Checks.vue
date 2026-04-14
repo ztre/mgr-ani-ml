@@ -41,9 +41,10 @@
         </el-col>
         <el-col :span="4">
           <el-select v-model="filterChecker" placeholder="检查器" clearable @change="loadIssues">
-            <el-option label="源文件未记录" value="source_unrecorded" />
+            <el-option label="源文件未使用" value="source_unrecorded" />
             <el-option label="孤立硬链接" value="links_orphans" />
             <el-option label="目标路径异常" value="media_path_sanity" />
+            <el-option label="目标文件无源" value="target_no_source" />
           </el-select>
         </el-col>
         <el-col :span="3">
@@ -384,9 +385,10 @@ function groupStatusSummary(group) {
 
 function checkerLabel(code) {
   const map = {
-    source_unrecorded: '源文件未记录',
+    source_unrecorded: '源文件未使用',
     links_orphans: '孤立硬链接',
     media_path_sanity: '目标路径异常',
+    target_no_source: '目标文件无源',
   }
   return map[code] || code
 }

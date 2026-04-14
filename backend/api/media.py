@@ -24,7 +24,7 @@ from ..models import CheckIssue, DirectoryState, InodeRecord, MediaRecord, ScanT
 from ..services.group_routing import resolve_movie_target_root, resolve_tv_target_root
 from ..services.linker import get_inode, path_excluded
 from ..services.parser import classify_extra_from_text, parse_movie_filename, parse_tv_filename
-from ..services.resource_tree import build_resource_summaries, build_resource_tree
+from ..services.resource_tree import build_resource_summaries, build_resource_tree, extract_tv_primary_season
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
 from ..services.target_path_resolver import build_attachment_target_from_anchor
 from ..services.scanner import (
@@ -1888,6 +1888,41 @@ def list_media_resources(
     return {"total": total, "items": items, "offset": offset, "limit": limit}
 
 
+@router.get("/source-dirs")
+def get_source_dirs(
+    tmdb_id: int = Query(..., ge=1),
+    sync_group_id: int | None = Query(None),
+    season: int | None = Query(None, ge=0),
+    db: Session = Depends(get_db),
+):
+    """返回指定 tmdb_id（+可选 sync_group_id / season）的已有记录的来源目录列表，
+    供前端洗版候选打分时作为参照。"""
+    q = (
+        db.query(MediaRecord.original_path, MediaRecord.status, MediaRecord.target_path)
+        .filter(
+            MediaRecord.tmdb_id == tmdb_id,
+            MediaRecord.target_path.isnot(None),
+            MediaRecord.target_path != "",
+            MediaRecord.status != "pending_manual",
+        )
+    )
+    if sync_group_id is not None:
+        q = q.filter(MediaRecord.sync_group_id == sync_group_id)
+
+    rows = q.all()
+    source_dirs: set[str] = set()
+    for original_path, status, target_path in rows:
+        if season is not None:
+            row_season = extract_tv_primary_season(target_path)
+            if row_season != season:
+                continue
+        src = str(_derive_source_dir(original_path, status, target_path))
+        if src:
+            source_dirs.add(src)
+
+    return {"source_dirs": sorted(source_dirs)}
+
+
 @router.get("/resource-tree")
 def get_media_resource_tree(
     resource_dir: str = Query(..., min_length=1),
@@ -2580,6 +2615,18 @@ def _run_source_dir_organize_task(
         summary = f"源目录修正完成: 成功 {processed}，失败 {failed}"
         if wash_result:
             summary += f"（洗版已清理旧记录 {len(wash_result.deleted_record_ids)} 条）"
+
+        # 洗版/修正完成后，对该 sync group 触发一次检查以自动关闭已消失的孤立问题
+        try:
+            from ..services.checks import run_checks_for_group as _run_checks_for_group
+            _run_checks_for_group(db, group)
+            _log.info("Post-organize check completed for group %d (%s)", group.id, group.name)
+        except Exception:
+            _log.warning(
+                "Post-organize check failed for group %d (%s), skipping",
+                group.id, group.name, exc_info=True,
+            )
+
         return {
             "message": summary,
             "processed": processed,

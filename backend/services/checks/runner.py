@@ -20,17 +20,19 @@ from .base import IssueData
 from .links_orphans import LinksOrphansChecker
 from .media_path_sanity import MediaPathSanityChecker
 from .source_unrecorded import SourceUnrecordedChecker
+from .target_no_source import TargetNoSourceChecker
 
 if TYPE_CHECKING:
     pass
 
 _log = logging.getLogger(__name__)
 
-_ALL_CHECKER_CODES = ["source_unrecorded", "links_orphans", "media_path_sanity"]
+_ALL_CHECKER_CODES = ["source_unrecorded", "links_orphans", "media_path_sanity", "target_no_source"]
 _CHECKER_MAP = {
     "source_unrecorded": SourceUnrecordedChecker(),
     "links_orphans": LinksOrphansChecker(),
     "media_path_sanity": MediaPathSanityChecker(),
+    "target_no_source": TargetNoSourceChecker(),
 }
 
 

@@ -26,7 +26,7 @@ class SyncGroup(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    _DEFAULT_CHECKS = ["source_unrecorded", "links_orphans", "media_path_sanity"]
+    _DEFAULT_CHECKS = ["source_unrecorded", "links_orphans", "media_path_sanity", "target_no_source"]
 
     def get_enabled_checks(self) -> list[str]:
         if self.enabled_checks is None:
@@ -117,7 +117,7 @@ class CheckIssue(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     check_run_id = Column(Integer, nullable=True)  # FK check_runs.id
-    checker_code = Column(String(64), nullable=False)  # source_unrecorded | links_orphans | media_path_sanity
+    checker_code = Column(String(64), nullable=False)  # source_unrecorded | links_orphans | media_path_sanity | target_no_source
     issue_code = Column(String(64), nullable=False)  # checker-defined sub-type
     severity = Column(String(20), nullable=False, default="warning")  # error | warning
     sync_group_id = Column(Integer, nullable=True)

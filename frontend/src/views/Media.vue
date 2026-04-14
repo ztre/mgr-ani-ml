@@ -616,61 +616,46 @@
     <el-dialog
       v-model="washDialogVisible"
       title="洗版候选预览"
-      width="860px"
+      width="720px"
       append-to-body
       destroy-on-close
     >
-      <!-- ── Source directory scan (auto-triggered, top-5 unrecorded by name match) ── -->
+      <!-- ── Pending list top-5 by name similarity ── -->
       <div class="wash-section-title">
-        <span>目录深度扫描</span>
-        <el-tag size="small" type="warning" effect="plain">未记录新目录 · 匹配度倒序前5</el-tag>
+        <span>待办清单匹配</span>
+        <el-tag size="small" type="warning" effect="plain">名称相似度前5</el-tag>
         <el-button
           size="small"
-          :loading="washScanLoading"
+          :loading="washPendingLoading"
           style="margin-left:auto"
-          @click="runWashSourceScan"
-        >重新扫描</el-button>
+          @click="loadWashPendingEntries"
+        >刷新</el-button>
       </div>
 
-      <div v-if="washScanLoading" v-loading="true" style="min-height:80px"></div>
-      <template v-else-if="washScanEntries !== null">
+      <div v-if="washPendingLoading" v-loading="true" style="min-height:80px"></div>
+      <template v-else-if="washPendingEntries !== null">
         <el-alert
-          v-if="!washScanTopEntries.length"
+          v-if="!washPendingTopEntries.length"
           type="success"
-          title="source 目录下未发现含视频文件的未记录子目录。"
+          title="待办清单中未发现名称相近的记录。"
           show-icon
           :closable="false"
         />
         <el-table
           v-else
-          :data="washScanTopEntries"
+          :data="washPendingTopEntries"
           style="width:100%"
-          row-key="dir_path"
-          @expand-change="onWashScanExpand"
+          size="small"
         >
-          <el-table-column type="expand">
+          <el-table-column label="源目录" min-width="300">
             <template #default="{ row }">
-              <div class="wash-scan-files">
-                <div
-                  v-for="f in row.video_files"
-                  :key="f.rel_path"
-                  class="wash-scan-file-row"
-                >
-                  <el-icon class="wash-scan-file-icon"><Film /></el-icon>
-                  <span class="wash-scan-file-name" :title="f.rel_path">{{ f.rel_path }}</span>
-                  <span class="wash-scan-file-size">{{ f.size_human }}</span>
-                </div>
-                <div v-if="!row.video_files?.length" class="wash-scan-empty">无正片文件</div>
-              </div>
+              <span class="wash-scan-dir-path" :title="row.original_path">{{ row.original_path }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="目录" min-width="300">
+          <el-table-column label="相似度" width="80" align="center">
             <template #default="{ row }">
-              <span class="wash-scan-dir-path" :title="row.dir_path">{{ row.dir_path }}</span>
+              <span class="wash-score">{{ (row._score * 100).toFixed(0) }}%</span>
             </template>
-          </el-table-column>
-          <el-table-column label="正片数" width="80" align="center">
-            <template #default="{ row }">{{ row.video_count }}</template>
           </el-table-column>
           <el-table-column label="操作" width="100" align="center">
             <template #default="{ row }">
@@ -678,7 +663,7 @@
                 size="small"
                 type="primary"
                 plain
-                @click="openScanEntryFixDialog(row)"
+                @click="openScanEntryFixDialog({ dir_path: row.original_path, sync_group_id: row.sync_group_id, _pending_id: row.id })"
               >修正整理</el-button>
             </template>
           </el-table-column>
@@ -849,15 +834,16 @@ const dirFixForm = reactive({ media_type: 'tv', tmdb_id: '', title: '', year: un
 // Wash dialog
 const washDialogVisible = ref(false)
 const washParams = ref({ sync_group_id: null, tmdb_id: null, season: null })
-const washScanEntries = ref(null)   // null = not yet scanned
-const washScanLoading = ref(false)
+const washPendingEntries = ref(null)   // null = not yet loaded
+const washPendingLoading = ref(false)
+const washSourceDirRefs = ref([])      // basenames of existing source dirs for this resource
 
 function _scoreNameMatch(dirPath, ...refs) {
   if (!dirPath) return 0
   const _basename = (s) => (s || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || s || ''
   const _normalize = (s) => (s || '').toLowerCase()
     .replace(/\[tmdbid=[^\]]*\]/gi, '')
-    .replace(/[\s\[\]()\-_&+,.。·！!【】「」〔〕《》]/g, ' ')
+    .replace(/[\s\[\]()\-_&+,.\u3002\u00b7\uff01!\u3010\u3011\u300c\u300d\u3014\u3015\u300a\u300b]/g, ' ')
     .replace(/\s+/g, ' ').trim()
   const _tokens = (s) => s.split(' ').filter((t) => t.length > 0)
   const _bigrams = (s) => {
@@ -878,7 +864,6 @@ function _scoreNameMatch(dirPath, ...refs) {
     const refNorm = _normalize(ref)
     if (!refNorm) continue
 
-    // Jaccard on tokens
     const refTokens = _tokens(refNorm)
     if (refTokens.length) {
       const intersection = refTokens.filter((t) => targetTokenSet.has(t)).length
@@ -886,7 +871,6 @@ function _scoreNameMatch(dirPath, ...refs) {
       if (union) best = Math.max(best, intersection / union)
     }
 
-    // Jaccard on character bi-grams (better for CJK cross-language matching)
     const refBg = _bigrams(refNorm)
     if (refBg.size && targetBg.size) {
       let inter = 0
@@ -897,16 +881,20 @@ function _scoreNameMatch(dirPath, ...refs) {
   return best
 }
 
-const washScanTopEntries = computed(() => {
-  if (!washScanEntries.value) return []
+const washPendingTopEntries = computed(() => {
+  if (!washPendingEntries.value) return []
   const { title } = extractResourceTitleAndYear(drawerResource.value)
   const resourceDirBase = drawerResource.value?.resource_dir
     ? drawerResource.value.resource_dir.replace(/\\/g, '/').split('/').filter(Boolean).pop()
     : ''
-  return washScanEntries.value
-    .filter((e) => !e.is_recorded)
-    .map((e) => ({ ...e, _score: _scoreNameMatch(e.dir_path, title, resourceDirBase) }))
-    .sort((a, b) => b._score - a._score || a.dir_path.localeCompare(b.dir_path))
+  // scoring refs: title + resourceDirBase + existing source dir basenames (cross-language friendly)
+  const _basename = (s) => (s || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || ''
+  const sourceDirBases = washSourceDirRefs.value.map(_basename).filter(Boolean)
+  const refs = [title, resourceDirBase, ...sourceDirBases]
+  return washPendingEntries.value
+    .map((e) => ({ ...e, _score: _scoreNameMatch(e.original_path, ...refs) }))
+    .filter((e) => e._score > 0)
+    .sort((a, b) => b._score - a._score || a.original_path.localeCompare(b.original_path))
     .slice(0, 5)
 })
 
@@ -1916,7 +1904,7 @@ async function submitDirFix() {
       // wash_keep_ids=[] means delete all (the new directory has no DB records yet).
       ;({ data } = await washApi.sourceOrganize({
         source_dir: dirFixSourceEntry.value.dir_path,
-        sync_group_id: dirFixSourceEntry.value.sync_group_id,
+        sync_group_id: dirFixSourceEntry.value.sync_group_id ?? washParams.value?.sync_group_id,
         pre_wash: true,
         wash_keep_ids: [],
         ...payload,
@@ -1939,6 +1927,17 @@ async function submitDirFix() {
       : dirFixMode.value === 'season' ? 'Season 修正任务已进入队列' : '整组修正任务已进入队列'
     ElMessage.success(data?.message || successMsg)
     dirFixDialogVisible.value = false
+    // 洗版来源于待办清单候选时，任务入队后自动关闭对应待办记录
+    const pendingId = dirFixMode.value === 'source' && dirFixSourceEntry.value?._pending_id
+    if (pendingId) {
+      try {
+        await mediaApi.batchDelete({ ids: [pendingId], delete_files: false })
+        // 刷新洗版候选列表（移除已关闭的条目）
+        washPendingEntries.value = (washPendingEntries.value || []).filter((e) => e.id !== pendingId)
+      } catch {
+        // 关闭失败不影响主流程
+      }
+    }
   } catch (error) {
     await refreshFixMonitorTask()
     if (fixMonitorTaskId.value) {
@@ -1966,33 +1965,39 @@ async function submitDirFix() {
 async function openWashDialog(resource, season) {
   if (!resource?.tmdb_id) return
   washParams.value = { sync_group_id: resource.sync_group_id ?? null, tmdb_id: resource.tmdb_id, season: season ?? null }
-  washScanEntries.value = null
+  washPendingEntries.value = null
+  washSourceDirRefs.value = []
   washDialogVisible.value = true
-  await runWashSourceScan()
+  await loadWashPendingEntries()
 }
 
 
 
 // ── Manual Record handlers ────────────────────────────────────────────────────
 
-async function runWashSourceScan() {
-  if (!washParams.value.tmdb_id) return
-  washScanLoading.value = true
+async function loadWashPendingEntries() {
+  washPendingLoading.value = true
   try {
-    const params = { tmdb_id: washParams.value.tmdb_id }
-    if (washParams.value.sync_group_id != null) params.sync_group_id = washParams.value.sync_group_id
-    const { data } = await washApi.sourceScan(params)
-    washScanEntries.value = data.entries || []
-  } catch (error) {
-    ElMessage.error(error?.response?.data?.detail || error?.message || '目录扫描失败')
-    washScanEntries.value = []
-  } finally {
-    washScanLoading.value = false
-  }
-}
+    const pendingParams = { limit: 200, offset: 0 }
+    if (washParams.value.sync_group_id != null) pendingParams.sync_group_id = washParams.value.sync_group_id
 
-function onWashScanExpand(_row, _expandedRows) {
-  // no-op; el-table handles expand state internally
+    const sourceDirsParams = { tmdb_id: washParams.value.tmdb_id }
+    if (washParams.value.sync_group_id != null) sourceDirsParams.sync_group_id = washParams.value.sync_group_id
+    if (washParams.value.season != null) sourceDirsParams.season = washParams.value.season
+
+    const [pendingResp, sourceDirsResp] = await Promise.all([
+      mediaApi.pending(pendingParams).catch(() => ({ data: { items: [] } })),
+      mediaApi.sourceDirs(sourceDirsParams).catch(() => ({ data: { source_dirs: [] } })),
+    ])
+    washPendingEntries.value = pendingResp.data.items || []
+    washSourceDirRefs.value = sourceDirsResp.data.source_dirs || []
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '加载待办清单失败')
+    washPendingEntries.value = []
+    washSourceDirRefs.value = []
+  } finally {
+    washPendingLoading.value = false
+  }
 }
 
 function openScanEntryFixDialog(entry) {

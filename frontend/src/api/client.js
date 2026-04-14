@@ -53,6 +53,7 @@ export const mediaApi = {
   resources: (params) => client.get('/media/resources', { params }),
   resourceTree: (params) => client.get('/media/resource-tree', { params }),
   pending: (params) => client.get('/media/pending', { params }),
+  sourceDirs: (params) => client.get('/media/source-dirs', { params }),
   pendingFiles: (id) => client.get(`/media/pending/${id}/files`),
   pendingLogs: (params) => client.get('/media/pending-logs', { params }),
   pendingLogKinds: (params) => client.get('/media/pending-logs-kinds', { params }),
