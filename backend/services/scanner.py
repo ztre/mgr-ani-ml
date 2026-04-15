@@ -1024,6 +1024,41 @@ def _run_manual_organize_core(
         raise
 
 
+def run_source_dir_organize(
+    db: Session,
+    *,
+    group: SyncGroup,
+    media_type: str,
+    tmdb_id: int,
+    source_dir: str,
+    title_override: str | None = None,
+    year_override: int | None = None,
+    season_override: int | None = None,
+    episode_override: int | None = None,
+    episode_offset: int | None = None,
+) -> tuple[int, int, bool]:
+    """Scan and organize an unrecorded source directory with an explicit TMDB ID.
+
+    Similar to run_manual_organize but operates on an arbitrary source directory
+    without requiring an existing pending MediaRecord.  Returns (processed, failed,
+    has_issues) — the fourth element (inode_skipped) is discarded.
+    """
+    processed, failed, has_issues, _inode_skipped = _run_manual_organize_core(
+        db,
+        group=group,
+        media_type=media_type,
+        tmdb_id=tmdb_id,
+        root_dir=Path(source_dir),
+        title_override=title_override,
+        year_override=year_override,
+        season_override=season_override,
+        episode_override=episode_override,
+        episode_offset=episode_offset,
+        action_label="源目录修正",
+    )
+    return processed, failed, has_issues
+
+
 def run_manual_organize(
     db: Session,
     pending: MediaRecord,

@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 
-from .api import auth, config as config_api, emby, inodes, logs, media, scan, sync_groups, tasks
+from .api import auth, checks, config as config_api, emby, inodes, logs, media, scan, sync_groups, tasks
 from .api.logs import cleanup_logs_if_needed
 from .config import settings
 from .database import RequestSessionLocal, SessionLocal, init_db
@@ -57,6 +57,7 @@ app.include_router(emby.router, prefix="/api/emby", tags=["emby"], dependencies=
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"], dependencies=[Depends(require_auth)])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"], dependencies=[Depends(require_auth)])
 app.include_router(inodes.router, prefix="/api/inodes", tags=["inodes"], dependencies=[Depends(require_auth)])
+app.include_router(checks.router, prefix="/api/checks", tags=["checks"], dependencies=[Depends(require_auth)])
 
 
 @app.get("/api/health")
@@ -108,14 +109,13 @@ def send_task(dirname: str = Form(...), group: str = Form(...), _username: str =
         if not sync_group:
             raise HTTPException(status_code=404, detail=f"未找到同步组: {group}")
 
+        # 优先匹配已有 pending_manual 记录（精确目录名）
         pending_rows = (
             db.query(MediaRecord)
             .filter(MediaRecord.sync_group_id == sync_group.id, MediaRecord.status == "pending_manual")
             .all()
         )
         matched = [row for row in pending_rows if Path(row.original_path or "").name == dirname]
-        if not matched:
-            raise HTTPException(status_code=404, detail=f"未找到匹配待办目录: {dirname}")
         if len(matched) > 1:
             raise HTTPException(
                 status_code=409,
@@ -124,6 +124,14 @@ def send_task(dirname: str = Form(...), group: str = Form(...), _username: str =
                     "candidates": [row.original_path for row in matched],
                 },
             )
+
+        # 如果没有 pending 记录，则使用同步组 source 目录拼接 dirname 作为目标路径
+        if matched:
+            target_dir = matched[0].original_path
+            source = "pending_record"
+        else:
+            target_dir = str(Path(sync_group.source) / dirname)
+            source = "source_dir"
 
         task = enqueue_task(
             db,
@@ -137,7 +145,7 @@ def send_task(dirname: str = Form(...), group: str = Form(...), _username: str =
                 task=queued_task,
                 task_type_override=f"webhook_scan:{sync_group.name}",
                 target_name_override=dirname,
-                target_dir_override=matched[0].original_path,
+                target_dir_override=target_dir,
             ),
         )
         return {
@@ -148,6 +156,8 @@ def send_task(dirname: str = Form(...), group: str = Form(...), _username: str =
             "dirname": dirname,
             "group": group,
             "group_id": sync_group.id,
+            "target_dir": target_dir,
+            "source": source,
         }
     finally:
         db.close()
@@ -159,9 +169,10 @@ if not frontend_dist.exists():
 
 
 @app.exception_handler(404)
-async def spa_fallback(request, _exc):
-    if request.url.path.startswith("/api"):
-        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+async def spa_fallback(request, exc):
+    if request.url.path.startswith("/api") or request.method != "GET":
+        detail = getattr(exc, "detail", "Not Found")
+        return JSONResponse(status_code=404, content={"detail": detail})
     index = frontend_dist / "index.html"
     if index.exists():
         return FileResponse(str(index))

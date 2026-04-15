@@ -53,6 +53,7 @@ export const mediaApi = {
   resources: (params) => client.get('/media/resources', { params }),
   resourceTree: (params) => client.get('/media/resource-tree', { params }),
   pending: (params) => client.get('/media/pending', { params }),
+  sourceDirs: (params) => client.get('/media/source-dirs', { params }),
   pendingFiles: (id) => client.get(`/media/pending/${id}/files`),
   pendingLogs: (params) => client.get('/media/pending-logs', { params }),
   pendingLogKinds: (params) => client.get('/media/pending-logs-kinds', { params }),
@@ -72,6 +73,7 @@ export const mediaApi = {
   batchReidentify: (data) => postLongTask('/media/batch-reidentify', data),
   adjust: (id, data) => postLongTask(`/media/${id}/adjust`, data),
   manualOrganize: (id, data) => postLongTask(`/media/${id}/manual-organize`, data),
+  fsList: (prefix) => client.get('/media/fs/list', { params: { prefix } }),
 }
 
 export const inodesApi = {
@@ -113,4 +115,27 @@ export const tasksApi = {
   getLogs: (id) => client.get(`/tasks/${id}/logs`),
   cancel: (id) => client.post(`/tasks/${id}/cancel`),
   deleteAll: () => client.delete('/tasks/all'),
+}
+
+export const checksApi = {
+  runFull: () => postLongTask('/checks/run'),
+  runGroup: (groupId) => postLongTask(`/checks/run/${groupId}`),
+  listRuns: (params) => client.get('/checks/runs', { params }),
+  listIssues: (params) => client.get('/checks/issues', { params }),
+  claimIssue: (id) => client.post(`/checks/issues/${id}/claim-pending`),
+  ignoreIssue: (id) => client.post(`/checks/issues/${id}/ignore`),
+  resolveIssue: (id) => client.post(`/checks/issues/${id}/resolve`),
+  batchAction: (ids, action) => client.post('/checks/issues/batch-action', { ids, action }),
+  deleteAll: () => client.delete('/checks/all'),
+}
+
+export const washApi = {
+  candidates: (params) => client.get('/media/wash/candidates', { params }),
+  sourceScan: (params) => client.get('/media/wash/source-scan', { params }),
+  execute: (data) => postLongTask('/media/wash/execute', data),
+  sourceOrganize: (data) => postLongTask('/media/wash/source-dir-organize', data),
+}
+
+export const manualRecordApi = {
+  create: (data) => client.post('/media/manual-record', data),
 }

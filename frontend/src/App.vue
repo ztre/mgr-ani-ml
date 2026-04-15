@@ -21,6 +21,10 @@
             <el-icon><VideoPlay /></el-icon>
             <span>媒体记录</span>
           </el-menu-item>
+          <el-menu-item index="/checks">
+            <el-icon><Search /></el-icon>
+            <span>检查中心</span>
+          </el-menu-item>
           <el-menu-item index="/pending">
             <el-icon><WarningFilled /></el-icon>
             <span>待办清单</span>
@@ -58,7 +62,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
-import { Document, Files, FolderOpened, Monitor, Setting, SwitchButton, VideoPlay, WarningFilled } from '@element-plus/icons-vue'
+import { Document, Files, FolderOpened, Monitor, Search, Setting, SwitchButton, VideoPlay, WarningFilled } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()

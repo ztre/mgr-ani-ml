@@ -1,6 +1,7 @@
 """Sync group CRUD APIs."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +22,7 @@ class SyncGroupIn(BaseModel):
     include: str | None = ""
     exclude: str | None = ""
     enabled: bool | None = True
+    enabled_checks: list[str] | None = None  # None = keep existing / use defaults
 
 
 @router.get("")
@@ -49,6 +51,7 @@ def create_sync_group(data: SyncGroupIn, db: Session = Depends(get_db)):
         include=data.include or "",
         exclude=data.exclude or "",
         enabled=bool(data.enabled),
+        enabled_checks=json.dumps(data.enabled_checks) if data.enabled_checks is not None else None,
     )
     db.add(row)
     db.commit()
@@ -78,6 +81,8 @@ def update_sync_group(group_id: int, data: SyncGroupIn, db: Session = Depends(ge
         row.exclude = data.exclude
     if data.enabled is not None:
         row.enabled = bool(data.enabled)
+    if data.enabled_checks is not None:
+        row.enabled_checks = json.dumps(data.enabled_checks)
     row.updated_at = datetime.now(timezone.utc)
 
     db.commit()

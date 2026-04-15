@@ -1,0 +1,28 @@
+# sendTask.conf — Anime Media Manager webhook 配置
+# 使用方法: cp sendTask.conf.example sendTask.conf
+# 然后按实际环境修改下方配置
+
+# ── 后端连接 ──────────────────────────────────────────────────────────────────
+BASE_URL="http://localhost:8000"
+
+# ── 登录凭据 ──────────────────────────────────────────────────────────────────
+USERNAME="admin"
+PASSWORD="your-password-here"
+
+# 设为 1 则跳过登录（仅后端未启用认证时使用）
+# NO_AUTH=0
+
+# ── qBittorrent 分类 → 同步组名称 映射 ───────────────────────────────────────
+# 左侧：qBittorrent「分类」字段的值（%L），区分大小写
+# 右侧：Anime Media Manager 同步组管理中的组名称，必须完全一致
+#
+# 可为同一个同步组配置多个别名（英文/中文分类名均可）
+declare -A GROUP_MAP
+
+GROUP_MAP["电视动画"]="电视动画"
+GROUP_MAP["TV"]="电视动画"
+GROUP_MAP["tv"]="电视动画"
+
+GROUP_MAP["剧场动画"]="剧场动画"
+GROUP_MAP["Movie"]="剧场动画"
+GROUP_MAP["movie"]="剧场动画"

@@ -1,12 +1,15 @@
 """Database engine/session setup."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 
 from .config import settings
 from .models import Base, ScanTask
+
+_log = logging.getLogger(__name__)
 
 
 _REQUEST_DB_TIMEOUT_SECONDS = 1.0
@@ -128,6 +131,7 @@ def init_db() -> None:
   ScanTask.__table__.create(bind=task_engine, checkfirst=True)
   _migrate_scan_tasks_to_task_db()
   if sqlite_path is not None:
+    _migrate_schema()
     _ensure_directory_states_unique_index()
     _ensure_resource_lookup_indexes()
 
@@ -144,6 +148,123 @@ def _apply_task_sqlite_pragmas() -> None:
     conn.execute(text("PRAGMA journal_mode=WAL"))
     conn.execute(text("PRAGMA synchronous=NORMAL"))
     conn.execute(text("PRAGMA busy_timeout=30000"))
+
+
+def _migrate_schema() -> None:
+  """Incremental schema migration for existing SQLite databases.
+
+  All DDL changes are guarded by structural inspection (PRAGMA) so they are
+  idempotent and safe to run against both fresh and legacy DBs.  Any error
+  is logged and re-raised so startup fails visibly rather than silently.
+  """
+  try:
+    with engine.connect() as conn:
+      _migrate_sync_groups_enabled_checks(conn)
+      _migrate_check_runs_columns(conn)
+      _migrate_check_issues_columns(conn)
+      _migrate_check_issues_fingerprint_index(conn)
+      _migrate_media_records_columns(conn)
+      conn.commit()
+  except Exception:
+    _log.exception("Schema migration failed — database may be in an inconsistent state")
+    raise
+
+
+def _table_columns(conn, table_name: str) -> set[str]:
+  """Return the set of column names for a table via PRAGMA table_info."""
+  rows = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+  return {row[1] for row in rows}  # column index 1 = name
+
+
+def _table_exists(conn, table_name: str) -> bool:
+  row = conn.execute(
+    text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
+    {"n": table_name},
+  ).fetchone()
+  return row is not None
+
+
+def _migrate_sync_groups_enabled_checks(conn) -> None:
+  cols = _table_columns(conn, "sync_groups")
+  if "enabled_checks" not in cols:
+    _log.info("Migration: adding column sync_groups.enabled_checks")
+    conn.execute(text("ALTER TABLE sync_groups ADD COLUMN enabled_checks TEXT"))
+
+
+def _migrate_check_runs_columns(conn) -> None:
+  if not _table_exists(conn, "check_runs"):
+    return  # create_all already created it; nothing to migrate
+  expected = {
+    "id": "INTEGER",
+    "sync_group_id": "INTEGER",
+    "status": "VARCHAR(20)",
+    "started_at": "DATETIME",
+    "finished_at": "DATETIME",
+    "summary_json": "TEXT",
+  }
+  cols = _table_columns(conn, "check_runs")
+  for col_name, col_type in expected.items():
+    if col_name not in cols:
+      _log.info("Migration: adding column check_runs.%s", col_name)
+      conn.execute(text(f"ALTER TABLE check_runs ADD COLUMN {col_name} {col_type}"))
+
+
+def _migrate_check_issues_columns(conn) -> None:
+  if not _table_exists(conn, "check_issues"):
+    return  # create_all already created it; nothing to migrate
+  expected = {
+    "id": "INTEGER",
+    "check_run_id": "INTEGER",
+    "checker_code": "VARCHAR(64)",
+    "issue_code": "VARCHAR(64)",
+    "severity": "VARCHAR(20)",
+    "sync_group_id": "INTEGER",
+    "source_path": "VARCHAR(2048)",
+    "target_path": "VARCHAR(2048)",
+    "resource_dir": "VARCHAR(2048)",
+    "tmdb_id": "INTEGER",
+    "season": "INTEGER",
+    "episode": "INTEGER",
+    "payload_json": "TEXT",
+    "status": "VARCHAR(20)",
+    "fingerprint": "VARCHAR(128)",
+    "created_at": "DATETIME",
+    "updated_at": "DATETIME",
+    "resolved_at": "DATETIME",
+  }
+  cols = _table_columns(conn, "check_issues")
+  for col_name, col_type in expected.items():
+    if col_name not in cols:
+      _log.info("Migration: adding column check_issues.%s", col_name)
+      conn.execute(text(f"ALTER TABLE check_issues ADD COLUMN {col_name} {col_type}"))
+
+
+def _migrate_check_issues_fingerprint_index(conn) -> None:
+  if not _table_exists(conn, "check_issues"):
+    return
+  rows = conn.execute(text("PRAGMA index_list('check_issues')")).fetchall()
+  existing_indexes = {str(row[1]).lower() for row in rows}  # index 1 = name
+  if "uq_check_issue_fingerprint" not in existing_indexes:
+    _log.info("Migration: creating unique index uq_check_issue_fingerprint on check_issues")
+    conn.execute(
+      text(
+        "CREATE UNIQUE INDEX uq_check_issue_fingerprint "
+        "ON check_issues (fingerprint)"
+      )
+    )
+
+
+def _migrate_media_records_columns(conn) -> None:
+  new_cols = [
+    ("season", "INTEGER"),
+    ("category", "VARCHAR(50)"),
+    ("file_type", "VARCHAR(20)"),
+  ]
+  cols = _table_columns(conn, "media_records")
+  for col_name, col_type in new_cols:
+    if col_name not in cols:
+      _log.info("Migration: adding column media_records.%s", col_name)
+      conn.execute(text(f"ALTER TABLE media_records ADD COLUMN {col_name} {col_type}"))
 
 
 def _migrate_scan_tasks_to_task_db() -> None:
