@@ -152,8 +152,12 @@
         <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
             <el-button-group v-if="row._isGroup" size="small">
-              <el-button type="warning" plain @click="batchActionGroup(row, 'ignore')">批量忽略</el-button>
-              <el-button type="success" plain @click="batchActionGroup(row, 'resolve')">批量解决</el-button>
+              <el-button type="warning" plain
+                :disabled="(row.children || []).every(c => c.status === 'ignored' || c.status === 'resolved')"
+                @click="batchActionGroup(row, 'ignore')">批量忽略</el-button>
+              <el-button type="success" plain
+                :disabled="(row.children || []).every(c => c.status === 'resolved' || c.status === 'ignored')"
+                @click="batchActionGroup(row, 'resolve')">批量解决</el-button>
             </el-button-group>
             <el-button-group v-else-if="!row._isDirRow" size="small">
               <el-button v-if="row.status === 'open'" type="primary" plain @click="claimIssue(row)">认领</el-button>
@@ -161,8 +165,12 @@
               <el-button v-if="row.status !== 'resolved'" type="success" plain @click="resolveIssue(row)">解决</el-button>
             </el-button-group>
             <el-button-group v-else size="small">
-              <el-button plain @click="ignoreIssue(row)">忽略</el-button>
-              <el-button type="success" plain @click="resolveIssue(row)">解决</el-button>
+              <el-button plain
+                :disabled="row.status === 'ignored' || row.status === 'resolved'"
+                @click="ignoreIssue(row)">忽略</el-button>
+              <el-button type="success" plain
+                :disabled="row.status === 'resolved'"
+                @click="resolveIssue(row)">解决</el-button>
             </el-button-group>
           </template>
         </el-table-column>

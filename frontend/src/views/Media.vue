@@ -357,7 +357,7 @@
       </transition>
     </teleport>
 
-    <el-dialog v-model="batchFixDialogVisible" title="批量修正选中文件" width="560px" append-to-body destroy-on-close>
+    <el-dialog v-model="batchFixDialogVisible" title="批量修正选中文件" width="560px" append-to-body destroy-on-close class="media-fix-dialog">
       <el-form ref="batchFixFormRef" :model="batchFixForm" label-width="110px" style="margin-top: 8px">
         <el-form-item label="待处理文件">
           <span class="selection-summary">共 {{ selectedDrawerItems.length }} 个已选文件</span>
@@ -369,16 +369,18 @@
           </el-select>
         </el-form-item>
         <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
-          <el-input v-model="batchFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
-            <template #append>
-              <el-button @click="openTmdbSearchDialog('batch')">
-                <el-icon><Search /></el-icon>
-              </el-button>
-            </template>
-          </el-input>
+          <div style="min-width: 0; overflow: hidden; width: 100%">
+            <el-input v-model="batchFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
+              <template #append>
+                <el-button @click="openTmdbSearchDialog('batch')">
+                  <el-icon><Search /></el-icon>
+                </el-button>
+              </template>
+            </el-input>
+          </div>
         </el-form-item>
         <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
-          <el-input v-model="batchFixForm.title" placeholder="例如：刀剑神域：序列之争" />
+          <el-input v-model="batchFixForm.title" placeholder="例如：刀剑神域：序列之争" style="width: 100%" />
         </el-form-item>
         <el-form-item label="年份">
           <el-input-number v-model="batchFixForm.year" :min="1900" :max="2100" />
@@ -399,7 +401,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="fixDialogVisible" title="资源修正" width="560px" append-to-body destroy-on-close>
+    <el-dialog v-model="fixDialogVisible" title="资源修正" width="560px" append-to-body destroy-on-close class="media-fix-dialog">
       <el-tabs v-model="activeFixTab" style="margin-top: -10px">
         <el-tab-pane label="识别修正" name="reidentify">
           <el-form ref="fixFormRef" :model="fixForm" label-width="110px" style="margin-top: 12px">
@@ -416,16 +418,18 @@
               </el-select>
             </el-form-item>
             <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
-              <el-input v-model="fixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
-                <template #append>
-                  <el-button @click="openTmdbSearchDialog('fix')">
-                    <el-icon><Search /></el-icon>
-                  </el-button>
-                </template>
-              </el-input>
+              <div style="min-width: 0; overflow: hidden; width: 100%">
+                <el-input v-model="fixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
+                  <template #append>
+                    <el-button @click="openTmdbSearchDialog('fix')">
+                      <el-icon><Search /></el-icon>
+                    </el-button>
+                  </template>
+                </el-input>
+              </div>
             </el-form-item>
             <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
-              <el-input v-model="fixForm.title" placeholder="例如：刀剑神域：序列之争" />
+              <el-input v-model="fixForm.title" placeholder="例如：刀剑神域：序列之争" style="width: 100%" />
             </el-form-item>
             <el-form-item label="年份">
               <el-input-number v-model="fixForm.year" :min="1900" :max="2100" />
@@ -491,6 +495,7 @@
       v-model="dirFixDialogVisible"
       :title="dirFixMode === 'source' ? '源目录修正整理' : dirFixMode === 'season' ? 'Season 修正重整' : '整组资源修正'"
       width="560px"
+      class="media-fix-dialog"
       append-to-body
       destroy-on-close
     >
@@ -507,16 +512,18 @@
           </el-select>
         </el-form-item>
         <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
-          <el-input v-model="dirFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
-            <template #append>
-              <el-button @click="openTmdbSearchDialog('dir')">
-                <el-icon><Search /></el-icon>
-              </el-button>
-            </template>
-          </el-input>
+          <div style="min-width: 0; overflow: hidden; width: 100%">
+            <el-input v-model="dirFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
+              <template #append>
+                <el-button @click="openTmdbSearchDialog('dir')">
+                  <el-icon><Search /></el-icon>
+                </el-button>
+              </template>
+            </el-input>
+          </div>
         </el-form-item>
         <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
-          <el-input v-model="dirFixForm.title" placeholder="例如：刀剑神域：序列之争" />
+          <el-input v-model="dirFixForm.title" placeholder="例如：刀剑神域：序列之争" style="width: 100%" />
         </el-form-item>
         <el-form-item label="年份">
           <el-input-number v-model="dirFixForm.year" :min="1900" :max="2100" />
@@ -546,19 +553,21 @@
       destroy-on-close
     >
       <div class="search-bar">
-        <el-input
-          v-model="tmdbSearchKeyword"
-          placeholder="电影或电视剧名称 / 直接输入 TMDB ID"
-          clearable
-          @keyup.enter="runTmdbSearch"
-        >
-          <template #prepend>
-            <el-icon><Search /></el-icon>
-          </template>
-          <template #append>
-            <el-button :loading="tmdbSearchLoading" @click="runTmdbSearch">搜索</el-button>
-          </template>
-        </el-input>
+        <div style="min-width: 0; overflow: hidden">
+          <el-input
+            v-model="tmdbSearchKeyword"
+            placeholder="电影或电视剧名称 / 直接输入 TMDB ID"
+            clearable
+            @keyup.enter="runTmdbSearch"
+          >
+            <template #prepend>
+              <el-icon><Search /></el-icon>
+            </template>
+            <template #append>
+              <el-button :loading="tmdbSearchLoading" @click="runTmdbSearch">搜索</el-button>
+            </template>
+          </el-input>
+        </div>
       </div>
 
       <div class="search-list" v-loading="tmdbSearchLoading">
@@ -2119,6 +2128,13 @@ onBeforeUnmount(() => {
   border-left: none;
   border-radius: 0;
 }
+/* Fix: el-input / el-input-group inside flex form-item must use flex:1 */
+:deep(.el-input-group),
+:deep(.el-input) {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
 .media-page {
   display: flex;
   flex-direction: column;
@@ -2712,5 +2728,26 @@ onBeforeUnmount(() => {
 .wash-scan-empty {
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+}
+</style>
+
+<style>
+.el-dialog.media-fix-dialog .el-form-item__content {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.el-dialog.media-fix-dialog .el-input-group {
+  max-width: 100% !important;
+}
+
+.el-dialog.media-fix-dialog .el-input-group__append {
+  background-color: var(--el-fill-color-blank);
+  padding: 0 4px;
+}
+
+.el-dialog.media-fix-dialog .el-input-group__append .el-button {
+  border-left: none;
+  border-radius: 0;
 }
 </style>

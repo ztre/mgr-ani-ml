@@ -100,13 +100,15 @@
               </el-select>
             </el-form-item>
             <el-form-item label="TMDB ID" required>
-              <el-input v-model="form.tmdb_id" placeholder="可直接填写 TMDB ID">
-                <template #append>
-                  <el-button @click="openSearchDialog">
-                    <el-icon><Search /></el-icon>
-                  </el-button>
-                </template>
-              </el-input>
+              <div style="min-width: 0; overflow: hidden; width: 100%">
+                <el-input v-model="form.tmdb_id" placeholder="可直接填写 TMDB ID">
+                  <template #append>
+                    <el-button @click="openSearchDialog">
+                      <el-icon><Search /></el-icon>
+                    </el-button>
+                  </template>
+                </el-input>
+              </div>
             </el-form-item>
             <el-form-item label="标题" required>
               <el-input v-model="form.title" placeholder="例如：刀剑神域：序列之争" />
@@ -238,19 +240,21 @@
       class="tmdb-search-dialog"
     >
       <div class="search-bar">
-        <el-input
-          v-model="searchKeyword"
-          placeholder="电影或电视剧名称 / 直接输入 TMDB ID"
-          clearable
-          @keyup.enter="runSearch"
-        >
-          <template #prepend>
-            <el-icon><Search /></el-icon>
-          </template>
-          <template #append>
-            <el-button :loading="searchLoading" @click="runSearch">搜索</el-button>
-          </template>
-        </el-input>
+        <div style="min-width: 0; overflow: hidden">
+          <el-input
+            v-model="searchKeyword"
+            placeholder="电影或电视剧名称 / 直接输入 TMDB ID"
+            clearable
+            @keyup.enter="runSearch"
+          >
+            <template #prepend>
+              <el-icon><Search /></el-icon>
+            </template>
+            <template #append>
+              <el-button :loading="searchLoading" @click="runSearch">搜索</el-button>
+            </template>
+          </el-input>
+        </div>
       </div>
 
       <div class="search-list" v-loading="searchLoading">
@@ -962,6 +966,13 @@ watch(organizeMonitorTaskStatus, async (status) => {
   border-left: none;
   border-radius: 0;
 }
+/* Fix: el-input / el-input-group inside flex form-item must use flex:1 */
+:deep(.el-input-group),
+:deep(.el-input) {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
 .header {
   display: flex;
   align-items: center;
@@ -1233,5 +1244,24 @@ watch(organizeMonitorTaskStatus, async (status) => {
   display: flex;
   flex-direction: column;
   padding-top: 12px;
+}
+
+.el-dialog.organize-dialog .el-form-item__content {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.el-dialog.organize-dialog .el-input-group {
+  max-width: 100% !important;
+}
+
+.el-dialog.organize-dialog .el-input-group__append {
+  background-color: var(--el-fill-color-blank);
+  padding: 0 4px;
+}
+
+.el-dialog.organize-dialog .el-input-group__append .el-button {
+  border-left: none;
+  border-radius: 0;
 }
 </style>
