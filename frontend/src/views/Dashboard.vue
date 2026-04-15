@@ -583,6 +583,10 @@ function taskTypeText(row) {
     const groupName = type.slice('reidentify:source:'.length) || '未知同步组'
     return withIssueTag(`${groupName} · 源目录修正`)
   }
+  if (type.startsWith('reidentify:batch:')) {
+    const groupName = type.slice('reidentify:batch:'.length) || '未知同步组'
+    return withIssueTag(`${groupName} · 批量修正`)
+  }
   if (type.startsWith('adjust:item:')) {
     const groupName = type.slice('adjust:item:'.length) || '未知同步组'
     return withIssueTag(`${groupName} · 季内调整`)

@@ -953,6 +953,15 @@ watch(organizeMonitorTaskStatus, async (status) => {
 </script>
 
 <style scoped>
+/* Fix: el-input append button background bleed */
+:deep(.el-input-group__append) {
+  background-color: var(--el-fill-color-blank);
+  padding: 0 4px;
+}
+:deep(.el-input-group__append .el-button) {
+  border-left: none;
+  border-radius: 0;
+}
 .header {
   display: flex;
   align-items: center;

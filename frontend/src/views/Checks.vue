@@ -42,6 +42,7 @@
         <el-col :span="4">
           <el-select v-model="filterChecker" placeholder="检查器" clearable @change="loadIssues">
             <el-option label="源文件未使用" value="source_unrecorded" />
+            <el-option label="源目录未使用" value="source_dir_unrecorded" />
             <el-option label="孤立硬链接" value="links_orphans" />
             <el-option label="目标路径异常" value="media_path_sanity" />
             <el-option label="目标文件无源" value="target_no_source" />
@@ -86,6 +87,10 @@
             <template v-if="row._isGroup">
               <span class="dir-path" :title="row._dir">{{ row._dir }}</span>
               <el-tag size="small" effect="plain" style="margin-left:8px;vertical-align:middle">{{ row.children.length }} 个问题</el-tag>
+            </template>
+            <template v-else-if="row._isDirRow">
+              <span class="dir-path" :title="row.resource_dir">{{ row.resource_dir }}</span>
+              <el-tag v-if="row.payload?.file_count" size="small" effect="plain" style="margin-left:8px;vertical-align:middle">{{ row.payload.file_count }} 个文件</el-tag>
             </template>
             <template v-else>
               <div class="path-cell">
@@ -144,12 +149,20 @@
           </template>
         </el-table-column>
         <!-- Operations column -->
-        <el-table-column label="操作" width="170" fixed="right">
+        <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
-            <el-button-group v-if="!row._isGroup" size="small">
+            <el-button-group v-if="row._isGroup" size="small">
+              <el-button type="warning" plain @click="batchActionGroup(row, 'ignore')">批量忽略</el-button>
+              <el-button type="success" plain @click="batchActionGroup(row, 'resolve')">批量解决</el-button>
+            </el-button-group>
+            <el-button-group v-else-if="!row._isDirRow" size="small">
               <el-button v-if="row.status === 'open'" type="primary" plain @click="claimIssue(row)">认领</el-button>
               <el-button v-if="row.status !== 'ignored' && row.status !== 'resolved'" plain @click="ignoreIssue(row)">忽略</el-button>
               <el-button v-if="row.status !== 'resolved'" type="success" plain @click="resolveIssue(row)">解决</el-button>
+            </el-button-group>
+            <el-button-group v-else size="small">
+              <el-button plain @click="ignoreIssue(row)">忽略</el-button>
+              <el-button type="success" plain @click="resolveIssue(row)">解决</el-button>
             </el-button-group>
           </template>
         </el-table-column>
@@ -217,9 +230,17 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(200)
 
+const DIR_LEVEL_CHECKER_CODES = new Set(['source_dir_unrecorded'])
+
 const groupedIssues = computed(() => {
   const map = new Map()
+  const dirRows = []
   for (const issue of issues.value) {
+    // Directory-level issues: show as flat row (no expand), not grouped into tree
+    if (DIR_LEVEL_CHECKER_CODES.has(issue.checker_code)) {
+      dirRows.push({ ...issue, _isDirRow: true, _key: `dir-issue:${issue.id}` })
+      continue
+    }
     const dir =
       issue.resource_dir ||
       (issue.source_path ? issue.source_path.substring(0, issue.source_path.lastIndexOf('/')) || issue.source_path : null) ||
@@ -247,7 +268,8 @@ const groupedIssues = computed(() => {
     if (issue.sync_group_id != null && !g._gs.has(issue.sync_group_id)) { g._gs.add(issue.sync_group_id); g.sync_group_ids.push(issue.sync_group_id) }
     if (!g.updated_at || issue.updated_at > g.updated_at) g.updated_at = issue.updated_at
   }
-  return Array.from(map.values()).map(({ _cs, _ss, _gs, ...rest }) => rest)
+  const treeRows = Array.from(map.values()).map(({ _cs, _ss, _gs, ...rest }) => rest)
+  return [...dirRows, ...treeRows]
 })
 const selectedGroupId = ref(null)
 const filterStatus = ref('open')
@@ -299,15 +321,42 @@ async function loadRuns() {
   }
 }
 
+async function pollUntilCheckDone(triggerTime, onDone) {
+  const MAX_WAIT_MS = 90_000
+  const POLL_INTERVAL_MS = 2_000
+  const deadline = Date.now() + MAX_WAIT_MS
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+    try {
+      const { data } = await checksApi.listRuns({ page: 1, page_size: 1 })
+      const run = data?.items?.[0]
+      if (run && new Date(run.started_at + (run.started_at.endsWith('Z') ? '' : 'Z')) >= triggerTime) {
+        if (run.status === 'completed' || run.status === 'failed') {
+          onDone()
+          return
+        }
+      }
+    } catch {
+      // network hiccup — keep polling
+    }
+  }
+  // Timeout — refresh anyway
+  onDone()
+}
+
 async function runFullCheck() {
   runningFull.value = true
+  const triggerTime = new Date()
   try {
     await checksApi.runFull()
-    ElMessage.success('全量检查任务已进入队列')
-    setTimeout(loadRuns, 1500)
+    ElMessage.success('全量检查任务已进入队列，完成后将自动刷新')
+    pollUntilCheckDone(triggerTime, () => {
+      loadRuns()
+      loadIssues()
+      runningFull.value = false
+    })
   } catch {
     ElMessage.error('启动失败')
-  } finally {
     runningFull.value = false
   }
 }
@@ -315,13 +364,17 @@ async function runFullCheck() {
 async function runGroupCheck() {
   if (!selectedGroupId.value) return
   runningGroup.value = true
+  const triggerTime = new Date()
   try {
     await checksApi.runGroup(selectedGroupId.value)
-    ElMessage.success('单组检查任务已进入队列')
-    setTimeout(loadRuns, 1500)
+    ElMessage.success('单组检查任务已进入队列，完成后将自动刷新')
+    pollUntilCheckDone(triggerTime, () => {
+      loadRuns()
+      loadIssues()
+      runningGroup.value = false
+    })
   } catch {
     ElMessage.error('启动失败')
-  } finally {
     runningGroup.value = false
   }
 }
@@ -370,6 +423,28 @@ async function resolveIssue(row) {
   }
 }
 
+async function batchActionGroup(groupRow, action) {
+  const ids = (groupRow.children || [])
+    .filter((c) => c.status !== 'resolved' && (action !== 'ignore' || c.status !== 'ignored'))
+    .map((c) => c.id)
+  if (!ids.length) {
+    ElMessage.info('该目录下无可操作的问题')
+    return
+  }
+  try {
+    const { data } = await checksApi.batchAction(ids, action)
+    const label = action === 'resolve' ? '解决' : '忽略'
+    ElMessage.success(`已批量${label} ${data.updated} 个问题`)
+    // Update in-memory status
+    const newStatus = action === 'resolve' ? 'resolved' : 'ignored'
+    for (const child of groupRow.children) {
+      if (ids.includes(child.id)) child.status = newStatus
+    }
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '批量操作失败')
+  }
+}
+
 function basename(path) {
   if (!path) return ''
   return path.split('/').pop() || path
@@ -386,6 +461,7 @@ function groupStatusSummary(group) {
 function checkerLabel(code) {
   const map = {
     source_unrecorded: '源文件未使用',
+    source_dir_unrecorded: '源目录未使用',
     links_orphans: '孤立硬链接',
     media_path_sanity: '目标路径异常',
     target_no_source: '目标文件无源',

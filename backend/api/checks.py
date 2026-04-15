@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -210,3 +211,36 @@ def resolve_issue(issue_id: int, db: Session = Depends(get_db)):
     issue.resolved_at = now
     db.commit()
     return _issue_to_dict(issue)
+
+
+# ---------------------------------------------------------------------------
+# Batch issue actions
+# ---------------------------------------------------------------------------
+
+class BatchIssueActionRequest(BaseModel):
+    ids: list[int]
+    action: Literal["resolve", "ignore", "claim"]
+
+
+@router.post("/issues/batch-action")
+def batch_issue_action(req: BatchIssueActionRequest, db: Session = Depends(get_db)):
+    """Bulk resolve / ignore / claim a list of issue IDs."""
+    if not req.ids:
+        return {"updated": 0}
+    now = datetime.now(timezone.utc)
+    issues = db.query(CheckIssue).filter(CheckIssue.id.in_(req.ids)).all()
+    updated = 0
+    for issue in issues:
+        if req.action == "resolve":
+            issue.status = "resolved"
+            issue.resolved_at = now
+        elif req.action == "ignore":
+            if issue.status != "resolved":
+                issue.status = "ignored"
+        elif req.action == "claim":
+            if issue.status == "open":
+                issue.status = "claimed"
+        issue.updated_at = now
+        updated += 1
+    db.commit()
+    return {"updated": updated}

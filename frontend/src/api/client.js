@@ -125,6 +125,7 @@ export const checksApi = {
   claimIssue: (id) => client.post(`/checks/issues/${id}/claim-pending`),
   ignoreIssue: (id) => client.post(`/checks/issues/${id}/ignore`),
   resolveIssue: (id) => client.post(`/checks/issues/${id}/resolve`),
+  batchAction: (ids, action) => client.post('/checks/issues/batch-action', { ids, action }),
   deleteAll: () => client.delete('/checks/all'),
 }
 

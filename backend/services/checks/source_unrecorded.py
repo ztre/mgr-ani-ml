@@ -85,13 +85,35 @@ class SourceUnrecordedChecker(CheckerBase):
                 entries = sorted(leaf_dir.iterdir(), key=lambda p: p.name)
             except OSError:
                 continue
+
+            media_files: list[Path] = []
             for entry in entries:
                 if not entry.is_file():
                     continue
                 ext = entry.suffix.lower()
-                if ext not in VIDEO_EXTS and ext not in ATTACHMENT_EXTS:
-                    continue
-                if str(entry) not in recorded:
+                if ext in VIDEO_EXTS or ext in ATTACHMENT_EXTS:
+                    media_files.append(entry)
+
+            unrecorded = [f for f in media_files if str(f) not in recorded]
+
+            if not unrecorded:
+                continue
+
+            if len(unrecorded) == len(media_files):
+                # All files in this directory are unrecorded → report as directory-level issue
+                issues.append(
+                    IssueData(
+                        checker_code="source_dir_unrecorded",
+                        issue_code="dir_not_recorded",
+                        severity="warning",
+                        sync_group_id=group.id,
+                        resource_dir=str(leaf_dir),
+                        payload={"group_name": group.name, "file_count": len(media_files)},
+                    )
+                )
+            else:
+                # Only some files unrecorded → report per-file
+                for entry in unrecorded:
                     issues.append(
                         IssueData(
                             checker_code=self.checker_code,

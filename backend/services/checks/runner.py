@@ -158,6 +158,11 @@ def _run_checks(db: Session, groups: list[SyncGroup], check_run: CheckRun) -> No
                 all_issues.extend(issues)
                 # Only mark scope as checked on success; failures leave issues untouched
                 checked_scopes.add((code, group.id))
+                # Also register any derived checker_codes emitted by this checker
+                # (e.g. source_dir_unrecorded emitted by source_unrecorded checker)
+                for issue in issues:
+                    if issue.checker_code != code and issue.sync_group_id is not None:
+                        checked_scopes.add((issue.checker_code, issue.sync_group_id))
             except Exception:
                 _log.exception("Checker %r failed for group %r", code, group.name)
 
