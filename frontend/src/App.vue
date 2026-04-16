@@ -77,6 +77,7 @@ function logout() {
 <style>
 :root {
   --app-bg: #f5f7fb;
+  --el-input-border-radius: 10px;
   --page-backdrop: linear-gradient(180deg, #f5f7fb 0%, #eef3fb 100%);
   --page-overlay: radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 28%);
   --panel-bg: #ffffff;
@@ -330,6 +331,11 @@ body {
 .el-select__wrapper,
 .el-button {
   border-radius: 10px;
+}
+
+.el-input-group__append,
+.el-input-group__prepend {
+  overflow: hidden;
 }
 
 .el-button {

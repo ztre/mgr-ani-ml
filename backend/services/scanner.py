@@ -3834,8 +3834,10 @@ def _normalize_media_stem(stem: str) -> str:
     s = re.sub(r"\b(?:2160p|1080p|720p|480p|4k)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:x264|x265|h264|h265|hevc|av1|hi10p|ma10p)\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:flac|aac|ac3|dts|ddp\d?\.\d?)\b", " ", s, flags=re.I)
+    # 点替换后再次剥除版本标（如 _v2 转换为空格后的 v2）
+    s = re.sub(r"\bv\d+(?:\.\d+)?\b", " ", s, flags=re.I)
     s = re.sub(r"\b(?:webrip|web-dl|bdrip|bluray|remux)\b", " ", s, flags=re.I)
-    s = re.sub(r"\b(?:chs|cht|sc|tc|gb|big5|jpn|jp|ja|eng|en|zh[-_ ]?(?:cn|tw))\b", " ", s, flags=re.I)
+    s = re.sub(r"\b(?:chs|cht|sc|tc|gb|big5|jpn|jp|ja|jap|eng|en|zh[-_ ]?(?:cn|tw))\b", " ", s, flags=re.I)
     s = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", s, flags=re.U)
     s = re.sub(r"\s+", " ", s).strip()
     return s.lower()
@@ -5224,6 +5226,14 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
         context["season_aware_tried_queries"] = tried_queries
         if tried_queries:
             append_log(f"INFO: 已尝试重新搜索的查询: {tried_queries}")
+        def _fresh_valid_seasons(tid: int) -> tuple[list[int], dict | None]:
+            """强制刷新 TMDB 缓存并返回有效季号列表。"""
+            d = get_tmdb_tv_details_sync(int(tid), force_refresh=True)
+            if not isinstance(d, dict):
+                return [], None
+            vs = sorted({int(x.get("season_number")) for x in d.get("seasons", []) if x.get("season_number") is not None and int(x.get("season_number")) > 0})
+            return vs, d
+
         if best and best.tmdb_id and int(best.tmdb_id) != int(tmdb_id):
             context["tmdb_id"] = int(best.tmdb_id)
             context["tmdb_data"] = _get_tmdb_item_by_id("tv", best.tmdb_id) or best.tmdb_data
@@ -5245,7 +5255,16 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
                         f"INFO: resolved by season-aware re-search -> tmdbid={tmdb_id}, season={chosen}"
                     )
                 else:
-                    return False, f"季号不匹配 TMDB: season_hint={chosen}, tried={tried_queries}"
+                    # 缓存可能陈旧（新季未及时更新）：强制刷新后重试
+                    fresh_vs, fresh_d = _fresh_valid_seasons(int(best.tmdb_id))
+                    if chosen in fresh_vs and fresh_d:
+                        tmdb_id = int(best.tmdb_id)
+                        details = fresh_d
+                        valid_seasons = fresh_vs
+                        context["_tmdb_series_details"] = fresh_d
+                        append_log(f"INFO: 强制刷新 TMDB 确认 tmdbid={tmdb_id} season={chosen}")
+                    else:
+                        return False, f"季号不匹配 TMDB: season_hint={chosen}, tried={tried_queries}"
             else:
                 return False, "无法获取 TMDB 季信息"
         elif best and best.tmdb_id and int(best.tmdb_id) == int(tmdb_id):
@@ -5262,7 +5281,15 @@ def _stabilize_directory_context(media_dir: Path, context: dict) -> tuple[bool, 
                     f"INFO: resolved by season-aware re-search -> tmdbid={best.tmdb_id}, season={chosen}"
                 )
             else:
-                return False, f"季号不匹配 TMDB: season_hint={chosen}, tried={tried_queries}"
+                # 缓存可能陈旧：强制刷新后重试
+                fresh_vs, fresh_d = _fresh_valid_seasons(int(best.tmdb_id))
+                if chosen in fresh_vs and fresh_d:
+                    details = fresh_d
+                    valid_seasons = fresh_vs
+                    context["_tmdb_series_details"] = fresh_d
+                    append_log(f"INFO: 强制刷新 TMDB 确认 tmdbid={best.tmdb_id} season={chosen}")
+                else:
+                    return False, f"季号不匹配 TMDB: season_hint={chosen}, tried={tried_queries}"
         else:
             return False, f"季号不匹配 TMDB: season_hint={chosen}, tried={tried_queries}"
 

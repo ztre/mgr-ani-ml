@@ -369,15 +369,13 @@
           </el-select>
         </el-form-item>
         <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
-          <div style="min-width: 0; overflow: hidden; width: 100%">
-            <el-input v-model="batchFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
-              <template #append>
-                <el-button @click="openTmdbSearchDialog('batch')">
-                  <el-icon><Search /></el-icon>
-                </el-button>
-              </template>
-            </el-input>
-          </div>
+          <el-input v-model="batchFixForm.tmdb_id" placeholder="可直接填写 TMDB ID" style="width: 100%">
+            <template #append>
+              <el-button @click="openTmdbSearchDialog('batch')">
+                <el-icon><Search /></el-icon>
+              </el-button>
+            </template>
+          </el-input>
         </el-form-item>
         <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
           <el-input v-model="batchFixForm.title" placeholder="例如：刀剑神域：序列之争" style="width: 100%" />
@@ -418,15 +416,13 @@
               </el-select>
             </el-form-item>
             <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
-              <div style="min-width: 0; overflow: hidden; width: 100%">
-                <el-input v-model="fixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
-                  <template #append>
-                    <el-button @click="openTmdbSearchDialog('fix')">
-                      <el-icon><Search /></el-icon>
-                    </el-button>
-                  </template>
-                </el-input>
-              </div>
+              <el-input v-model="fixForm.tmdb_id" placeholder="可直接填写 TMDB ID" style="width: 100%">
+                <template #append>
+                  <el-button @click="openTmdbSearchDialog('fix')">
+                    <el-icon><Search /></el-icon>
+                  </el-button>
+                </template>
+              </el-input>
             </el-form-item>
             <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
               <el-input v-model="fixForm.title" placeholder="例如：刀剑神域：序列之争" style="width: 100%" />
@@ -512,15 +508,13 @@
           </el-select>
         </el-form-item>
         <el-form-item label="TMDB ID" required prop="tmdb_id" :rules="[{ required: true, message: '请填写 TMDB ID', trigger: 'blur' }]">
-          <div style="min-width: 0; overflow: hidden; width: 100%">
-            <el-input v-model="dirFixForm.tmdb_id" placeholder="可直接填写 TMDB ID">
-              <template #append>
-                <el-button @click="openTmdbSearchDialog('dir')">
-                  <el-icon><Search /></el-icon>
-                </el-button>
-              </template>
-            </el-input>
-          </div>
+          <el-input v-model="dirFixForm.tmdb_id" placeholder="可直接填写 TMDB ID" style="width: 100%">
+            <template #append>
+              <el-button @click="openTmdbSearchDialog('dir')">
+                <el-icon><Search /></el-icon>
+              </el-button>
+            </template>
+          </el-input>
         </el-form-item>
         <el-form-item label="标题" required prop="title" :rules="[{ required: true, message: '请填写标题', trigger: 'blur' }]">
           <el-input v-model="dirFixForm.title" placeholder="例如：刀剑神域：序列之争" style="width: 100%" />
@@ -2124,9 +2118,16 @@ onBeforeUnmount(() => {
   background-color: var(--el-fill-color-blank);
   padding: 0 4px;
 }
-:deep(.el-input-group__append .el-button) {
+:deep(.el-input-group__append .el-button),
+:deep(.el-input-group__append .el-button:hover),
+:deep(.el-input-group__append .el-button:active) {
+  margin: 0 -4px;
   border-left: none;
   border-radius: 0;
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
 }
 /* Fix: el-input / el-input-group inside flex form-item must use flex:1 */
 :deep(.el-input-group),
@@ -2734,7 +2735,6 @@ onBeforeUnmount(() => {
 <style>
 .el-dialog.media-fix-dialog .el-form-item__content {
   min-width: 0;
-  overflow: hidden;
 }
 
 .el-dialog.media-fix-dialog .el-input-group {
@@ -2744,10 +2744,18 @@ onBeforeUnmount(() => {
 .el-dialog.media-fix-dialog .el-input-group__append {
   background-color: var(--el-fill-color-blank);
   padding: 0 4px;
+  overflow: hidden;
 }
 
-.el-dialog.media-fix-dialog .el-input-group__append .el-button {
+.el-dialog.media-fix-dialog .el-input-group__append .el-button,
+.el-dialog.media-fix-dialog .el-input-group__append .el-button:hover,
+.el-dialog.media-fix-dialog .el-input-group__append .el-button:active {
+  margin: 0 -4px;
   border-left: none;
   border-radius: 0;
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
 }
 </style>

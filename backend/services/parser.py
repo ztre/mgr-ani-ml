@@ -588,8 +588,11 @@ def search_tmdb_movie_candidates_sync(title: str, year: int | None = None) -> li
     return asyncio.run(search_tmdb_movie_candidates(title, year))
 
 
-def get_tmdb_tv_details_sync(tv_id: int) -> dict | None:
-    """TMDB TV 详情获取的同步封装。"""
+def get_tmdb_tv_details_sync(tv_id: int, *, force_refresh: bool = False) -> dict | None:
+    """TMDB TV 详情获取的同步封装。force_refresh=True 时先清除该条目的缓存。"""
+    if force_refresh:
+        cache_key = ("detail", "tv", int(tv_id))
+        _TMDB_CACHE.pop(cache_key, None)
     return asyncio.run(get_tmdb_tv_details(tv_id))
 
 

@@ -801,8 +801,10 @@ def _normalize_media_stem(stem: str) -> str:
     text = re.sub(r"\b(?:2160p|1080p|720p|480p|4k)\b", " ", text, flags=re.I)
     text = re.sub(r"\b(?:x264|x265|h264|h265|hevc|av1|hi10p|ma10p)\b", " ", text, flags=re.I)
     text = re.sub(r"\b(?:flac|aac|ac3|dts|ddp\d?\.\d?)\b", " ", text, flags=re.I)
+    # 点替换后再次剥除版本标（如 _v2 转换为空格后的 v2）
+    text = re.sub(r"\bv\d+(?:\.\d+)?\b", " ", text, flags=re.I)
     text = re.sub(r"\b(?:webrip|web-dl|bdrip|bluray|remux)\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(?:chs|cht|sc|tc|gb|big5|jpn|jp|ja|eng|en|zh[-_ ]?(?:cn|tw))\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:chs|cht|sc|tc|gb|big5|jpn|jp|ja|jap|eng|en|zh[-_ ]?(?:cn|tw))\b", " ", text, flags=re.I)
     text = re.sub(r"[^\w\u4e00-\u9fff\- ]+", " ", text, flags=re.U)
     text = re.sub(r"\s+", " ", text).strip().lower()
     if not text:
@@ -814,7 +816,8 @@ def _normalize_attachment_stem(stem: str) -> str:
     s = str(stem or "")
     if not s:
         return ""
-    s = re.sub(r"\.(?:sc|tc|chs|cht|jpsc|jptc|zh[\-_]?(?:cn|tw)|ass|srt|ssa|vtt)\s*$", "", s, flags=re.I)
+    # 剥除语言后缀：.SC .TC .jap .eng 等，以及带版本标变体如 .sc_v2 .tc_v2
+    s = re.sub(r"\.(?:jap|eng|sc|tc|chs|cht|jpsc|jptc|zh[\-_]?(?:cn|tw)|ass|srt|ssa|vtt)(?:_v\d+)?\s*$", "", s, flags=re.I)
     s = re.sub(r"\b(?:sc|tc|chs|cht|jpsc|jptc|zh[\-_]?(?:cn|tw))\s*$", "", s, flags=re.I)
     # 剥离以点或空格分隔的中日文语言名称后缀，如 .简体中文 .繁體中文 .日文 .中文 等
     s = re.sub(
@@ -886,6 +889,10 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
     if _in_season_dir and ep is not None and (parse_result.episode is None or int(ep) == int(parse_result.episode)):
         parts.append(f"E{int(ep):02d}")
     for tag in _extract_distinguish_source_tags(src_path.stem):
+        # 版本标（v2/v3/ver.2 等）不加入附件区分后缀：
+        # 视频目标名已剥除版本，附件名须与视频一致才能被播放器自动加载。
+        if re.fullmatch(r"ver\.?\s*\d+|v\d+(?:\.\d+)?", tag.strip(), re.I):
+            continue
         parts.append(tag)
     seen: set[str] = set()
     for part in parts:

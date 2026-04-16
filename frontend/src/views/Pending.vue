@@ -100,15 +100,13 @@
               </el-select>
             </el-form-item>
             <el-form-item label="TMDB ID" required>
-              <div style="min-width: 0; overflow: hidden; width: 100%">
-                <el-input v-model="form.tmdb_id" placeholder="可直接填写 TMDB ID">
-                  <template #append>
-                    <el-button @click="openSearchDialog">
-                      <el-icon><Search /></el-icon>
-                    </el-button>
-                  </template>
-                </el-input>
-              </div>
+              <el-input v-model="form.tmdb_id" placeholder="可直接填写 TMDB ID" style="width: 100%">
+                <template #append>
+                  <el-button @click="openSearchDialog">
+                    <el-icon><Search /></el-icon>
+                  </el-button>
+                </template>
+              </el-input>
             </el-form-item>
             <el-form-item label="标题" required>
               <el-input v-model="form.title" placeholder="例如：刀剑神域：序列之争" />
@@ -962,9 +960,16 @@ watch(organizeMonitorTaskStatus, async (status) => {
   background-color: var(--el-fill-color-blank);
   padding: 0 4px;
 }
-:deep(.el-input-group__append .el-button) {
+:deep(.el-input-group__append .el-button),
+:deep(.el-input-group__append .el-button:hover),
+:deep(.el-input-group__append .el-button:active) {
+  margin: 0 -4px;
   border-left: none;
   border-radius: 0;
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
 }
 /* Fix: el-input / el-input-group inside flex form-item must use flex:1 */
 :deep(.el-input-group),
@@ -1248,7 +1253,6 @@ watch(organizeMonitorTaskStatus, async (status) => {
 
 .el-dialog.organize-dialog .el-form-item__content {
   min-width: 0;
-  overflow: hidden;
 }
 
 .el-dialog.organize-dialog .el-input-group {
@@ -1258,10 +1262,18 @@ watch(organizeMonitorTaskStatus, async (status) => {
 .el-dialog.organize-dialog .el-input-group__append {
   background-color: var(--el-fill-color-blank);
   padding: 0 4px;
+  overflow: hidden;
 }
 
-.el-dialog.organize-dialog .el-input-group__append .el-button {
+.el-dialog.organize-dialog .el-input-group__append .el-button,
+.el-dialog.organize-dialog .el-input-group__append .el-button:hover,
+.el-dialog.organize-dialog .el-input-group__append .el-button:active {
+  margin: 0 -4px;
   border-left: none;
   border-radius: 0;
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
 }
 </style>

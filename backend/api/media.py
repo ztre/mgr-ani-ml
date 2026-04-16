@@ -23,10 +23,14 @@ from ..database import get_db
 from ..models import CheckIssue, DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
 from ..services.group_routing import resolve_movie_target_root, resolve_tv_target_root
 from ..services.linker import get_inode, path_excluded
-from ..services.parser import classify_extra_from_text, parse_movie_filename, parse_tv_filename
+from ..services.parser import _extract_subtitle_lang, classify_extra_from_text, parse_movie_filename, parse_tv_filename
 from ..services.resource_tree import build_resource_summaries, build_resource_tree, extract_tv_primary_season
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
-from ..services.target_path_resolver import build_attachment_target_from_anchor
+from ..services.target_path_resolver import (
+    _normalize_attachment_stem,
+    _normalize_media_stem,
+    build_attachment_target_from_anchor,
+)
 from ..services.scanner import (
     _collect_media_files_under_dir,
     _is_ignored_name,
@@ -1459,6 +1463,53 @@ def _run_single_adjust(
         if inode_row:
             inode_row.target_path = str(dst)
 
+    # 处理随行附件：从磁盘找同目录同 stem 的附件文件，再按 original_path 查 DB 更新记录。
+    # 不依赖 file_type / sync_group_id 列，与识别修正的附件处理方式一致。
+    src_dir = src.parent
+    video_stem_key = _normalize_media_stem(src.stem)
+    att_companion_count = 0
+    att_companion_failed = 0
+    if video_stem_key and src_dir.is_dir():
+        try:
+            disk_att_files = sorted(
+                p for p in src_dir.iterdir()
+                if p.suffix.lower() in ATTACHMENT_EXTS
+                and _normalize_attachment_stem(p.stem) == video_stem_key
+            )
+        except OSError:
+            disk_att_files = []
+        for att_src in disk_att_files:
+            att_row = db.query(MediaRecord).filter(MediaRecord.original_path == str(att_src)).first()
+            if att_row is None:
+                continue
+            att_ext = att_src.suffix.lower()
+            att_pr = parse_tv_filename(str(att_src)) or parse_movie_filename(str(att_src)) or pr
+            try:
+                att_dst = build_attachment_target_from_anchor(dst, att_pr, att_ext, src_path=att_src)
+                att_old_value = str(att_row.target_path or "").strip()
+                if att_old_value:
+                    att_old = Path(att_old_value)
+                    if att_old != att_dst:
+                        try:
+                            if att_old.is_file():
+                                att_old.unlink()
+                        except OSError as exc:
+                            append_log(f"WARNING: 随行附件旧目标清理失败: {att_old} | {exc}")
+                _link_or_fail(att_src, att_dst)
+                att_row.target_path = str(att_dst)
+                att_row.status = "manual_fixed"
+                att_row.updated_at = datetime.now(timezone.utc)
+                att_ino = get_inode(att_src)
+                if att_ino:
+                    att_inode_row = db.query(InodeRecord).filter(InodeRecord.inode == att_ino).first()
+                    if att_inode_row:
+                        att_inode_row.target_path = str(att_dst)
+                append_log(f"随行附件调整完成: {att_src.name} -> {att_dst}")
+                att_companion_count += 1
+            except Exception as exc:
+                append_log(f"WARNING: 随行附件调整失败，跳过: {att_src.name} | {exc}")
+                att_companion_failed += 1
+
     db.commit()
 
     # Prune empty directories left by old target
@@ -1468,11 +1519,12 @@ def _run_single_adjust(
         except OSError:
             pass
 
-    append_log(f"季内调整完成: {src.name} -> {dst}")
+    extra_note = f"（附件 {att_companion_count} 个）" if att_companion_count else ""
+    append_log(f"季内调整完成: {src.name} -> {dst}{extra_note}")
     return {
-        "message": f"{src.name} -> {dst.name}",
+        "message": f"{src.name} -> {dst.name}{extra_note}",
         "new_path": str(dst),
-        "has_issues": False,
+        "has_issues": att_companion_failed > 0,
     }
 
 
