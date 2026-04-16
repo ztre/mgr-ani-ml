@@ -919,9 +919,13 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
 
 
 def _extract_attachment_distinguish_token(stem: str) -> str:
-    tokens = re.findall(r"\[([^\]]+)\]", str(stem or ""))
-    for raw in tokens:
-        text = re.sub(r"\s+", " ", str(raw or "")).strip()
+    stem_str = str(stem or "")
+    for bm in re.finditer(r"\[([^\]]+)\]", stem_str):
+        # 位置 0 的 [方括号] 是发布组/制作组前缀，不作为区分标签
+        if bm.start() == 0:
+            continue
+        raw = bm.group(1)
+        text = re.sub(r"\s+", " ", raw).strip()
         if not text:
             continue
         lower = text.lower()

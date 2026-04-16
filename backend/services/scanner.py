@@ -998,6 +998,9 @@ def _run_manual_organize_core(
                 )
             if pending_resolved:
                 db.delete(pending)
+                # 手动整理完成后写入 DirectoryState=SUCCESS，防止后续扫描重复处理该目录
+                _dir_sig = _build_dir_signature(root_dir, source_root, include, exclude)
+                _upsert_dir_state(db, group.id, root_dir, _dir_sig, "SUCCESS", None)
             else:
                 pending.updated_at = datetime.now(timezone.utc)
         inode_skipped = int(dir_runtime.get("inode_skip_count") or 0)
@@ -1862,10 +1865,8 @@ def _process_file(
         # 但全括号格式 `[Group][Title][EP][Codec]...` 本身就是主视频常见写法，
         # 如果继续套用这套规则，会把标题 token 当成 variant 文案，重新把主视频打回特典。
         # Code Geass 那类样本正是这个问题，所以这里先做全括号格式豁免。
-        is_all_bracket_format = _extract_title_from_all_bracket_format(src_path.stem) is not None and not re.search(
-            r"[^\[\]]+",
-            re.sub(r"\[[^\]]*\]", "", src_path.stem),
-        )
+        _residual_after_brackets = re.sub(r"\[[^\]]*\]|\([^)]*\)", "", src_path.stem)
+        is_all_bracket_format = _extract_title_from_all_bracket_format(src_path.stem) is not None and not _residual_after_brackets.strip()
         _variant_category, _variant_label, _from_bracket = (
             (None, None, False) if is_all_bracket_format
             else _detect_bracket_variant_as_special(src_path.name)
@@ -4287,6 +4288,17 @@ def _is_noise_or_group_bracket_token(raw: str) -> bool:
     compact = re.sub(r"[\s._\-]+", " ", token).strip().lower()
     # 合并被点/空格分割的编码标签（如 "x.264" → "x 264" → "x264"）
     compact = re.sub(r"\b([xh]) (\d{3})\b", r"\1\2", compact)
+    # 复合技术词组：拆分后各部分单独无法匹配 noise_patterns，但整体属于技术来源描述。
+    # 只要 compact 内含有一个强技术词，就整体视为噪音，不进入 variant 检测。
+    # 例：[Blu-ray] → "blu ray"，[True 4K] → "true 4k"，[10-bit] → "10 bit"，[Encode] 等。
+    if re.search(
+        r"\b(?:blu[\s\-]?ray|true[\s\-]?(?:4k|hd)|uhd|hdr(?:10)?|dolby(?:[\s\-]?vision)?|"
+        r"hi[\s\-]?\d+p|main[\s\-]?\d+|\d+[\s\-]?bit|"
+        r"encode[d]?|rip(?:ped)?|source|scan|"
+        r"remaster(?:ed)?|upscal(?:e|ed)?|restore[d]?)\b",
+        compact, re.I
+    ):
+        return True
     noise_patterns = [
         r"\d{3,4}p",
         r"\d{3,4}x\d{3,4}",
