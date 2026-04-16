@@ -27,12 +27,21 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-_ALL_CHECKER_CODES = ["source_unrecorded", "links_orphans", "media_path_sanity", "target_no_source"]
+_ALL_CHECKER_CODES = ["source_unrecorded", "media_path_sanity", "target_no_source", "links_orphans"]
 _CHECKER_MAP = {
     "source_unrecorded": SourceUnrecordedChecker(),
     "links_orphans": LinksOrphansChecker(),
     "media_path_sanity": MediaPathSanityChecker(),
     "target_no_source": TargetNoSourceChecker(),
+}
+# Checkers that emit issues with a *derived* checker_code (different from their own).
+# When the parent checker runs successfully, its derived codes are always registered in
+# checked_scopes so that auto-resolve can clean up stale derived issues even when no
+# issues are found in the current run.
+_DERIVED_CHECKER_CODES: dict[str, set[str]] = {
+    "source_unrecorded": {"source_dir_unrecorded"},
+    "target_no_source": {"target_dir_no_source"},
+    "links_orphans": {"target_dir_no_source"},
 }
 
 
@@ -156,13 +165,12 @@ def _run_checks(db: Session, groups: list[SyncGroup], check_run: CheckRun) -> No
             try:
                 issues = checker.run(db, [group])
                 all_issues.extend(issues)
-                # Only mark scope as checked on success; failures leave issues untouched
+                # Mark scope as checked on success; failures leave issues untouched
                 checked_scopes.add((code, group.id))
-                # Also register any derived checker_codes emitted by this checker
-                # (e.g. source_dir_unrecorded emitted by source_unrecorded checker)
-                for issue in issues:
-                    if issue.checker_code != code and issue.sync_group_id is not None:
-                        checked_scopes.add((issue.checker_code, issue.sync_group_id))
+                # Always register known derived checker_codes for this checker so that
+                # auto-resolve can clean up stale derived issues even when no issues found.
+                for derived in _DERIVED_CHECKER_CODES.get(code, set()):
+                    checked_scopes.add((derived, group.id))
             except Exception:
                 _log.exception("Checker %r failed for group %r", code, group.name)
 

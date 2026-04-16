@@ -813,6 +813,12 @@ def _normalize_attachment_stem(stem: str) -> str:
         return ""
     s = re.sub(r"\.(?:sc|tc|chs|cht|jpsc|jptc|zh[\-_]?(?:cn|tw)|ass|srt|ssa|vtt)\s*$", "", s, flags=re.I)
     s = re.sub(r"\b(?:sc|tc|chs|cht|jpsc|jptc|zh[\-_]?(?:cn|tw))\s*$", "", s, flags=re.I)
+    # 剥离以点或空格分隔的中日文语言名称后缀，如 .简体中文 .繁體中文 .日文 .中文 等
+    s = re.sub(
+        r"[.\s_](?:简体中文|繁體中文|繁体中文|简中|繁中|简体|繁体|繁體|中文|日文|日语|日本語|日本语|英文|英语)\s*$",
+        "",
+        s,
+    )
     return _normalize_media_stem(s)
 
 

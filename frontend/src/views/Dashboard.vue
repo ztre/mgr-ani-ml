@@ -604,7 +604,7 @@ function taskTypeText(row) {
   }
   if (type.startsWith('wash:season:')) {
     const groupName = type.slice('wash:season:'.length) || '未知同步组'
-    return withIssueTag(`${groupName} · Season 洗版`)
+    return withIssueTag(`${groupName} · 季度洗版`)
   }
   if (type === 'group') {
     const group = groups.value.find((g) => g.id === row?.target_id)

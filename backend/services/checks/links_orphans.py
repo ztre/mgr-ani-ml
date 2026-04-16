@@ -85,13 +85,36 @@ class LinksOrphansChecker(CheckerBase):
                     entries = sorted(leaf_dir.iterdir(), key=lambda p: p.name)
                 except OSError:
                     continue
+                all_files: list[Path] = []
+                orphan_files: list[Path] = []
                 for entry in entries:
                     if not entry.is_file():
                         continue
                     ext = entry.suffix.lower()
                     if ext not in VIDEO_EXTS and ext not in ATTACHMENT_EXTS:
                         continue
+                    all_files.append(entry)
                     if str(entry) not in recorded_targets:
+                        orphan_files.append(entry)
+                if not orphan_files:
+                    continue
+                if len(orphan_files) == len(all_files):
+                    # 整个目录均为孤立文件（从未入库）→ 与 target_no_source 共用目录级类型
+                    issues.append(
+                        IssueData(
+                            checker_code="target_dir_no_source",
+                            issue_code="dir_orphan_target",
+                            severity="warning",
+                            sync_group_id=group.id,
+                            resource_dir=str(leaf_dir),
+                            payload={
+                                "group_name": group.name,
+                                "file_count": len(orphan_files),
+                            },
+                        )
+                    )
+                else:
+                    for entry in orphan_files:
                         issues.append(
                             IssueData(
                                 checker_code=self.checker_code,

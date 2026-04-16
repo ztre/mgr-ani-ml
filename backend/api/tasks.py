@@ -162,4 +162,11 @@ def delete_all_tasks(db: Session = Depends(get_task_db)):
             p.unlink()
         except OSError:
             pass
+    # 同步清空应用日志（app.log），重置后日志从零开始
+    app_log = LOG_DIR / "app.log"
+    if app_log.exists():
+        try:
+            app_log.write_text("", encoding="utf-8")
+        except OSError:
+            pass
     return {"message": f"已删除 {count} 条任务记录并清理日志"}

@@ -377,7 +377,8 @@ async function resetSystem() {
 
     resetting.value = true
     await Promise.all([mediaApi.deleteAll(), inodesApi.deleteAll(), tasksApi.deleteAll(), checksApi.deleteAll()])
-    ElMessage.success('系统已重置')
+    ElMessage.success('系统已重置，页面即将刷新')
+    setTimeout(() => window.location.reload(), 1000)
   } catch (e) {
     if (e !== 'cancel') {
       ElMessage.error(e?.response?.data?.detail || '重置失败')

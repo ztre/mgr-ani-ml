@@ -46,6 +46,7 @@
             <el-option label="孤立硬链接" value="links_orphans" />
             <el-option label="目标路径异常" value="media_path_sanity" />
             <el-option label="目标文件无源" value="target_no_source" />
+            <el-option label="目标目录无源" value="target_dir_no_source" />
           </el-select>
         </el-col>
         <el-col :span="3">
@@ -238,7 +239,7 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(200)
 
-const DIR_LEVEL_CHECKER_CODES = new Set(['source_dir_unrecorded'])
+const DIR_LEVEL_CHECKER_CODES = new Set(['source_dir_unrecorded', 'target_dir_no_source'])
 
 const groupedIssues = computed(() => {
   const map = new Map()
@@ -473,6 +474,7 @@ function checkerLabel(code) {
     links_orphans: '孤立硬链接',
     media_path_sanity: '目标路径异常',
     target_no_source: '目标文件无源',
+    target_dir_no_source: '目标目录无源',
   }
   return map[code] || code
 }
