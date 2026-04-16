@@ -2909,13 +2909,14 @@ def _collect_video_leaf_dirs(source: Path, include: str, exclude: str) -> list[P
             if path_excluded(entry, include, exclude, root_path=source):
                 continue
             has_video = True
-            break
+            if current != source:
+                break  # 非源目录命中视频即可停止，源目录需继续收集所有子目录
 
-        if has_video and current != source:
-            dirs.add(current)
-        elif has_video:
-            # 源目录本身直接含视频时，继续向下遍历子目录，不将源目录本身加入整理队列
+        if current == source:
+            # 源目录本身始终只遍历子目录，不能作为整理对象
             stack.extend(reversed(subdirs))
+        elif has_video:
+            dirs.add(current)
         else:
             stack.extend(reversed(subdirs))
 
