@@ -1332,6 +1332,8 @@ def _extract_stem_based_extra_fallback_label(text: str) -> str | None:
         r"\b(FD(?:\s+[A-Z0-9]+)+)\b$",
         r"\b([A-Za-z0-9][A-Za-z0-9'&]+(?:\s+[A-Za-z0-9][A-Za-z0-9'&]+){0,4}\s+Party(?:\s+\d{4})?)\b$",
         r"\b(\d{1,3}\.\d)\b",
+        r"\b(Vol\.?\s*\d+(?:-\d+)?)\b",
+        r"^(CV)$",
     ]
     for pattern in candidate_patterns:
         match = re.search(pattern, stem, re.I)
@@ -1398,7 +1400,7 @@ def extract_strong_extra_fallback_label(text: str) -> str | None:
             continue
         if re.fullmatch(r"[0-9]+", cleaned):
             continue
-        if not re.search(r"[A-Za-z\u4e00-\u9fff]", cleaned):
+        if not re.search(r"[A-Za-z\u00c0-\u024f\u0370-\u03ff\u4e00-\u9fff]", cleaned):
             continue
         if _is_release_group_phrase(cleaned):
             continue
@@ -1464,7 +1466,16 @@ def _match_extra_info(text: str) -> tuple[str, str] | None:
             label = prefix if not idx else _format_token_number(prefix, idx)
             return category, label
 
-    # 0.5) JP/CN special-program tokens -> extras(making) bucket
+    # 0.5) JP/CN next-episode preview tokens -> preview bucket
+    jp_preview_patterns = [
+        r"(予告)",
+    ]
+    for p in jp_preview_patterns:
+        m = re.search(p, s)
+        if m:
+            return "preview", _normalize_extra_label(m.group(1))
+
+    # 0.5b) JP/CN special-program tokens -> extras(making) bucket
     jp_making_patterns = [
         r"(TV\s*番組)",
         r"(テレビ番組)",

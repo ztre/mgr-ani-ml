@@ -794,6 +794,9 @@ def _extract_season_from_path(src_path: Path) -> int | None:
 def _normalize_media_stem(stem: str) -> str:
     text = str(stem or "")
     text = re.sub(r"[\[\]\(\)\{\}]", " ", text)
+    # 先剥除声道标（如 5.1ch、6ch）和版本标（如 v2、v3）——必须在 dot→space 之前
+    text = re.sub(r"\b\d+(?:\.\d)?ch\b", " ", text, flags=re.I)
+    text = re.sub(r"\bv\d+(?:\.\d+)?\b", " ", text, flags=re.I)
     text = text.replace(".", " ").replace("_", " ")
     text = re.sub(r"\b(?:2160p|1080p|720p|480p|4k)\b", " ", text, flags=re.I)
     text = re.sub(r"\b(?:x264|x265|h264|h265|hevc|av1|hi10p|ma10p)\b", " ", text, flags=re.I)

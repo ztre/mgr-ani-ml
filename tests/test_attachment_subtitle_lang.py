@@ -63,3 +63,16 @@ def test_extract_subtitle_lang_identifies_chinese_full_names():
     assert _extract_subtitle_lang("Jigokuraku - 01 [WebRip 1080p HEVC-10bit AAC ASSx2].简体中文.ass") == ".zh-CN"
     assert _extract_subtitle_lang("Jigokuraku - 01 [WebRip 1080p HEVC-10bit AAC ASSx2].繁體中文.ass") == ".zh-TW"
     assert _extract_subtitle_lang("Jigokuraku - 01 [WebRip 1080p HEVC-10bit AAC ASSx2].繁体中文.ass") == ".zh-TW"
+
+
+def test_normalize_media_stem_strips_channel_and_version_tags():
+    from backend.services.target_path_resolver import _normalize_media_stem
+    # 声道标和版本标应被剥除，使附件 stem 与视频 stem 能匹配
+    assert _normalize_media_stem("Kanon 2006 EP01 Bluray 1920x1080p24 x264 Hi10P FLAC v2-mawen1250 6CH") == \
+           _normalize_media_stem("Kanon 2006 EP01 Bluray 1920x1080p24 x264 Hi10P FLAC-mawen1250")
+    # v3 版本标
+    assert _normalize_media_stem("Title EP05 Hi10P FLAC v3") == _normalize_media_stem("Title EP05 Hi10P FLAC")
+    # 5.1ch 声道标（点在 stem 规范化前保留，可命中 \b\d+(?:\.\d)?ch\b）
+    assert _normalize_media_stem("Show EP05 FLAC 5.1ch") == _normalize_media_stem("Show EP05 FLAC")
+    # 2ch
+    assert _normalize_media_stem("Show 01 AAC 2ch") == _normalize_media_stem("Show 01 AAC")
