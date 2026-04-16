@@ -1142,7 +1142,7 @@ def _extract_subtitle_lang(filename: str) -> str | None:
     has_jpsc = has_token(["jpsc"])
     has_jptc = has_token(["jptc"])
     has_zh_cn = "简中" in name_lower or "简体" in name_lower or has_token(["sc", "chs", "gb"])
-    has_zh_tw = "繁中" in name_lower or "繁体" in name_lower or has_token(["tc", "cht", "big5"])
+    has_zh_tw = "繁中" in name_lower or "繁体" in name_lower or "繁體" in name_lower or has_token(["tc", "cht", "big5"])
     has_ja = "日文" in name_lower or "日语" in name_lower or has_token(["jp", "ja", "jpn", "jap", "japanese"])
     has_en = "english" in name_lower or has_token(["en", "eng"])
 

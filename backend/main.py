@@ -1,6 +1,8 @@
 """FastAPI app entrypoint."""
 from __future__ import annotations
 
+import logging
+import logging.handlers
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,13 +13,34 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 
 from .api import auth, checks, config as config_api, emby, inodes, logs, media, scan, sync_groups, tasks
-from .api.logs import cleanup_logs_if_needed
+from .api.logs import LOG_DIR, cleanup_logs_if_needed
 from .config import settings
 from .database import RequestSessionLocal, SessionLocal, init_db
 from .models import MediaRecord, SyncGroup
 from .security import require_auth
 from .services.scanner import run_scan
 from .services.task_queue import enqueue_task, ensure_task_queue_worker
+
+
+def _setup_file_logging() -> None:
+    """将 app 运行日志输出到 logs/app.log（Rotating，10MB×5）。"""
+    log_file = LOG_DIR / "app.log"
+    handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    formatter = logging.Formatter(
+        fmt="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    if not any(isinstance(h, logging.handlers.RotatingFileHandler) and getattr(h, "baseFilename", None) == str(log_file) for h in root_logger.handlers):
+        root_logger.addHandler(handler)
+    if root_logger.level == logging.NOTSET:
+        root_logger.setLevel(logging.INFO)
 
 
 @asynccontextmanager
@@ -28,6 +51,7 @@ async def lifespan(app: FastAPI):
         if (settings.auth_username or "").strip() == "admin" and (settings.auth_password or "") == "admin123":
             raise RuntimeError("检测到默认账号口令 admin/admin123，请修改后再启动")
     init_db()
+    _setup_file_logging()
     cleanup_logs_if_needed(force=True)
     ensure_task_queue_worker()
     yield

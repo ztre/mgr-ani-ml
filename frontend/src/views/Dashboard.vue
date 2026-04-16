@@ -609,7 +609,7 @@ function taskTypeText(row) {
   if (type === 'group') {
     const group = groups.value.find((g) => g.id === row?.target_id)
     const text = group?.name || '单组扫描'
-    return withIssueTag(text)
+    return withIssueTag(`${text} · 扫描`)
   }
   if (type === 'full') {
     return withIssueTag('全量扫描')

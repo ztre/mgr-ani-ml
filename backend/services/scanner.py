@@ -2911,8 +2911,11 @@ def _collect_video_leaf_dirs(source: Path, include: str, exclude: str) -> list[P
             has_video = True
             break
 
-        if has_video:
+        if has_video and current != source:
             dirs.add(current)
+        elif has_video:
+            # 源目录本身直接含视频时，继续向下遍历子目录，不将源目录本身加入整理队列
+            stack.extend(reversed(subdirs))
         else:
             stack.extend(reversed(subdirs))
 
@@ -4318,6 +4321,7 @@ def _is_noise_or_group_bracket_token(raw: str) -> bool:
         r"bluray",
         r"remux",
         r"chap(?:ters?)?",
+        r"\d{1,2}bit",
     ]
     parts = [part for part in re.split(r"[\s&+/|]+", compact) if part]
     if parts and all(any(re.fullmatch(pattern, part, flags=re.I) for pattern in noise_patterns) for part in parts):

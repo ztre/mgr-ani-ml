@@ -51,6 +51,10 @@ docker compose up -d --build
 
 访问地址：`http://localhost:8000`
 
+## 升级注意事项
+
+- **数据库结构调整**：部分版本更新后，`media_records` 表新增了 `season`、`category`、`file_type` 等字段；升级后建议在 Web UI 触发一次**全量扫描**，以补全已有记录的新增字段，否则部分筛选与统计功能可能显示不完整。
+
 ## 首次启动说明
 
 - 应用会在数据目录自动生成运行时配置文件：`${AMM_ROOT_DIR}/data/.env`

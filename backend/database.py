@@ -271,34 +271,46 @@ def _migrate_scan_tasks_to_task_db() -> None:
   if _TASK_DATABASE_URL == settings.database_url:
     return
 
-  with engine.connect() as source_conn:
-    source_rows = source_conn.execute(
-      text(
-        "SELECT id, type, target_id, target_name, status, log_file, created_at, finished_at "
-        "FROM scan_tasks ORDER BY id"
-      )
-    ).mappings().all()
+  try:
+    with engine.connect() as source_conn:
+      if not _table_exists(source_conn, "scan_tasks"):
+        return
+      available_cols = _table_columns(source_conn, "scan_tasks")
 
-  if not source_rows:
-    return
+    # 仅迁移目标表已有的列，旧 schema 缺列时用 None 补全
+    _TASK_COLS = ["id", "type", "target_id", "target_name", "status", "log_file", "created_at", "finished_at"]
+    select_cols = [c for c in _TASK_COLS if c in available_cols]
+    if not select_cols or "id" not in select_cols:
+      return
 
-  with task_engine.begin() as task_conn:
-    existing_ids = {
-      int(row[0])
-      for row in task_conn.execute(text("SELECT id FROM scan_tasks")).fetchall()
-      if row and row[0] is not None
-    }
-    for row in source_rows:
-      row_id = row.get("id")
-      if row_id is None or int(row_id) in existing_ids:
-        continue
-      task_conn.execute(
-        text(
-          "INSERT INTO scan_tasks (id, type, target_id, target_name, status, log_file, created_at, finished_at) "
-          "VALUES (:id, :type, :target_id, :target_name, :status, :log_file, :created_at, :finished_at)"
-        ),
-        dict(row),
-      )
+    with engine.connect() as source_conn:
+      source_rows = source_conn.execute(
+        text(f"SELECT {', '.join(select_cols)} FROM scan_tasks ORDER BY id")
+      ).mappings().all()
+
+    if not source_rows:
+      return
+
+    with task_engine.begin() as task_conn:
+      existing_ids = {
+        int(row[0])
+        for row in task_conn.execute(text("SELECT id FROM scan_tasks")).fetchall()
+        if row and row[0] is not None
+      }
+      for row in source_rows:
+        row_id = row.get("id")
+        if row_id is None or int(row_id) in existing_ids:
+          continue
+        insert_data = {c: row.get(c) for c in _TASK_COLS}
+        task_conn.execute(
+          text(
+            "INSERT INTO scan_tasks (id, type, target_id, target_name, status, log_file, created_at, finished_at) "
+            "VALUES (:id, :type, :target_id, :target_name, :status, :log_file, :created_at, :finished_at)"
+          ),
+          insert_data,
+        )
+  except Exception:
+    _log.warning("scan_tasks 迁移到 task_db 失败，跳过迁移（已有记录不受影响）", exc_info=True)
 
 
 def _ensure_directory_states_unique_index() -> None:
