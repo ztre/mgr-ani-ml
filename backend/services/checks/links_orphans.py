@@ -13,7 +13,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from ...models import InodeRecord, MediaRecord, SyncGroup
+from ...models import MediaRecord, SyncGroup
 from .base import CheckerBase, IssueData
 
 VIDEO_EXTS = frozenset({".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv"})
@@ -80,18 +80,6 @@ class LinksOrphansChecker(CheckerBase):
                 )
                 .all()
             }
-            # Also collect target_paths tracked by InodeRecord for this group.
-            # Files present in inode tracking were processed by the scanner at some
-            # point (even if the MediaRecord was later removed, e.g. by a wash), so
-            # they should not be reported as true orphans.
-            # NOTE: target_path is a globally unique FS path, so no sync_group_id
-            # filter is needed (and sync_group_id may be NULL in legacy records).
-            inode_targets: set[str] = {
-                row[0]
-                for row in db.query(InodeRecord.target_path)
-                .filter(InodeRecord.target_path.isnot(None))
-                .all()
-            }
             for leaf_dir in _collect_leaf_dirs(target_root):
                 try:
                     entries = sorted(leaf_dir.iterdir(), key=lambda p: p.name)
@@ -103,7 +91,7 @@ class LinksOrphansChecker(CheckerBase):
                     ext = entry.suffix.lower()
                     if ext not in VIDEO_EXTS and ext not in ATTACHMENT_EXTS:
                         continue
-                    if str(entry) not in recorded_targets and str(entry) not in inode_targets:
+                    if str(entry) not in recorded_targets:
                         issues.append(
                             IssueData(
                                 checker_code=self.checker_code,
