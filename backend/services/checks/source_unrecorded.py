@@ -47,9 +47,10 @@ def _collect_video_leaf_dirs(source: Path, max_depth: int = 10) -> list[Path]:
                 continue
             if entry.is_file() and entry.suffix.lower() in VIDEO_EXTS:
                 has_video = True
-        if has_video:
+        if has_video and current != source:
             leaf_dirs.append(current)
         else:
+            # 源目录本身直接含视频时，继续遍历子目录，不将源目录加入检查列表
             for d in reversed(subdirs):
                 stack.append((d, depth + 1))
     return leaf_dirs
