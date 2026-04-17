@@ -58,12 +58,27 @@ class AttachmentAnchorResult:
     layer: str | None = None
 
 
-def build_attachment_target_from_anchor(anchor_dst: Path, parse_result: ParseResult, ext: str, src_path: Path | None = None) -> Path:
+def build_attachment_target_from_anchor(
+    anchor_dst: Path,
+    parse_result: ParseResult,
+    ext: str,
+    src_path: Path | None = None,
+    primary_src_path: Path | None = None,
+) -> Path:
     # anchor_dst 已是重命名后的干净目标路径，直接以其 stem 为基准，
     # 保证字幕/音轨文件名与正片完全一致，播放器才能自动加载。
+    # primary_src_path: 正片源文件路径。若附件与正片同源（token 相同），
+    # 不追加区分后缀，否则 Emby 无法自动关联字幕。
     base = anchor_dst.stem
     if src_path is not None:
-        suffix = _build_attachment_source_suffix(src_path, parse_result, base, anchor_dir=anchor_dst.parent)
+        primary_token = (
+            _extract_attachment_distinguish_token(primary_src_path.stem)
+            if primary_src_path is not None
+            else None
+        )
+        suffix = _build_attachment_source_suffix(
+            src_path, parse_result, base, anchor_dir=anchor_dst.parent, primary_token=primary_token
+        )
         if suffix:
             base = f"{base} {suffix}".strip()
     lang = parse_result.subtitle_lang or ""
@@ -864,7 +879,7 @@ def _pick_best_anchor_candidate(candidates: list[Path], src_path: Path, parse_re
     return best
 
 
-def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, anchor_stem: str, anchor_dir: Path | None = None) -> str:
+def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, anchor_stem: str, anchor_dir: Path | None = None, primary_token: str | None = None) -> str:
     if parse_result.extra_category in (SPECIAL_CATEGORIES | EXTRA_CATEGORIES):
         return ""
     # 仅在 TV Season 目录（Season XX）下才追加集号区分后缀；movie 上下文无集号。
@@ -903,6 +918,9 @@ def _build_attachment_source_suffix(src_path: Path, parse_result: ParseResult, a
         if key in seen:
             continue
         seen.add(key)
+        # 若该 token 与正片源文件的区分 token 相同，则此附件属于正片同源附件，不追加后缀
+        if primary_token and key == primary_token.lower():
+            continue
         normalized = _normalize_media_stem(token)
         if normalized and normalized in anchor_key:
             continue
@@ -933,6 +951,9 @@ def _extract_attachment_distinguish_token(stem: str) -> str:
             continue
         text = re.sub(r"\((?:NC|On\s*Air)\s*Ver\.?\)", "", text, flags=re.I).strip(" -_")
         if not text:
+            continue
+        # 集号+版本号复合格式（如 02v3、12v2），视频目标已剥除版本，不作为区分 token
+        if re.fullmatch(r"\d+v\d+(?:\.\d+)?", text, re.I):
             continue
         if re.search(r"[a-zA-Z\u4e00-\u9fff]", text) and re.search(r"\d", text):
             return text[:40]

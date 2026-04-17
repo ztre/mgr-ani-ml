@@ -171,6 +171,38 @@ def parse_tv_filename(filename: str, structure_hint: str | None = None) -> Parse
     extra_category, extra_label, extra_from_bracket = classify_extra_from_text(raw_stem)
     is_special = extra_category in {"special", "oped"}
 
+    # 若 OAD/OVA/SP 等匹配自标题文本（非括号内），但文件同时带有纯数字括号集号
+    # （含 [00]），说明 OAD/OVA/SP 是系列名称的一部分，而非特典标记
+    if not extra_from_bracket and extra_category in {"special", "oped"}:
+        if re.search(r"\[\d{1,3}\]", raw_stem):
+            extra_category = None
+            extra_label = None
+            is_special = False
+
+    # 检测 'SeriesTitle - DescriptiveSubtitle - NN' 内联短片模式（优先于集号解析）
+    if extra_category is None:
+        inline_result = _detect_inline_subtitle_extra(clean)
+        if inline_result is not None:
+            sub_label, sub_ep = inline_result
+            season = _extract_explicit_season_hint_for_extra(episode_text) or 1
+            title_parts = re.split(r"\s+-\s+", clean)
+            title = _cleanup_title(title_parts[0]) if len(title_parts) >= 2 else _cleanup_title(clean)
+            if not title:
+                title = _cleanup_title(clean)
+            return ParseResult(
+                title,
+                year,
+                season,
+                sub_ep,
+                True,
+                quality,
+                "special",
+                sub_label,
+                subtitle_lang,
+                False,
+                False,
+            )
+
     # 解析优先级：显式 EP/季号 > 罗马/!!/单词季号 > 尾部季号 > Final > 仅集号
     bracket_episode, bracket_suffix = extract_bracket_episode(raw_stem)
     has_special_episode_suffix = bool(bracket_suffix and not bracket_suffix.isdigit())
@@ -1168,6 +1200,68 @@ def _extract_subtitle_lang(filename: str) -> str | None:
     if has_en:
         return ".en"
     return None
+
+
+_INLINE_SUBTITLE_STOP_WORDS = frozenset({
+    "the", "a", "an", "in", "of", "on", "at", "to", "for", "and",
+    "or", "but", "is", "are", "was", "were", "with", "by", "from",
+    "up", "as", "into", "about", "that", "this", "its",
+})
+
+
+def _detect_inline_subtitle_extra(clean: str) -> tuple[str, int | None] | None:
+    """检测 'SeriesTitle - DescriptiveSubtitle - NN' 内联字幕模式。
+
+    适用场景: BD 附赠短片以系列名为前缀 + 短片标题 + 集号的命名方式，例如:
+      'Violet Evergarden - Understanding Violet Evergarden in 5 Minutes - 01'
+
+    检测条件:
+      1. clean 末尾有 ' - NN' 裸集号 (1-99)
+      2. 剩余部分有至少一个 dash 分隔 (至少两段)
+      3. 末段 (subtitle) 有 ≥ 3 个词
+      4. subtitle 中出现 ≥ 2 个来自 title 部分的实词 (len>2, 非停用词)
+    """
+    m = re.search(r"\s+-\s+(\d{1,3})\s*$", clean)
+    if not m:
+        return None
+    ep_num = int(m.group(1))
+    if not (1 <= ep_num <= 99):
+        return None
+
+    pre_ep = clean[: m.start()].strip()
+    dash_parts = re.split(r"\s+-\s+", pre_ep)
+    if len(dash_parts) < 2:
+        return None
+
+    subtitle_candidate = dash_parts[-1].strip()
+    words = [w for w in subtitle_candidate.split() if w]
+    if len(words) < 3:
+        return None
+
+    # subtitle 不能全是技术/季号标记
+    tech_re = re.compile(
+        r"^(?:S\d{1,2}|E\d{1,3}|Season|\d{3,4}p|x26[45]|hevc|flac|aac|bdrip|webrip|bluray|bd|dvd)$",
+        re.I,
+    )
+    if all(tech_re.match(w) for w in words):
+        return None
+
+    # subtitle 中至少有 2 个实词与 title 部分重叠
+    title_part = " ".join(dash_parts[:-1])
+
+    def _content_words(s: str) -> set[str]:
+        return {
+            w.lower()
+            for w in re.split(r"[\s\-_.,!?]+", s)
+            if len(w) > 2 and w.lower() not in _INLINE_SUBTITLE_STOP_WORDS
+        }
+
+    overlap = _content_words(title_part) & _content_words(subtitle_candidate)
+    if len(overlap) < 2:
+        return None
+
+    label = _normalize_extra_label(subtitle_candidate) or subtitle_candidate.strip()
+    return label, ep_num
 
 
 def classify_extra_from_text(text: str) -> tuple[str | None, str | None, bool]:

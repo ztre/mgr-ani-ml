@@ -51,7 +51,6 @@ def _compute_fingerprint(issue: IssueData) -> str:
     raw = "|".join([
         issue.checker_code,
         issue.issue_code,
-        str(issue.sync_group_id or ""),
         key_path,
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -100,47 +99,36 @@ def _persist_issues(
             existing.check_run_id = check_run_id
 
         else:
-            # Was ignored or resolved, but issue reappeared → reopen
-            _log.info(
-                "Reopening check issue id=%d fingerprint=%.16s (was %s)",
-                existing.id, fp, existing.status,
-            )
-            existing.status = "open"
-            existing.updated_at = now
-            existing.resolved_at = None
-            existing.check_run_id = check_run_id
-            reopened += 1
+            # Was ignored or resolved — skip, do not reopen
+            pass
 
     return found, opened, reopened
 
 
 def _auto_resolve_vanished(
     db: Session,
-    checked_scopes: set[tuple[str, int | None]],
+    checked_scopes: set[str],
     found_fingerprints: set[str],
 ) -> int:
     """Auto-resolve open/claimed issues not found in the current run.
 
-    Only operates within (checker_code, sync_group_id) scopes that were
-    actually executed successfully.  Issues with status 'ignored' are
-    left untouched.
+    Only operates within checker_code scopes that were actually executed
+    successfully.  Issues with status 'ignored' or 'resolved' are left
+    untouched.
     """
     now = datetime.now(timezone.utc)
     resolved = 0
 
-    for checker_code, sync_group_id in checked_scopes:
+    for checker_code in checked_scopes:
         q = db.query(CheckIssue).filter(
             CheckIssue.checker_code == checker_code,
             CheckIssue.status.in_(("open", "claimed")),
         )
-        if sync_group_id is not None:
-            q = q.filter(CheckIssue.sync_group_id == sync_group_id)
-
         for issue in q.all():
             if issue.fingerprint not in found_fingerprints:
                 _log.info(
-                    "Auto-resolving vanished issue id=%d fp=%.16s checker=%s group=%s",
-                    issue.id, issue.fingerprint, checker_code, sync_group_id,
+                    "Auto-resolving vanished issue id=%d fp=%.16s checker=%s",
+                    issue.id, issue.fingerprint, checker_code,
                 )
                 issue.status = "resolved"
                 issue.resolved_at = now
@@ -151,32 +139,52 @@ def _auto_resolve_vanished(
 
 
 def _run_checks(db: Session, groups: list[SyncGroup], check_run: CheckRun) -> None:
-    """Execute all enabled checkers for the given groups and persist results."""
+    """Execute all enabled checkers globally across the given groups and persist results."""
     all_issues: list[IssueData] = []
-    checked_scopes: set[tuple[str, int | None]] = set()
+    checked_scopes: set[str] = set()
 
+    # Collect union of all enabled checker codes across all groups
+    all_enabled: set[str] = set()
     for group in groups:
-        enabled = group.get_enabled_checks()
-        for code in enabled:
-            checker = _CHECKER_MAP.get(code)
-            if checker is None:
-                _log.warning("Unknown checker code %r for group %r — skipping", code, group.name)
-                continue
-            try:
-                issues = checker.run(db, [group])
-                all_issues.extend(issues)
-                # Mark scope as checked on success; failures leave issues untouched
-                checked_scopes.add((code, group.id))
-                # Always register known derived checker_codes for this checker so that
-                # auto-resolve can clean up stale derived issues even when no issues found.
-                for derived in _DERIVED_CHECKER_CODES.get(code, set()):
-                    checked_scopes.add((derived, group.id))
-            except Exception:
-                _log.exception("Checker %r failed for group %r", code, group.name)
+        all_enabled.update(group.get_enabled_checks())
 
-    found, opened, reopened = _persist_issues(db, check_run.id, all_issues)
+    for code in sorted(all_enabled):
+        checker = _CHECKER_MAP.get(code)
+        if checker is None:
+            _log.warning("Unknown checker code %r — skipping", code)
+            continue
+        try:
+            issues = checker.run(db, groups)
+            all_issues.extend(issues)
+            # Mark scope as checked on success; failures leave issues untouched
+            checked_scopes.add(code)
+            # Always register known derived checker_codes for this checker so that
+            # auto-resolve can clean up stale derived issues even when no issues found.
+            for derived in _DERIVED_CHECKER_CODES.get(code, set()):
+                checked_scopes.add(derived)
+        except Exception:
+            _log.exception("Checker %r failed", code)
 
-    found_fingerprints = {_compute_fingerprint(issue) for issue in all_issues}
+    # 预过滤已抑制（ignored/resolved）的问题：检查流程中跳过，不计入 found/opened
+    suppressed_fps: set[str] = {
+        row[0]
+        for row in db.query(CheckIssue.fingerprint)
+        .filter(CheckIssue.status.in_(("ignored", "resolved")))
+        .all()
+    }
+    active_issues = [
+        i for i in all_issues
+        if _compute_fingerprint(i) not in suppressed_fps
+    ]
+    if len(all_issues) != len(active_issues):
+        _log.info(
+            "Skipped %d suppressed (ignored/resolved) issues in this run",
+            len(all_issues) - len(active_issues),
+        )
+
+    found, opened, reopened = _persist_issues(db, check_run.id, active_issues)
+
+    found_fingerprints = {_compute_fingerprint(issue) for issue in active_issues}
     resolved = _auto_resolve_vanished(db, checked_scopes, found_fingerprints)
 
     check_run.status = "completed"
@@ -222,23 +230,4 @@ def run_checks_full(db: Session) -> CheckRun:
     return check_run
 
 
-def run_checks_for_group(db: Session, group: SyncGroup) -> CheckRun:
-    """Run all enabled checkers for a single sync group."""
-    now = datetime.now(timezone.utc)
-    check_run = CheckRun(
-        sync_group_id=group.id,
-        status="running",
-        started_at=now,
-    )
-    db.add(check_run)
-    db.flush()
 
-    try:
-        _run_checks(db, [group], check_run)
-    except Exception:
-        check_run.status = "failed"
-        check_run.finished_at = datetime.now(timezone.utc)
-        db.commit()
-        raise
-
-    return check_run

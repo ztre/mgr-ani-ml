@@ -60,70 +60,64 @@ class SourceUnrecordedChecker(CheckerBase):
     checker_code = "source_unrecorded"
 
     def run(self, db: Session, groups: list[SyncGroup]) -> list[IssueData]:
-        issues: list[IssueData] = []
-        for group in groups:
-            group_issues = self._check_group(db, group)
-            issues.extend(group_issues)
-        return issues
-
-    def _check_group(self, db: Session, group: SyncGroup) -> list[IssueData]:
-        source_root = Path(group.source)
-        if not source_root.exists():
-            return []
-
-        # Load all recorded original_paths for this group into a set
+        # 全局检查：将所有同步组的已记录路径合并为一个大集合，避免跨组目录误报
         recorded: set[str] = {
             row[0]
-            for row in db.query(MediaRecord.original_path)
-            .filter(MediaRecord.sync_group_id == group.id)
-            .all()
+            for row in db.query(MediaRecord.original_path).all()
         }
 
         issues: list[IssueData] = []
-        leaf_dirs = _collect_video_leaf_dirs(source_root)
-        for leaf_dir in leaf_dirs:
-            try:
-                entries = sorted(leaf_dir.iterdir(), key=lambda p: p.name)
-            except OSError:
+        seen_sources: set[str] = set()
+        for group in groups:
+            source_root = Path(group.source)
+            if not source_root.exists() or str(source_root) in seen_sources:
                 continue
+            seen_sources.add(str(source_root))
 
-            media_files: list[Path] = []
-            for entry in entries:
-                if not entry.is_file():
+            leaf_dirs = _collect_video_leaf_dirs(source_root)
+            for leaf_dir in leaf_dirs:
+                try:
+                    entries = sorted(leaf_dir.iterdir(), key=lambda p: p.name)
+                except OSError:
                     continue
-                ext = entry.suffix.lower()
-                if ext in VIDEO_EXTS or ext in ATTACHMENT_EXTS:
-                    media_files.append(entry)
 
-            unrecorded = [f for f in media_files if str(f) not in recorded]
+                media_files: list[Path] = []
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    ext = entry.suffix.lower()
+                    if ext in VIDEO_EXTS or ext in ATTACHMENT_EXTS:
+                        media_files.append(entry)
 
-            if not unrecorded:
-                continue
+                unrecorded = [f for f in media_files if str(f) not in recorded]
 
-            if len(unrecorded) == len(media_files):
-                # All files in this directory are unrecorded → report as directory-level issue
-                issues.append(
-                    IssueData(
-                        checker_code="source_dir_unrecorded",
-                        issue_code="dir_not_recorded",
-                        severity="warning",
-                        sync_group_id=group.id,
-                        resource_dir=str(leaf_dir),
-                        payload={"group_name": group.name, "file_count": len(media_files)},
-                    )
-                )
-            else:
-                # Only some files unrecorded → report per-file
-                for entry in unrecorded:
+                if not unrecorded:
+                    continue
+
+                if len(unrecorded) == len(media_files):
+                    # All files in this directory are unrecorded → report as directory-level issue
                     issues.append(
                         IssueData(
-                            checker_code=self.checker_code,
-                            issue_code="file_not_recorded",
+                            checker_code="source_dir_unrecorded",
+                            issue_code="dir_not_recorded",
                             severity="warning",
-                            sync_group_id=group.id,
-                            source_path=str(entry),
+                            sync_group_id=None,
                             resource_dir=str(leaf_dir),
-                            payload={"group_name": group.name},
+                            payload={"group_name": group.name, "file_count": len(media_files)},
                         )
                     )
+                else:
+                    # Only some files unrecorded → report per-file
+                    for entry in unrecorded:
+                        issues.append(
+                            IssueData(
+                                checker_code=self.checker_code,
+                                issue_code="file_not_recorded",
+                                severity="warning",
+                                sync_group_id=None,
+                                source_path=str(entry),
+                                resource_dir=str(leaf_dir),
+                                payload={"group_name": group.name},
+                            )
+                        )
         return issues

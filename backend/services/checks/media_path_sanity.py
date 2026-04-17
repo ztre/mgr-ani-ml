@@ -1,11 +1,13 @@
 """media_path_sanity checker.
 
 Mirrors the logic in tdocs/check_media_path_sanity.sh:
-  For each MediaRecord in the group:
+  For each MediaRecord with a target_path:
   1. target_missing  : target_path is set but file does not exist on FS
-  2. type_mismatch   : the record's `type` (tv/movie) does not match the
-                       library root directory for this group
-                       (e.g. a `tv` record found under a `movie`-type group)
+
+Note: type_mismatch (record.type vs sync_group.source_type) check has been
+removed because source/target paths can be shared across sync groups, making
+group-scoped type comparisons unreliable (cross-group records would always
+mismatch their original group's source_type).
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from ...models import MediaRecord, SyncGroup
+from ...models import MediaRecord
 from .base import CheckerBase, IssueData
 
 
@@ -22,68 +24,34 @@ class MediaPathSanityChecker(CheckerBase):
 
     def run(self, db: Session, groups: list[SyncGroup]) -> list[IssueData]:
         issues: list[IssueData] = []
-        for group in groups:
-            issues.extend(self._check_group(db, group))
-        return issues
-
-    def _check_group(self, db: Session, group: SyncGroup) -> list[IssueData]:
-        issues: list[IssueData] = []
-        group_source_type = group.source_type  # "tv" or "movie"
-        target_root = str(group.target).rstrip("/")
 
         records = (
             db.query(
                 MediaRecord.id,
                 MediaRecord.original_path,
                 MediaRecord.target_path,
-                MediaRecord.type,
                 MediaRecord.tmdb_id,
             )
-            .filter(
-                MediaRecord.sync_group_id == group.id,
-                MediaRecord.target_path.isnot(None),
-            )
+            .filter(MediaRecord.target_path.isnot(None))
             .all()
         )
 
-        for rec_id, orig_path, tgt_path, rec_type, tmdb_id in records:
+        for rec_id, orig_path, tgt_path, tmdb_id in records:
             if not tgt_path:
                 continue
 
-            # Check 1: target file existence
+            # Check: target file existence
             if not Path(tgt_path).exists():
                 issues.append(
                     IssueData(
                         checker_code=self.checker_code,
                         issue_code="target_missing",
                         severity="error",
-                        sync_group_id=group.id,
+                        sync_group_id=None,
                         source_path=orig_path,
                         target_path=tgt_path,
                         tmdb_id=tmdb_id,
-                        payload={"media_record_id": rec_id, "group_name": group.name},
-                    )
-                )
-
-            # Check 2: type / library-root mismatch
-            # The record's type should match the group's configured source_type.
-            # A mismatch means the record was possibly written under the wrong group.
-            if rec_type and group_source_type and rec_type != group_source_type:
-                issues.append(
-                    IssueData(
-                        checker_code=self.checker_code,
-                        issue_code="type_mismatch",
-                        severity="warning",
-                        sync_group_id=group.id,
-                        source_path=orig_path,
-                        target_path=tgt_path,
-                        tmdb_id=tmdb_id,
-                        payload={
-                            "media_record_id": rec_id,
-                            "record_type": rec_type,
-                            "group_source_type": group_source_type,
-                            "group_name": group.name,
-                        },
+                        payload={"media_record_id": rec_id},
                     )
                 )
 

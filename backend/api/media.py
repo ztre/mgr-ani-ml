@@ -1327,6 +1327,7 @@ def _run_single_reidentify(
     # 处理随行附件（字幕/音轨等）
     companion_processed = 0
     companion_failed = 0
+    video_stem_key = _normalize_media_stem(src.stem)
     if data.companion_ids:
         companion_rows = db.query(MediaRecord).filter(MediaRecord.id.in_(data.companion_ids)).all()
         for att_row in companion_rows:
@@ -1335,10 +1336,14 @@ def _run_single_reidentify(
                 append_log(f"WARNING: 附件源文件不存在，跳过: {att_src}")
                 companion_failed += 1
                 continue
+            # 检查 stem 是否与主视频匹配，防止同 group 下其他版本的附件被误带入
+            if _normalize_attachment_stem(att_src.stem) != video_stem_key:
+                append_log(f"跳过 stem 不匹配的附件: {att_src.name}")
+                continue
             att_ext = att_src.suffix.lower()
             att_pr = parse_tv_filename(str(att_src)) or parse_movie_filename(str(att_src)) or pr
             try:
-                att_dst = build_attachment_target_from_anchor(dst, att_pr, att_ext, src_path=att_src)
+                att_dst = build_attachment_target_from_anchor(dst, att_pr, att_ext, src_path=att_src, primary_src_path=src)
                 # 清理附件旧目标
                 att_old_value = str(att_row.target_path or "").strip()
                 if att_old_value:
@@ -1485,7 +1490,7 @@ def _run_single_adjust(
             att_ext = att_src.suffix.lower()
             att_pr = parse_tv_filename(str(att_src)) or parse_movie_filename(str(att_src)) or pr
             try:
-                att_dst = build_attachment_target_from_anchor(dst, att_pr, att_ext, src_path=att_src)
+                att_dst = build_attachment_target_from_anchor(dst, att_pr, att_ext, src_path=att_src, primary_src_path=src)
                 att_old_value = str(att_row.target_path or "").strip()
                 if att_old_value:
                     att_old = Path(att_old_value)

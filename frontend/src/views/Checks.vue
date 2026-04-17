@@ -7,24 +7,6 @@
           <el-icon><Search /></el-icon>
           全量检查
         </el-button>
-        <el-select
-          v-model="selectedGroupId"
-          placeholder="选择同步组"
-          clearable
-          style="width: 180px"
-          @change="onGroupChange"
-        >
-          <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
-        </el-select>
-        <el-button
-          type="primary"
-          :loading="runningGroup"
-          :disabled="!selectedGroupId"
-          @click="runGroupCheck"
-        >
-          <el-icon><Refresh /></el-icon>
-          检查当前组
-        </el-button>
       </div>
     </div>
 
@@ -34,7 +16,6 @@
         <el-col :span="4">
           <el-select v-model="filterStatus" placeholder="状态" clearable @change="loadIssues">
             <el-option label="待处理 (open)" value="open" />
-            <el-option label="已认领 (claimed)" value="claimed" />
             <el-option label="已忽略 (ignored)" value="ignored" />
             <el-option label="已解决 (resolved)" value="resolved" />
           </el-select>
@@ -47,22 +28,6 @@
             <el-option label="目标路径异常" value="media_path_sanity" />
             <el-option label="目标文件无源" value="target_no_source" />
             <el-option label="目标目录无源" value="target_dir_no_source" />
-          </el-select>
-        </el-col>
-        <el-col :span="3">
-          <el-select v-model="filterSeverity" placeholder="严重度" clearable @change="loadIssues">
-            <el-option label="错误" value="error" />
-            <el-option label="警告" value="warning" />
-          </el-select>
-        </el-col>
-        <el-col :span="4">
-          <el-select
-            v-model="filterSyncGroup"
-            placeholder="同步组"
-            clearable
-            @change="loadIssues"
-          >
-            <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
         </el-col>
         <el-col :span="3">
@@ -121,17 +86,6 @@
             </template>
           </template>
         </el-table-column>
-        <!-- Sync group column -->
-        <el-table-column label="同步组" width="110">
-          <template #default="{ row }">
-            <template v-if="row._isGroup">
-              {{ row.sync_group_ids.map(id => groupName(id)).join(', ') }}
-            </template>
-            <template v-else>
-              <span class="muted">{{ groupName(row.sync_group_id) }}</span>
-            </template>
-          </template>
-        </el-table-column>
         <!-- Status column -->
         <el-table-column label="状态" width="140">
           <template #default="{ row }">
@@ -150,7 +104,7 @@
           </template>
         </el-table-column>
         <!-- Operations column -->
-        <el-table-column label="操作" width="190" fixed="right">
+        <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <el-button-group v-if="row._isGroup" size="small">
               <el-button type="warning" plain
@@ -159,11 +113,14 @@
               <el-button type="success" plain
                 :disabled="(row.children || []).every(c => c.status === 'resolved' || c.status === 'ignored')"
                 @click="batchActionGroup(row, 'resolve')">批量解决</el-button>
+              <el-button plain
+                v-if="filterStatus !== 'open'"
+                @click="batchActionGroup(row, 'reopen')">批量转待处理</el-button>
             </el-button-group>
             <el-button-group v-else-if="!row._isDirRow" size="small">
-              <el-button v-if="row.status === 'open'" type="primary" plain @click="claimIssue(row)">认领</el-button>
               <el-button v-if="row.status !== 'ignored' && row.status !== 'resolved'" plain @click="ignoreIssue(row)">忽略</el-button>
               <el-button v-if="row.status !== 'resolved'" type="success" plain @click="resolveIssue(row)">解决</el-button>
+              <el-button v-if="row.status === 'ignored' || row.status === 'resolved'" type="primary" plain @click="reopenIssue(row)">转为待处理</el-button>
             </el-button-group>
             <el-button-group v-else size="small">
               <el-button plain
@@ -172,6 +129,7 @@
               <el-button type="success" plain
                 :disabled="row.status === 'resolved'"
                 @click="resolveIssue(row)">解决</el-button>
+              <el-button v-if="row.status === 'ignored' || row.status === 'resolved'" type="primary" plain @click="reopenIssue(row)">转为待处理</el-button>
             </el-button-group>
           </template>
         </el-table-column>
@@ -234,7 +192,6 @@ const issues = ref([])
 const runs = ref([])
 const issuesLoading = ref(false)
 const runningFull = ref(false)
-const runningGroup = ref(false)
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(200)
@@ -280,11 +237,8 @@ const groupedIssues = computed(() => {
   const treeRows = Array.from(map.values()).map(({ _cs, _ss, _gs, ...rest }) => rest)
   return [...dirRows, ...treeRows]
 })
-const selectedGroupId = ref(null)
 const filterStatus = ref('open')
 const filterChecker = ref(null)
-const filterSeverity = ref(null)
-const filterSyncGroup = ref(null)
 
 onMounted(async () => {
   await loadGroups()
@@ -309,8 +263,6 @@ async function loadIssues() {
     }
     if (filterStatus.value) params.status = filterStatus.value
     if (filterChecker.value) params.checker_code = filterChecker.value
-    if (filterSeverity.value) params.severity = filterSeverity.value
-    if (filterSyncGroup.value != null) params.sync_group_id = filterSyncGroup.value
     const { data } = await checksApi.listIssues(params)
     issues.value = data.items || []
     total.value = data.total || 0
@@ -370,46 +322,11 @@ async function runFullCheck() {
   }
 }
 
-async function runGroupCheck() {
-  if (!selectedGroupId.value) return
-  runningGroup.value = true
-  const triggerTime = new Date()
-  try {
-    await checksApi.runGroup(selectedGroupId.value)
-    ElMessage.success('单组检查任务已进入队列，完成后将自动刷新')
-    pollUntilCheckDone(triggerTime, () => {
-      loadRuns()
-      loadIssues()
-      runningGroup.value = false
-    })
-  } catch {
-    ElMessage.error('启动失败')
-    runningGroup.value = false
-  }
-}
-
-function onGroupChange() {
-  filterSyncGroup.value = selectedGroupId.value
-  loadIssues()
-}
-
 function resetFilters() {
   filterStatus.value = 'open'
   filterChecker.value = null
-  filterSeverity.value = null
-  filterSyncGroup.value = null
   page.value = 1
   loadIssues()
-}
-
-async function claimIssue(row) {
-  try {
-    await checksApi.claimIssue(row.id)
-    ElMessage.success('已认领')
-    row.status = 'claimed'
-  } catch (e) {
-    ElMessage.error(e?.response?.data?.detail || '操作失败')
-  }
 }
 
 async function ignoreIssue(row) {
@@ -432,20 +349,36 @@ async function resolveIssue(row) {
   }
 }
 
+async function reopenIssue(row) {
+  try {
+    await checksApi.reopenIssue(row.id)
+    ElMessage.success('已转为待处理')
+    row.status = 'open'
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '操作失败')
+  }
+}
+
 async function batchActionGroup(groupRow, action) {
-  const ids = (groupRow.children || [])
-    .filter((c) => c.status !== 'resolved' && (action !== 'ignore' || c.status !== 'ignored'))
-    .map((c) => c.id)
+  let ids
+  if (action === 'reopen') {
+    ids = (groupRow.children || [])
+      .filter((c) => c.status === 'ignored' || c.status === 'resolved')
+      .map((c) => c.id)
+  } else {
+    ids = (groupRow.children || [])
+      .filter((c) => c.status !== 'resolved' && (action !== 'ignore' || c.status !== 'ignored'))
+      .map((c) => c.id)
+  }
   if (!ids.length) {
     ElMessage.info('该目录下无可操作的问题')
     return
   }
   try {
     const { data } = await checksApi.batchAction(ids, action)
-    const label = action === 'resolve' ? '解决' : '忽略'
+    const label = action === 'resolve' ? '解决' : action === 'ignore' ? '忽略' : '转待处理'
     ElMessage.success(`已批量${label} ${data.updated} 个问题`)
-    // Update in-memory status
-    const newStatus = action === 'resolve' ? 'resolved' : 'ignored'
+    const newStatus = action === 'resolve' ? 'resolved' : action === 'ignore' ? 'ignored' : 'open'
     for (const child of groupRow.children) {
       if (ids.includes(child.id)) child.status = newStatus
     }
@@ -487,7 +420,6 @@ function groupName(id) {
 function statusLabel(status) {
   const map = {
     open: '待处理',
-    claimed: '已认领',
     ignored: '已忽略',
     resolved: '已解决',
   }
@@ -495,7 +427,7 @@ function statusLabel(status) {
 }
 
 function statusTagType(status) {
-  const map = { open: 'danger', claimed: 'warning', ignored: 'info', resolved: 'success' }
+  const map = { open: 'danger', ignored: 'info', resolved: 'success' }
   return map[status] || 'info'
 }
 

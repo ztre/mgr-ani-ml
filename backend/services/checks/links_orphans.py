@@ -60,26 +60,22 @@ class LinksOrphansChecker(CheckerBase):
 
     def run(self, db: Session, groups: list[SyncGroup]) -> list[IssueData]:
         issues: list[IssueData] = []
-        for group in groups:
-            issues.extend(self._check_group(db, group))
-        return issues
 
-    def _check_group(self, db: Session, group: SyncGroup) -> list[IssueData]:
-        target_root = Path(group.target)
-        issues: list[IssueData] = []
+        # 全局所有已记录 target_path 合并为一个大集合，避免跨组目录共享时误报孤立文件
+        recorded_targets: set[str] = {
+            row[0]
+            for row in db.query(MediaRecord.target_path)
+            .filter(MediaRecord.target_path.isnot(None))
+            .all()
+        }
 
         # --- orphan check: FS files not in DB ---
-        if target_root.exists():
-            # Build set of all target_paths recorded for this group (MediaRecord)
-            recorded_targets: set[str] = {
-                row[0]
-                for row in db.query(MediaRecord.target_path)
-                .filter(
-                    MediaRecord.sync_group_id == group.id,
-                    MediaRecord.target_path.isnot(None),
-                )
-                .all()
-            }
+        seen_target_roots: set[str] = set()
+        for group in groups:
+            target_root = Path(group.target)
+            if not target_root.exists() or str(target_root) in seen_target_roots:
+                continue
+            seen_target_roots.add(str(target_root))
             for leaf_dir in _collect_leaf_dirs(target_root):
                 try:
                     entries = sorted(leaf_dir.iterdir(), key=lambda p: p.name)
@@ -99,18 +95,14 @@ class LinksOrphansChecker(CheckerBase):
                 if not orphan_files:
                     continue
                 if len(orphan_files) == len(all_files):
-                    # 整个目录均为孤立文件（从未入库）→ 与 target_no_source 共用目录级类型
                     issues.append(
                         IssueData(
                             checker_code="target_dir_no_source",
                             issue_code="dir_orphan_target",
                             severity="warning",
-                            sync_group_id=group.id,
+                            sync_group_id=None,
                             resource_dir=str(leaf_dir),
-                            payload={
-                                "group_name": group.name,
-                                "file_count": len(orphan_files),
-                            },
+                            payload={"group_name": group.name, "file_count": len(orphan_files)},
                         )
                     )
                 else:
@@ -120,7 +112,7 @@ class LinksOrphansChecker(CheckerBase):
                                 checker_code=self.checker_code,
                                 issue_code="orphan_file",
                                 severity="warning",
-                                sync_group_id=group.id,
+                                sync_group_id=None,
                                 target_path=str(entry),
                                 resource_dir=str(leaf_dir),
                                 payload={"group_name": group.name},
@@ -130,10 +122,7 @@ class LinksOrphansChecker(CheckerBase):
         # --- broken link check: DB records whose FS file is missing ---
         db_records = (
             db.query(MediaRecord.id, MediaRecord.original_path, MediaRecord.target_path, MediaRecord.tmdb_id)
-            .filter(
-                MediaRecord.sync_group_id == group.id,
-                MediaRecord.target_path.isnot(None),
-            )
+            .filter(MediaRecord.target_path.isnot(None))
             .all()
         )
         for rec_id, orig_path, tgt_path, tmdb_id in db_records:
@@ -143,11 +132,11 @@ class LinksOrphansChecker(CheckerBase):
                         checker_code=self.checker_code,
                         issue_code="broken_link",
                         severity="error",
-                        sync_group_id=group.id,
+                        sync_group_id=None,
                         source_path=orig_path,
                         target_path=tgt_path,
                         tmdb_id=tmdb_id,
-                        payload={"media_record_id": rec_id, "group_name": group.name},
+                        payload={"media_record_id": rec_id},
                     )
                 )
         return issues

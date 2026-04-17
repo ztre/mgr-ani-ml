@@ -226,3 +226,74 @@ def test_coverage_summary(capsys):
         print(f"episode=None (靠 loose 提取器): {ep_none}")
         print(f"season_hint_strength='roman' 标注数: {roman_tagged}")
         print(f"完全解析成功率: {(total - parse_none - ep_none) / total * 100:.1f}%")
+
+
+# ---------------------------------------------------------------------------
+# Test 7: 内联字幕特典检测（'Series - DescriptiveSubtitle - NN' 模式）
+# ---------------------------------------------------------------------------
+def test_inline_subtitle_extra_detection():
+    """BD 附赠短片 'Series - DescriptiveSubtitle - NN' 应被识别为 is_special=True，
+    不与主集发生目标冲突。"""
+    from backend.services.parser import parse_tv_filename
+
+    # 短片本身应为特典
+    r_special = parse_tv_filename(
+        "[subbers] Violet Evergarden - Understanding Violet Evergarden in 5 Minutes - 01 [BDRip 1080p zh-Hans].mp4"
+    )
+    assert r_special is not None
+    assert r_special.is_special is True, f"短片应 is_special=True，实际: {r_special}"
+    assert r_special.extra_category == "special"
+    assert "Violet Evergarden in 5 Minutes" in (r_special.extra_label or ""), (
+        f"extra_label 应包含短片标题，实际: {r_special.extra_label!r}"
+    )
+    assert r_special.episode == 1
+
+    # 第二集同理
+    r_special2 = parse_tv_filename(
+        "[subbers] Violet Evergarden - Understanding Violet Evergarden in 5 Minutes - 02 [BDRip 1080p zh-Hans].mp4"
+    )
+    assert r_special2 is not None
+    assert r_special2.is_special is True
+    assert r_special2.episode == 2
+
+    # 主集不应受影响
+    r_main = parse_tv_filename(
+        "[subbers] Violet Evergarden - 01 [BDRip 1080p zh-Hans].mp4"
+    )
+    assert r_main is not None
+    assert r_main.is_special is False, f"主集应 is_special=False，实际: {r_main}"
+    assert r_main.episode == 1
+
+    # SAO arc 名不应被误判（词汇不重叠）
+    r_sao = parse_tv_filename(
+        "[VCB-Studio] Sword Art Online - Alicization War of Underworld - 01 [Ma10p_1080p].mkv"
+    )
+    assert r_sao is not None
+    assert r_sao.is_special is False, (
+        f"SAO arc 不应被误判为特典，实际: {r_sao}"
+    )
+    assert r_sao.episode == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 8: 系列名称含 OAD/OVA 时不误识别为特典
+# ---------------------------------------------------------------------------
+def test_oad_in_series_title_not_special():
+    """series title 中含 OAD/OVA 词但文件有括号集号时，不应识别为 is_special。"""
+    from backend.services.parser import parse_tv_filename
+
+    # 主集（OAD 系列）
+    for ep_str in ["[00]", "[01]", "[11]"]:
+        fn = f"[VCB-Studio&philosophy-raws] kiss\u00d7sis OAD {ep_str}[Ma10p_1080p][x265_flac].mkv"
+        r = parse_tv_filename(fn)
+        assert r is not None, f"parse 返回 None: {fn}"
+        assert r.is_special is False, (
+            f"系列名 OAD 不应触发 is_special=True (ep={ep_str}): {r}"
+        )
+
+    # NCOP/NCED 仍应是特典
+    r_op = parse_tv_filename(
+        "[VCB-Studio&philosophy-raws] kiss\u00d7sis OAD [NCOP01][Ma10p_1080p][x265_flac].mkv"
+    )
+    assert r_op is not None
+    assert r_op.is_special is True, f"NCOP 应为 is_special=True，实际: {r_op}"

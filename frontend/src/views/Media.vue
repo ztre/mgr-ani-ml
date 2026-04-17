@@ -1623,11 +1623,28 @@ async function deleteSelectedItems(command) {
 
 function findGroupCompanionAttachments(row) {
   // 在未筛选的原始树中查找 row 所属分组，收集同组非视频附件
+  // 只取与主视频同 stem 的附件（去除语言后缀后精确匹配），避免同一 group 内其他版本的附件被误带入
+  const videoFilename = extractFilename(String(row.original_path || ''))
+  const videoStem = videoFilename.replace(/\.[^.]+$/, '')  // 去掉最后一个扩展名
+
+  // 去除附件文件名的语言后缀（.tc .sc .chs .cht 等）以及字幕扩展名，还原为视频 stem
+  function stripLangAndSubExt(filename) {
+    // 先去 .ass/.srt/.ssa/.vtt
+    let s = filename.replace(/\.[^.]+$/, '')
+    // 再去语言后缀 .tc .sc .chs .cht .jap .eng .jpsc .jptc .zh-cn .zh-tw 等
+    s = s.replace(/\.(tc|sc|chs|cht|jap|eng|jpsc|jptc|jp|ja|zh[-_]?(cn|tw))(_v\d+)?$/i, '')
+    return s
+  }
+
   for (const node of drawerTree.value || []) {
     for (const group of node.groups || []) {
       const inGroup = (group.items || []).some((item) => item.id === row.id)
       if (inGroup) {
-        return (group.items || []).filter((item) => item.id !== row.id && !isVideoItem(item))
+        return (group.items || []).filter((item) => {
+          if (item.id === row.id || isVideoItem(item)) return false
+          const attFilename = extractFilename(String(item.original_path || ''))
+          return stripLangAndSubExt(attFilename) === videoStem
+        })
       }
     }
   }

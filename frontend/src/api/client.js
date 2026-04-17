@@ -119,12 +119,11 @@ export const tasksApi = {
 
 export const checksApi = {
   runFull: () => postLongTask('/checks/run'),
-  runGroup: (groupId) => postLongTask(`/checks/run/${groupId}`),
   listRuns: (params) => client.get('/checks/runs', { params }),
   listIssues: (params) => client.get('/checks/issues', { params }),
-  claimIssue: (id) => client.post(`/checks/issues/${id}/claim-pending`),
   ignoreIssue: (id) => client.post(`/checks/issues/${id}/ignore`),
   resolveIssue: (id) => client.post(`/checks/issues/${id}/resolve`),
+  reopenIssue: (id) => client.post(`/checks/issues/${id}/reopen`),
   batchAction: (ids, action) => client.post('/checks/issues/batch-action', { ids, action }),
   deleteAll: () => client.delete('/checks/all'),
 }

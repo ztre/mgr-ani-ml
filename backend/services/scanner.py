@@ -1696,8 +1696,10 @@ def _process_file(
         return
 
     ino = get_inode(src_path)
-    if ino:
+    record_status_ctx = str(context.get("record_status") or "scraped")
+    if ino and record_status_ctx != "manual_fixed":
         # 幂等保护：已处理文件直接跳过
+        # manual_fixed 场景（批量/单文件修正）由用户显式触发，允许覆盖旧链接，跳过幂等保护。
         existing = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
         if existing:
             if dir_runtime is not None:
@@ -4331,6 +4333,10 @@ def _is_noise_or_group_bracket_token(raw: str) -> bool:
         r"tc",
         r"gb",
         r"big5",
+        r"zh(?:[\-_][a-z]{2,5})?",
+        r"hans?",
+        r"hant?",
+        r"rev",
         r"bd",
         r"dvd",
         r"webrip",
