@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...models import MediaRecord, SyncGroup
 from .base import CheckerBase, IssueData
+from .path_filters import is_subtitle_related_path
 
 VIDEO_EXTS = frozenset({".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv"})
 ATTACHMENT_EXTS = frozenset({".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub"})
@@ -87,6 +88,8 @@ class SourceUnrecordedChecker(CheckerBase):
                         continue
                     ext = entry.suffix.lower()
                     if ext in VIDEO_EXTS or ext in ATTACHMENT_EXTS:
+                        if is_subtitle_related_path(entry):
+                            continue
                         media_files.append(entry)
 
                 unrecorded = [f for f in media_files if str(f) not in recorded]

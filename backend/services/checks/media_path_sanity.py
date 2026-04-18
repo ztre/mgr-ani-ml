@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ...models import MediaRecord
 from .base import CheckerBase, IssueData
+from .path_filters import is_subtitle_related_issue
 
 
 class MediaPathSanityChecker(CheckerBase):
@@ -38,6 +39,8 @@ class MediaPathSanityChecker(CheckerBase):
 
         for rec_id, orig_path, tgt_path, tmdb_id in records:
             if not tgt_path:
+                continue
+            if is_subtitle_related_issue(source_path=orig_path, target_path=tgt_path):
                 continue
 
             # Check: target file existence

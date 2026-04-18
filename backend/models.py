@@ -1,7 +1,7 @@
 """SQLAlchemy models."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import json
 
@@ -9,6 +9,11 @@ from sqlalchemy import Boolean, Column, DateTime, Index, Integer, String, Text, 
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
+
+
+def _utcnow_naive() -> datetime:
+    """Return current UTC time while preserving the existing naive DB schema."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class SyncGroup(Base):
@@ -23,8 +28,8 @@ class SyncGroup(Base):
     exclude = Column(Text, default="")
     enabled = Column(Boolean, default=True)
     enabled_checks = Column(Text, nullable=True)  # JSON array, None = use system defaults
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
 
     _DEFAULT_CHECKS = ["source_unrecorded", "links_orphans", "media_path_sanity", "target_no_source"]
 
@@ -52,8 +57,8 @@ class MediaRecord(Base):
     season = Column(Integer, nullable=True)
     category = Column(String(50), nullable=True)   # episode | special | extra
     file_type = Column(String(20), nullable=True)  # video | attachment
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
 
 
 class InodeRecord(Base):
@@ -65,8 +70,8 @@ class InodeRecord(Base):
     target_path = Column(String(2048), nullable=True)
     sync_group_id = Column(Integer, nullable=True)
     size = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
 
 
 class ScanTask(Base):
@@ -78,7 +83,7 @@ class ScanTask(Base):
     target_name = Column(String(255), nullable=True)
     status = Column(String(20), default="running")
     log_file = Column(String(255), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)
     finished_at = Column(DateTime, nullable=True)
 
 
@@ -92,7 +97,7 @@ class DirectoryState(Base):
     signature = Column(String(128), nullable=False, default="")
     status = Column(String(50), nullable=False, default="SCANNED")
     last_error = Column(Text, nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
 
 
 class CheckRun(Base):
@@ -101,7 +106,7 @@ class CheckRun(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     sync_group_id = Column(Integer, nullable=True)  # None = full check
     status = Column(String(20), nullable=False, default="running")  # running | completed | failed
-    started_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, default=_utcnow_naive)
     finished_at = Column(DateTime, nullable=True)
     summary_json = Column(Text, nullable=True)  # JSON {found, opened, reopened}
 
@@ -130,8 +135,8 @@ class CheckIssue(Base):
     payload_json = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="open")  # open | claimed | ignored | resolved
     fingerprint = Column(String(128), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
     resolved_at = Column(DateTime, nullable=True)
 
 
@@ -152,4 +157,4 @@ class ManualAttachmentBackup(Base):
     # can be queried/deleted without cascade complications.
     media_record_id = Column(Integer, nullable=False, index=True)
     backup_path = Column(String(2048), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow_naive)

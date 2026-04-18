@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import CheckIssue, CheckRun, SyncGroup
 from ..services.checks import run_checks_full
+from ..services.checks.path_filters import build_subtitle_issue_filter
 from ..services.task_queue import enqueue_task
 
 router = APIRouter()
@@ -95,6 +96,7 @@ def list_check_issues(
     db: Session = Depends(get_db),
 ):
     q = db.query(CheckIssue).order_by(CheckIssue.updated_at.desc())
+    q = q.filter(~build_subtitle_issue_filter(CheckIssue))
     if status:
         q = q.filter(CheckIssue.status == status)
     if checker_code:

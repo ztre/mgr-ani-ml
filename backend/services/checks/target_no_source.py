@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ...models import MediaRecord, SyncGroup
 from .base import CheckerBase, IssueData
+from .path_filters import is_subtitle_related_issue
 
 
 class TargetNoSourceChecker(CheckerBase):
@@ -47,6 +48,8 @@ class TargetNoSourceChecker(CheckerBase):
         dir_missing: dict[str, list[tuple]] = defaultdict(list)
 
         for rec_id, orig_path, tgt_path, tmdb_id, sg_id in records:
+            if is_subtitle_related_issue(source_path=orig_path, target_path=tgt_path):
+                continue
             source_dir = str(Path(orig_path).parent)
             dir_all[source_dir].append((rec_id, orig_path, tgt_path, tmdb_id, sg_id))
             if tgt_path and Path(tgt_path).exists() and not Path(orig_path).exists():

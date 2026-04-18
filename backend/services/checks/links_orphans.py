@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...models import MediaRecord, SyncGroup
 from .base import CheckerBase, IssueData
+from .path_filters import is_subtitle_related_issue, is_subtitle_related_path
 
 VIDEO_EXTS = frozenset({".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv"})
 ATTACHMENT_EXTS = frozenset({".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub"})
@@ -89,6 +90,8 @@ class LinksOrphansChecker(CheckerBase):
                     ext = entry.suffix.lower()
                     if ext not in VIDEO_EXTS and ext not in ATTACHMENT_EXTS:
                         continue
+                    if is_subtitle_related_path(entry):
+                        continue
                     all_files.append(entry)
                     if str(entry) not in recorded_targets:
                         orphan_files.append(entry)
@@ -126,6 +129,8 @@ class LinksOrphansChecker(CheckerBase):
             .all()
         )
         for rec_id, orig_path, tgt_path, tmdb_id in db_records:
+            if is_subtitle_related_issue(source_path=orig_path, target_path=tgt_path):
+                continue
             if tgt_path and not Path(tgt_path).exists():
                 issues.append(
                     IssueData(
