@@ -133,3 +133,23 @@ class CheckIssue(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
+
+
+class ManualAttachmentBackup(Base):
+    """Tracks backup copies of manually-imported attachment files (e.g. subtitles).
+
+    When a subtitle is imported via the batch-subtitle UI the physical file is
+    copied to ``subtitle_backup_root`` and a hardlink is created in the resource
+    target directory.  This table records the backup-side path so that when the
+    resource is deleted only the target hardlink is removed and the backup file
+    is preserved.
+    """
+
+    __tablename__ = "manual_attachment_backups"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Logical FK to media_records.id — no DB-level FK constraint so the table
+    # can be queried/deleted without cascade complications.
+    media_record_id = Column(Integer, nullable=False, index=True)
+    backup_path = Column(String(2048), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)

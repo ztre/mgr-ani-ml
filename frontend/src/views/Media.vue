@@ -682,93 +682,261 @@
     <el-dialog
       v-model="manualRecordDialogVisible"
       title="手动新增成品记录"
-      width="560px"
+      width="720px"
       append-to-body
       destroy-on-close
     >
-      <el-form ref="manualRecordFormRef" :model="manualRecordForm" label-width="100px">
-        <el-form-item
-          label="源文件路径"
-          prop="original_path"
-          :rules="[{ required: true, message: '请填写源文件路径', trigger: 'blur' }]"
-        >
-          <el-autocomplete
-            v-model="manualRecordForm.original_path"
-            placeholder="源文件绝对路径"
-            :fetch-suggestions="(q, cb) => fetchPathSuggestions(q, cb)"
-            value-key="path"
-            :trigger-on-focus="false"
-            highlight-first-item
-            style="width: 100%"
-            @select="(item) => { manualRecordForm.original_path = item.path }"
+      <el-tabs v-model="manualRecordActiveTab">
+        <!-- Tab 1: single record (existing form) -->
+        <el-tab-pane label="单条记录" name="single">
+          <el-form ref="manualRecordFormRef" :model="manualRecordForm" label-width="100px">
+            <el-form-item
+              label="源文件路径"
+              prop="original_path"
+              :rules="[{ required: true, message: '请填写源文件路径', trigger: 'blur' }]"
+            >
+              <el-autocomplete
+                v-model="manualRecordForm.original_path"
+                placeholder="源文件绝对路径"
+                :fetch-suggestions="(q, cb) => fetchPathSuggestions(q, cb)"
+                value-key="path"
+                :trigger-on-focus="false"
+                highlight-first-item
+                style="width: 100%"
+                @select="(item) => { manualRecordForm.original_path = item.path }"
+              >
+                <template #default="{ item }">
+                  <span style="margin-right:6px">{{ item.is_dir ? '📁' : '📄' }}</span>
+                  <span>{{ item.name }}</span>
+                </template>
+              </el-autocomplete>
+            </el-form-item>
+            <el-form-item
+              label="目标路径"
+              prop="target_path"
+              :rules="[{ required: true, message: '请填写目标路径', trigger: 'blur' }]"
+            >
+              <el-autocomplete
+                v-model="manualRecordForm.target_path"
+                placeholder="硬链接目标绝对路径"
+                :fetch-suggestions="(q, cb) => fetchPathSuggestions(q, cb)"
+                value-key="path"
+                :trigger-on-focus="false"
+                highlight-first-item
+                style="width: 100%"
+                @select="(item) => { manualRecordForm.target_path = item.path }"
+              >
+                <template #default="{ item }">
+                  <span style="margin-right:6px">{{ item.is_dir ? '📁' : '📄' }}</span>
+                  <span>{{ item.name }}</span>
+                </template>
+              </el-autocomplete>
+            </el-form-item>
+            <el-form-item
+              label="文件类型"
+              prop="file_type"
+              :rules="[{ required: true, message: '请选择文件类型', trigger: 'change' }]"
+            >
+              <el-radio-group v-model="manualRecordForm.file_type">
+                <el-radio value="video">视频</el-radio>
+                <el-radio value="attachment">附件</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item 
+              label="内容分类"
+              prop="category"
+              :rules="[{ required: true, message: '请选择内容分类', trigger: 'change' }]"
+            >
+              <el-select v-model="manualRecordForm.category" placeholder="请选择" clearable style="width: 180px">
+                <el-option label="正片" value="episode" />
+                <el-option label="SP / 特典" value="special" />
+                <el-option label="Extra" value="extra" />
+              </el-select>
+            </el-form-item>
+            <el-form-item
+              label="季度"
+              prop="season"
+              :rules="[{ required: true, message: '请填写季度', trigger: 'change' }]"
+            >
+              <el-input-number
+                v-model="manualRecordForm.season"
+                :min="0"
+                :max="99"
+                :controls="false"
+                style="width: 120px"
+              />
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+
+        <!-- Tab 2: batch subtitle import -->
+        <el-tab-pane label="批量字幕导入" name="subtitle">
+          <!-- Context info bar -->
+          <div class="subtitle-import-context">
+            <div class="subtitle-import-context-item">
+              <span class="subtitle-import-context-label">资源</span>
+              <el-tag effect="plain" type="info" style="font-size: 14px; padding: 0 10px; height: 28px; line-height: 26px">
+                {{ subtitleBatchContextName || '—' }}
+              </el-tag>
+            </div>
+            <el-divider direction="vertical" style="height: 20px" />
+            <div class="subtitle-import-context-item">
+              <span class="subtitle-import-context-label">季度</span>
+              <el-input-number
+                v-model="subtitleBatchForm.season"
+                :min="0"
+                :max="99"
+                :controls="false"
+                @change="clearSubtitleBatchPreview"
+                style="width: 58px; font-size: 14px"
+              />
+            </div>
+            <el-divider direction="vertical" style="height: 20px" />
+            <div class="subtitle-import-context-item">
+              <span class="subtitle-import-context-label">分类</span>
+              <el-select
+                v-model="subtitleBatchForm.category"
+                size="small"
+                style="width: 126px"
+                @change="clearSubtitleBatchPreview"
+              >
+                <el-option
+                  v-for="option in SUBTITLE_BATCH_CATEGORY_OPTIONS"
+                  :key="option.key"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+            </div>
+          </div>
+
+          <!-- Upload zone -->
+          <el-upload
+            ref="subtitleUploadRef"
+            :auto-upload="false"
+            multiple
+            accept=".ass,.srt,.ssa,.sub,.vtt,.idx,.sup"
+            :on-change="handleSubtitleFileChange"
+            :on-remove="handleSubtitleFileChange"
+            drag
+            style="width: 100%; margin: 12px 0 8px"
           >
-            <template #default="{ item }">
-              <span style="margin-right:6px">{{ item.is_dir ? '📁' : '📄' }}</span>
-              <span>{{ item.name }}</span>
+            <el-icon style="font-size: 32px; color: #c0c4cc"><UploadFilled /></el-icon>
+            <div style="margin-top: 6px; font-size: 14px; color: var(--el-text-color-regular)">
+              拖拽字幕文件到此处，或<em style="color: var(--el-color-primary)">点击选择</em>
+            </div>
+            <template #tip>
+              <div style="font-size: 12px; color: #909399; padding: 2px 0 0">
+                支持 .ass .srt .ssa .sub .vtt，可多选
+              </div>
             </template>
-          </el-autocomplete>
-        </el-form-item>
-        <el-form-item
-          label="目标路径"
-          prop="target_path"
-          :rules="[{ required: true, message: '请填写目标路径', trigger: 'blur' }]"
-        >
-          <el-autocomplete
-            v-model="manualRecordForm.target_path"
-            placeholder="硬链接目标绝对路径"
-            :fetch-suggestions="(q, cb) => fetchPathSuggestions(q, cb)"
-            value-key="path"
-            :trigger-on-focus="false"
-            highlight-first-item
-            style="width: 100%"
-            @select="(item) => { manualRecordForm.target_path = item.path }"
+          </el-upload>
+
+          <!-- Preview action row -->
+          <div class="subtitle-import-actions">
+            <el-button
+              type="primary"
+              plain
+              :loading="subtitleBatchPreviewing"
+              :disabled="!subtitleBatchFiles.length"
+              @click="previewSubtitleBatch"
+            >
+              预览解析
+            </el-button>
+            <template v-if="subtitleBatchPreviewItems.length">
+              <el-tag size="small" type="success" effect="plain">
+                已匹配 {{ subtitleBatchPreviewItems.filter((item) => isSubtitlePreviewImportable(item)).length }}
+              </el-tag>
+              <el-tag v-if="subtitleBatchPreviewItems.some(i => i.has_conflict)" size="small" type="warning" effect="plain">
+                冲突 {{ subtitleBatchPreviewItems.filter(i => i.has_conflict).length }}
+              </el-tag>
+              <el-tag v-if="subtitleBatchPreviewItems.some(i => !i.match_found)" size="small" type="danger" effect="plain">
+                无匹配 {{ subtitleBatchPreviewItems.filter(i => !i.match_found).length }}
+              </el-tag>
+            </template>
+          </div>
+
+          <!-- Editable preview table -->
+          <el-table
+            v-if="subtitleBatchPreviewItems.length"
+            :data="subtitleBatchPreviewItems"
+            size="small"
+            style="width: 100%; margin-top: 8px"
+            max-height="240"
           >
-            <template #default="{ item }">
-              <span style="margin-right:6px">{{ item.is_dir ? '📁' : '📄' }}</span>
-              <span>{{ item.name }}</span>
-            </template>
-          </el-autocomplete>
-        </el-form-item>
-        <el-form-item
-          label="文件类型"
-          prop="file_type"
-          :rules="[{ required: true, message: '请选择文件类型', trigger: 'change' }]"
-        >
-          <el-radio-group v-model="manualRecordForm.file_type">
-            <el-radio value="video">视频</el-radio>
-            <el-radio value="attachment">附件</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item 
-          label="内容分类"
-          prop="category"
-          :rules="[{ required: true, message: '请选择内容分类', trigger: 'change' }]"
-        >
-          <el-select v-model="manualRecordForm.category" placeholder="请选择" clearable style="width: 180px">
-            <el-option label="正片" value="episode" />
-            <el-option label="SP / 特典" value="special" />
-            <el-option label="Extra" value="extra" />
-          </el-select>
-        </el-form-item>
-        <el-form-item
-          label="季度"
-          prop="season"
-          :rules="[{ required: true, message: '请填写季度', trigger: 'change' }]"
-        >
-          <el-input-number
-            v-model="manualRecordForm.season"
-            :min="1"
-            :max="99"
-            :step="1"
-            controls-position="right"
-            placeholder="季度"
-            style="width: 120px"
-          />
-        </el-form-item>
-      </el-form>
+            <el-table-column label="字幕文件" prop="filename" min-width="160" show-overflow-tooltip />
+            <el-table-column label="集数" width="82">
+              <template #default="{ row }">
+                <el-input-number
+                  v-model="row.parsed_episode"
+                  :min="1"
+                  :max="9999"
+                  :controls="false"
+                  @change="() => autoMatchSubtitlePreviewRow(row)"
+                  size="small"
+                  style="width: 70px"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="语言" width="136">
+              <template #default="{ row }">
+                <el-select v-model="row.parsed_lang" size="small" style="width: 124px" @change="() => onSubtitlePreviewLangChange(row)">
+                  <el-option v-for="option in SUBTITLE_LANG_OPTIONS" :key="option.value" :label="option.label" :value="option.value" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="匹配视频" min-width="260">
+              <template #default="{ row }">
+                <el-select
+                  v-model="row.matched_video_id"
+                  clearable
+                  filterable
+                  placeholder="手动选择视频"
+                  size="small"
+                  style="width: 100%"
+                  @change="(value) => syncSubtitlePreviewRowSelection(row, value)"
+                >
+                  <el-option
+                    v-for="option in subtitleBatchVideoOptions"
+                    :key="option.id"
+                    :label="buildSubtitleVideoOptionLabel(option)"
+                    :value="option.id"
+                  />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="86" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="!row.match_found" type="danger" size="small">无匹配</el-tag>
+                <el-tag v-else-if="row.has_conflict" type="warning" size="small">冲突</el-tag>
+                <el-tag v-else type="success" size="small">已匹配</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+
       <template #footer>
-        <el-button @click="manualRecordDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="manualRecordSaving" @click="submitManualRecord">提交记录</el-button>
+        <!-- Tab 1 footer -->
+        <template v-if="manualRecordActiveTab === 'single'">
+          <el-button @click="manualRecordDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="manualRecordSaving" @click="submitManualRecord">提交记录</el-button>
+        </template>
+        <!-- Tab 2 footer -->
+        <template v-else>
+          <el-button @click="manualRecordDialogVisible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="subtitleBatchImporting"
+            :disabled="!subtitleBatchPreviewItems.some((item) => isSubtitlePreviewImportable(item))"
+            @click="submitSubtitleBatch"
+          >
+            确认导入
+            <template v-if="subtitleBatchPreviewItems.some((item) => isSubtitlePreviewImportable(item))">
+              （{{ subtitleBatchPreviewItems.filter((item) => isSubtitlePreviewImportable(item)).length }} 项）
+            </template>
+          </el-button>
+        </template>
       </template>
     </el-dialog>
   </div>
@@ -777,7 +945,7 @@
 <script setup>
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Film, Monitor, Refresh, Search } from '@element-plus/icons-vue'
+import { Film, Monitor, Refresh, Search, UploadFilled } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { mediaApi, syncGroupsApi, tasksApi, washApi, manualRecordApi } from '../api/client'
 import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
@@ -907,6 +1075,156 @@ const manualRecordSaving = ref(false)
 const manualRecordFormRef = ref(null)
 const manualRecordForm = reactive({ sync_group_id: null, original_path: '', target_path: '', season: null, category: null, file_type: null })
 const syncGroupOptions = ref([])
+// Subtitle batch import (Tab 2)
+const manualRecordActiveTab = ref('single')
+const subtitleBatchForm = reactive({ sync_group_id: null, tmdb_id: null, resource_dir: '', season: null, category: 'episode' })
+const subtitleBatchContextName = ref('')    // display name shown in context bar
+const subtitleBatchFiles = ref([])          // raw File objects from el-upload
+const subtitleUploadRef = ref(null)         // el-upload component ref
+const subtitleBatchPreviewing = ref(false)
+const subtitleBatchImporting = ref(false)
+const subtitleBatchPreviewItems = ref([])
+const subtitleBatchVideoOptions = ref([])
+const SUBTITLE_LANG_OPTIONS = [
+  { label: 'zh-CN', value: '.zh-CN' },
+  { label: 'zh-TW', value: '.zh-TW' },
+  { label: 'ja', value: '.ja' },
+  { label: 'en', value: '.en' },
+  { label: 'zh-CN.ja', value: '.zh-CN.ja' },
+  { label: 'zh-TW.ja', value: '.zh-TW.ja' },
+]
+const SUBTITLE_BATCH_CATEGORY_OPTIONS = [
+  { key: 'episode', label: '正片', value: 'episode' },
+  { key: 'special', label: 'SP / 特典', value: 'special' },
+  { key: 'extra', label: 'Extra', value: 'extra' },
+]
+
+function normalizeSubtitleBatchCategory(category) {
+  const raw = String(category || '').trim().toLowerCase()
+  if (!raw || raw === 'episode') return 'episode'
+  if (['special', 'oped'].includes(raw)) return 'special'
+  if (['extra', 'pv', 'cm', 'preview', 'trailer', 'teaser', 'character_pv', 'mv', 'iv', 'making', 'interview', 'bdextra'].includes(raw)) {
+    return 'extra'
+  }
+  return 'episode'
+}
+
+function buildSubtitleVideoOptionLabel(option) {
+  const parts = [option?.stem || extractFilename(option?.target_path) || '未命名视频']
+  if (option?.episode != null) parts.push(`E${String(option.episode).padStart(2, '0')}`)
+  if (option?.category === 'special') parts.push('SP')
+  if (option?.category === 'extra') parts.push('Extra')
+  return parts.join(' · ')
+}
+
+function getSubtitleVideoOptionById(videoId) {
+  const normalizedId = Number(videoId)
+  if (!normalizedId) return null
+  return subtitleBatchVideoOptions.value.find((option) => Number(option.id) === normalizedId) || null
+}
+
+function buildSubtitlePreviewTargetPath(videoTargetPath, lang, subtitleFilename) {
+  const normalizedTargetPath = String(videoTargetPath || '')
+  const normalizedLang = String(lang || '').trim()
+  const ext = extractFileExt(subtitleFilename)
+  if (!normalizedTargetPath || !normalizedLang || !ext) return null
+  const slashIndex = Math.max(normalizedTargetPath.lastIndexOf('/'), normalizedTargetPath.lastIndexOf('\\'))
+  const dir = slashIndex >= 0 ? normalizedTargetPath.slice(0, slashIndex + 1) : ''
+  const name = slashIndex >= 0 ? normalizedTargetPath.slice(slashIndex + 1) : normalizedTargetPath
+  const dotIndex = name.lastIndexOf('.')
+  const stem = dotIndex >= 0 ? name.slice(0, dotIndex) : name
+  return `${dir}${stem}${normalizedLang}${ext}`
+}
+
+function syncSubtitlePreviewRowSelection(row, matchedVideoId) {
+  const option = getSubtitleVideoOptionById(matchedVideoId)
+  row.matched_video_id = option ? Number(option.id) : null
+  row.matched_video_stem = option ? option.stem : null
+  row.match_found = Boolean(option)
+  row.has_conflict = false
+  row.proposed_target = option ? buildSubtitlePreviewTargetPath(option.target_path, row.parsed_lang, row.filename) : null
+  if (!option) {
+    row.proposed_backup = null
+  }
+}
+
+function autoMatchSubtitlePreviewRow(row) {
+  const normalizedEpisode = Number(row?.parsed_episode)
+  if (!normalizedEpisode) {
+    syncSubtitlePreviewRowSelection(row, null)
+    return
+  }
+  const option = subtitleBatchVideoOptions.value.find((item) => Number(item.episode) === normalizedEpisode) || null
+  syncSubtitlePreviewRowSelection(row, option?.id ?? null)
+}
+
+function onSubtitlePreviewLangChange(row) {
+  if (!row?.matched_video_id) return
+  syncSubtitlePreviewRowSelection(row, row.matched_video_id)
+}
+
+function isSubtitlePreviewImportable(row) {
+  return Boolean(row?.matched_video_id && row?.parsed_lang && !row?.has_conflict)
+}
+
+function extractEpisodeFromVideoPath(path) {
+  const filename = extractFilename(path)
+  const sxe = filename.match(/[sS]\d{1,2}[eE](\d{1,3})/)
+  if (sxe) return Number(sxe[1])
+  const bracket = filename.match(/\[(\d{1,3})\]/)
+  if (bracket) return Number(bracket[1])
+  return null
+}
+
+function buildSubtitleVideoOptionsFromCurrentNode() {
+  const result = []
+  const seen = new Set()
+  for (const group of currentNode.value?.groups || []) {
+    for (const item of group.items || []) {
+      const itemId = Number(item?.id)
+      if (!itemId || seen.has(itemId)) continue
+      if (!isVideoItem(item)) continue
+      if (!item?.target_path) continue
+      const category = item?.tree_bucket === 'aux'
+        ? (subtitleBatchForm.category === 'episode' ? 'special' : subtitleBatchForm.category)
+        : 'episode'
+      if (category !== subtitleBatchForm.category) continue
+      seen.add(itemId)
+      result.push({
+        id: itemId,
+        stem: extractFilename(item.target_path).replace(/\.[^.]+$/, ''),
+        episode: extractEpisodeFromVideoPath(item.target_path || item.original_path),
+        category,
+        target_path: item.target_path,
+      })
+    }
+  }
+  result.sort((a, b) => {
+    const episodeA = a.episode == null ? Number.MAX_SAFE_INTEGER : Number(a.episode)
+    const episodeB = b.episode == null ? Number.MAX_SAFE_INTEGER : Number(b.episode)
+    if (episodeA !== episodeB) return episodeA - episodeB
+    return String(a.stem || '').localeCompare(String(b.stem || ''))
+  })
+  return result
+}
+
+function mergeSubtitleVideoOptions(serverOptions) {
+  const merged = []
+  const seen = new Set()
+  for (const source of [...(serverOptions || []), ...buildSubtitleVideoOptionsFromCurrentNode()]) {
+    const normalizedId = Number(source?.id)
+    if (!normalizedId || seen.has(normalizedId)) continue
+    seen.add(normalizedId)
+    merged.push({
+      id: normalizedId,
+      stem: source?.stem || extractFilename(source?.target_path).replace(/\.[^.]+$/, ''),
+      episode: source?.episode == null ? null : Number(source.episode),
+      category: normalizeSubtitleBatchCategory(source?.category),
+      target_path: source?.target_path || '',
+    })
+  }
+  return merged.filter((item) => item.category === subtitleBatchForm.category)
+}
 const tmdbSearchDialogVisible = ref(false)
 const tmdbSearchLoading = ref(false)
 const tmdbSearchKeyword = ref('')
@@ -951,6 +1269,12 @@ const VIDEO_FILE_EXTENSIONS = new Set([
 
 function extractFilename(path) {
   return String(path || '').split(/[/\\]/).pop() || ''
+}
+
+function extractFileExt(path) {
+  const filename = extractFilename(path)
+  const dotIndex = filename.lastIndexOf('.')
+  return dotIndex >= 0 ? filename.slice(dotIndex) : ''
 }
 
 function setResourceIconRef(resource, el) {
@@ -2037,14 +2361,29 @@ function openScanEntryFixDialog(entry) {
 }
 
 async function openManualRecordDialog(resource) {
+  const ctxSeason = currentNode.value?.season ?? resource?.season ?? null
   Object.assign(manualRecordForm, {
     sync_group_id: resource?.sync_group_id ?? null,
     original_path: '',
     target_path: '',
-    season: null,
+    season: ctxSeason,
     category: null,
     file_type: null,
   })
+  // Pre-fill subtitle batch context from the resource
+  Object.assign(subtitleBatchForm, {
+    sync_group_id: resource?.sync_group_id ?? null,
+    tmdb_id: resource?.tmdb_id ?? null,
+    resource_dir: resource?.resource_dir || '',
+    season: ctxSeason,
+    category: normalizeSubtitleBatchCategory(currentNode.value?.category ?? resource?.category),
+  })
+  subtitleBatchContextName.value = resource?.resource_name || resource?.resource_dir || ''
+  subtitleBatchFiles.value = []
+  subtitleBatchPreviewItems.value = []
+  subtitleBatchVideoOptions.value = []
+  manualRecordActiveTab.value = 'single'
+  subtitleUploadRef.value?.clearFiles()
   manualRecordDialogVisible.value = true
   if (!syncGroupOptions.value.length) {
     try {
@@ -2095,6 +2434,87 @@ async function submitManualRecord() {
     ElMessage.error(error?.response?.data?.detail || error?.message || '创建记录失败')
   } finally {
     manualRecordSaving.value = false
+  }
+}
+
+function handleSubtitleFileChange(_file, fileList) {
+  subtitleBatchFiles.value = fileList.map(f => f.raw).filter(Boolean)
+  subtitleBatchPreviewItems.value = []
+  subtitleBatchVideoOptions.value = []
+}
+
+function clearSubtitleBatchPreview() {
+  subtitleBatchPreviewItems.value = []
+  subtitleBatchVideoOptions.value = []
+}
+
+async function previewSubtitleBatch() {
+  if (!subtitleBatchFiles.value.length) {
+    ElMessage.warning('请先选择字幕文件')
+    return
+  }
+  if (!subtitleBatchForm.sync_group_id || !subtitleBatchForm.resource_dir || subtitleBatchForm.season == null) {
+    ElMessage.warning('资源上下文不完整，请从资源抽屉中重新打开此对话框')
+    return
+  }
+  subtitleBatchPreviewing.value = true
+  try {
+    const filenames = subtitleBatchFiles.value.map(f => f.name)
+    const { data } = await manualRecordApi.subtitleBatchPreview({
+      sync_group_id: subtitleBatchForm.sync_group_id,
+      tmdb_id: subtitleBatchForm.tmdb_id || null,
+      resource_dir: subtitleBatchForm.resource_dir,
+      season: subtitleBatchForm.season,
+      content_category: subtitleBatchForm.category,
+      filenames,
+    })
+    subtitleBatchVideoOptions.value = mergeSubtitleVideoOptions(data.available_videos || [])
+    subtitleBatchPreviewItems.value = (data.items || []).map((it) => {
+      const row = { ...it }
+      if (!row.matched_video_id) autoMatchSubtitlePreviewRow(row)
+      return row
+    })
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '预览解析失败')
+  } finally {
+    subtitleBatchPreviewing.value = false
+  }
+}
+
+async function submitSubtitleBatch() {
+  const importable = subtitleBatchPreviewItems.value.filter((item) => isSubtitlePreviewImportable(item))
+  if (!importable.length) {
+    ElMessage.warning('没有可导入的字幕项')
+    return
+  }
+  subtitleBatchImporting.value = true
+  try {
+    const formData = new FormData()
+    formData.append('sync_group_id', subtitleBatchForm.sync_group_id)
+    formData.append('items', JSON.stringify(importable.map(it => ({
+      subtitle_path: it.subtitle_path,
+      episode: it.parsed_episode,
+      lang: it.parsed_lang,
+      matched_video_id: it.matched_video_id,
+    }))))
+    // Only upload files that are actually going to be imported
+    const importNames = new Set(importable.map(it => it.subtitle_path))
+    for (const file of subtitleBatchFiles.value) {
+      if (importNames.has(file.name)) formData.append('files', file)
+    }
+    const { data } = await manualRecordApi.subtitleBatchImport(formData)
+    const { imported, errors } = data
+    if (errors && errors.length) {
+      ElMessage.warning(`导入完成：成功 ${imported} 项，失败 ${errors.length} 项`)
+    } else {
+      ElMessage.success(`字幕导入成功：共 ${imported} 项`)
+    }
+    manualRecordDialogVisible.value = false
+    await Promise.all([loadResources(), reloadDrawer()])
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '字幕导入失败')
+  } finally {
+    subtitleBatchImporting.value = false
   }
 }
 
@@ -2746,6 +3166,38 @@ onBeforeUnmount(() => {
 .wash-scan-empty {
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+}
+
+.subtitle-import-context {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+  font-size: 15px;
+  margin-bottom: 2px;
+}
+
+.subtitle-import-context-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.subtitle-import-context-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+}
+
+.subtitle-import-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
 }
 </style>
 

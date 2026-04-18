@@ -137,4 +137,8 @@ export const washApi = {
 
 export const manualRecordApi = {
   create: (data) => client.post('/media/manual-record', data),
+  subtitleBatchPreview: (data) => client.post('/media/subtitle-batch-preview', data),
+  subtitleBatchImport: (formData) => client.post('/media/subtitle-batch-import', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }),
 }

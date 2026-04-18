@@ -150,6 +150,9 @@ class Settings:
   anilist_fallback_enabled: bool = True
   anilist_fallback_timeout_seconds: float = 8.0
 
+  # Subtitle backup: manual-import subtitle files are copied here (same filesystem as target)
+  subtitle_backup_root: str = '/app/subtitle_backup'
+
   debug: bool = False
   scan_threads: int = max(1, (os.cpu_count() or 1) * 2)
 
@@ -257,6 +260,7 @@ class Settings:
       data.get(f'{p}ANILIST_FALLBACK_TIMEOUT_SECONDS'),
       self.anilist_fallback_timeout_seconds,
     )
+    self.subtitle_backup_root = data.get(f'{p}SUBTITLE_BACKUP_ROOT', self.subtitle_backup_root)
 
   def save_to_env(self) -> None:
     env_path = self.env_file
@@ -310,6 +314,7 @@ class Settings:
       f'{prefix}RECOGNITION_FAIL_SCORE': str(float(self.recognition_fail_score)),
       f'{prefix}ANILIST_FALLBACK_ENABLED': str(bool(self.anilist_fallback_enabled)).lower(),
       f'{prefix}ANILIST_FALLBACK_TIMEOUT_SECONDS': str(float(self.anilist_fallback_timeout_seconds)),
+      f'{prefix}SUBTITLE_BACKUP_ROOT': self.subtitle_backup_root,
     }
     legacy_removed_keys = {
       f'{prefix}AI_ENABLED',

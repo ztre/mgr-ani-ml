@@ -112,6 +112,10 @@
         <el-form-item label="人工修正日志路径">
           <el-input v-model="form.review_jsonl_path" placeholder="/app/pending/review.jsonl" />
         </el-form-item>
+        <el-form-item label="字幕备份根目录">
+          <el-input v-model="form.subtitle_backup_root" placeholder="/app/subtitle_backup" />
+          <div class="form-tip">手动导入字幕的备份存储目录，需与资源目标目录在同一文件系统</div>
+        </el-form-item>
 
         <el-divider content-position="left">低置信度识别兜底</el-divider>
         <div class="section-desc section-gap">
@@ -205,6 +209,7 @@ const form = ref({
   pending_jsonl_path: '/app/pending/pending.jsonl',
   unprocessed_items_jsonl_path: '/app/pending/unprocessed_items.jsonl',
   review_jsonl_path: '/app/pending/review.jsonl',
+  subtitle_backup_root: '/app/subtitle_backup',
   anilist_fallback_enabled: true,
   anilist_fallback_timeout_seconds: 8,
 })
@@ -434,6 +439,13 @@ onMounted(load)
   margin-top: 6px;
   color: #64748b;
   font-size: 13px;
+  line-height: 1.5;
+}
+
+.form-tip {
+  margin-top: 4px;
+  color: #94a3b8;
+  font-size: 12px;
   line-height: 1.5;
 }
 

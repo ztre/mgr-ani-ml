@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, text
 from sqlalchemy.orm import Session, object_session
@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, object_session
 from .logs import append_log
 from ..config import settings
 from ..database import get_db
-from ..models import CheckIssue, DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
+from ..models import CheckIssue, DirectoryState, InodeRecord, ManualAttachmentBackup, MediaRecord, ScanTask, SyncGroup
 from ..services.group_routing import resolve_movie_target_root, resolve_tv_target_root
 from ..services.linker import get_inode, path_excluded
 from ..services.parser import _extract_subtitle_lang, classify_extra_from_text, parse_movie_filename, parse_tv_filename
@@ -744,6 +744,13 @@ def _stage_batch_delete(
 
     deleted_inode_count = _delete_inodes_for_removed_sources(db, rows, deleted_ids)
     deleted_dir_state_count = _delete_directory_states_for_removed_sources(db, rows, deleted_ids)
+
+    # Delete ManualAttachmentBackup rows for the deleted records.
+    # The backup files themselves are intentionally preserved in subtitle_backup_root.
+    if deleted_ids:
+        db.query(ManualAttachmentBackup).filter(
+            ManualAttachmentBackup.media_record_id.in_(sorted(deleted_ids))
+        ).delete(synchronize_session=False)
 
     for row in rows:
         db.delete(row)
@@ -2761,6 +2768,135 @@ def create_manual_record(req: ManualRecordIn, db: Session = Depends(get_db)):
         "status": result.status,
         "idempotent": result.idempotent,
         "closed_issues_count": result.closed_issues_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Subtitle batch import (批量字幕导入)
+# ---------------------------------------------------------------------------
+
+
+class SubtitleBatchPreviewRequest(BaseModel):
+    sync_group_id: int
+    tmdb_id: int | None = None
+    season: int
+    content_category: str | None = None
+    resource_dir: str | None = None
+    filenames: list[str]  # bare filenames only — no file content needed for preview
+
+
+class SubtitleImportItemIn(BaseModel):
+    subtitle_path: str   # filename (used to match uploaded file by name)
+    episode: int
+    lang: str            # e.g. ".zh-CN", ".zh-CN.ja"
+    matched_video_id: int
+
+
+@router.post("/subtitle-batch-preview")
+def subtitle_batch_preview(req: SubtitleBatchPreviewRequest, db: Session = Depends(get_db)):
+    """Parse subtitle filenames and return a preview of the target mapping.
+
+    Accepts a JSON body with a list of filenames — no file upload required.
+    """
+    from ..services.subtitle_import import preview_subtitle_batch
+
+    if not req.filenames:
+        raise HTTPException(status_code=400, detail="未提供任何字幕文件名")
+
+    result = preview_subtitle_batch(
+        db,
+        sync_group_id=req.sync_group_id,
+        tmdb_id=req.tmdb_id,
+        season=req.season,
+        content_category=req.content_category,
+        resource_dir=req.resource_dir,
+        filenames=req.filenames,
+    )
+    return {
+        "items": [
+            {
+                "subtitle_path": it.subtitle_path,
+                "filename": it.filename,
+                "parsed_episode": it.parsed_episode,
+                "parsed_lang": it.parsed_lang,
+                "parsed_category": it.parsed_category,
+                "matched_video_id": it.matched_video_id,
+                "matched_video_stem": it.matched_video_stem,
+                "proposed_target": it.proposed_target,
+                "proposed_backup": it.proposed_backup,
+                "has_conflict": it.has_conflict,
+                "match_found": it.match_found,
+            }
+            for it in result.items
+        ],
+        "available_videos": [
+            {
+                "id": item.id,
+                "stem": item.stem,
+                "episode": item.episode,
+                "category": item.category,
+                "target_path": item.target_path,
+            }
+            for item in result.available_videos
+        ],
+    }
+
+
+@router.post("/subtitle-batch-import")
+async def subtitle_batch_import(
+    files: list[UploadFile] = File(...),
+    sync_group_id: int = Form(...),
+    items: str = Form(...),   # JSON array of SubtitleImportItemIn
+    db: Session = Depends(get_db),
+):
+    """Stage uploaded subtitle files and import them into the resource target dir."""
+    import json as _json
+
+    from ..services.subtitle_import import SubtitleImportItem, cleanup_staging, import_subtitle_batch, stage_subtitle_uploads
+
+    if not files:
+        raise HTTPException(status_code=400, detail="未上传任何字幕文件")
+
+    try:
+        items_data: list[dict] = _json.loads(items)
+    except Exception:
+        raise HTTPException(status_code=400, detail="items 字段不是有效的 JSON")
+
+    files_data = [(f.filename or f"file_{i}", await f.read()) for i, f in enumerate(files)]
+    try:
+        staging_token, staged_paths = stage_subtitle_uploads(files_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Map staged paths by filename so we can resolve item.subtitle_path (bare filename)
+    staged_by_name = {p.name: p for p in staged_paths}
+
+    import_items = []
+    for it in items_data:
+        sub_name = it.get("subtitle_path", "")
+        staged_path = staged_by_name.get(sub_name)
+        if staged_path is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"上传文件中未找到字幕 '{sub_name}'，请重新选择文件",
+            )
+        import_items.append(SubtitleImportItem(
+            subtitle_path=str(staged_path),
+            episode=int(it["episode"]),
+            lang=str(it["lang"]),
+            matched_video_id=int(it["matched_video_id"]),
+        ))
+
+    try:
+        result = import_subtitle_batch(db, sync_group_id=sync_group_id, items=import_items)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        cleanup_staging(staging_token)
+
+    return {
+        "imported": result.imported,
+        "errors": result.errors,
     }
 
 

@@ -31,6 +31,7 @@ class ConfigResponse(BaseModel):
     review_jsonl_path: str
     anilist_fallback_enabled: bool
     anilist_fallback_timeout_seconds: float
+    subtitle_backup_root: str
 
 
 class ConfigUpdate(BaseModel):
@@ -52,6 +53,7 @@ class ConfigUpdate(BaseModel):
     review_jsonl_path: str | None = None
     anilist_fallback_enabled: bool | None = None
     anilist_fallback_timeout_seconds: float | None = None
+    subtitle_backup_root: str | None = None
 
 
 class TestConnectionRequest(BaseModel):
@@ -88,6 +90,7 @@ def get_config():
         review_jsonl_path=str(settings.review_jsonl_path or ""),
         anilist_fallback_enabled=bool(settings.anilist_fallback_enabled),
         anilist_fallback_timeout_seconds=float(settings.anilist_fallback_timeout_seconds or 8.0),
+        subtitle_backup_root=str(settings.subtitle_backup_root or "/app/subtitle_backup"),
     )
 
 
@@ -131,6 +134,8 @@ def update_config(data: ConfigUpdate):
         settings.anilist_fallback_enabled = data.anilist_fallback_enabled
     if data.anilist_fallback_timeout_seconds is not None:
         settings.anilist_fallback_timeout_seconds = max(1.0, float(data.anilist_fallback_timeout_seconds))
+    if data.subtitle_backup_root is not None and data.subtitle_backup_root.strip():
+        settings.subtitle_backup_root = data.subtitle_backup_root.strip()
 
     settings.save_to_env()
     return {"ok": True}
