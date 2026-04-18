@@ -37,6 +37,7 @@ from .library_mutations import upsert_inode_record, upsert_media_record
 from .linker import get_inode
 from .media_content_types import EXTRA_CATEGORIES, SPECIAL_CATEGORIES
 from .parser import _extract_subtitle_lang, extract_bracket_episode, parse_tv_filename
+from .resource_tree import extract_movie_resource_dir, extract_show_dir
 
 _log = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ class SubtitlePreviewResult:
 @dataclass
 class SubtitleImportItem:
     subtitle_path: str   # source subtitle file path
-    episode: int         # episode number (may have been corrected by user)
+    episode: int | None  # TV may carry a corrected episode; movie can be empty
     lang: str            # language suffix (e.g. ".zh-CN")
     matched_video_id: int  # MediaRecord.id of the target video
 
@@ -221,21 +222,26 @@ def _resolve_video_episode(row: MediaRecord) -> int | None:
 def _load_preview_video_rows(
     db: Session,
     sync_group_id: int,
+    media_type: str,
     tmdb_id: int | None,
-    season: int,
+    season: int | None,
     resource_dir: str | None,
 ) -> list[MediaRecord]:
     base_query = (
         db.query(MediaRecord)
         .filter(
             MediaRecord.sync_group_id == sync_group_id,
-            MediaRecord.type == "tv",
+            MediaRecord.type == media_type,
             MediaRecord.file_type == "video",
             MediaRecord.target_path.isnot(None),
             MediaRecord.target_path != "",
-            MediaRecord.season == season,
         )
     )
+
+    if media_type == "tv":
+        if season is None:
+            return []
+        base_query = base_query.filter(MediaRecord.season == season)
 
     if tmdb_id is not None:
         by_tmdb = base_query.filter(MediaRecord.tmdb_id == tmdb_id).all()
@@ -263,21 +269,28 @@ def _compute_subtitle_backup(
     subtitle_filename: str,
     video_target_path: str,
     group_name: str,
+    media_type: str,
 ) -> Path:
     """Return the subtitle's backup path under ``subtitle_backup_root``."""
     vp = Path(video_target_path)
-    season_dir = vp.parent           # e.g. …/魔术快斗1412 (2014) [tmdbid=68573]/Season 01
-    resource_dir = season_dir.parent  # e.g. …/魔术快斗1412 (2014) [tmdbid=68573]
-    resource_name = resource_dir.name
-    season_name = season_dir.name
     backup_root = Path(settings.subtitle_backup_root)
-    return (
-        backup_root
-        / _sanitize_segment(group_name)
-        / resource_name
-        / season_name
-        / subtitle_filename
-    )
+    backup_base = backup_root / _sanitize_segment(group_name)
+
+    normalized_media_type = str(media_type or "").strip().lower()
+    if normalized_media_type == "tv":
+        resource_dir = Path(extract_show_dir(video_target_path))
+        season_dir = vp.parent
+        return backup_base / resource_dir.name / season_dir.name / subtitle_filename
+
+    resource_dir = Path(extract_movie_resource_dir(video_target_path))
+    backup_path = backup_base / resource_dir.name
+    try:
+        relative_parent = vp.parent.relative_to(resource_dir)
+    except ValueError:
+        relative_parent = Path()
+    if str(relative_parent) not in {"", "."}:
+        backup_path = backup_path / relative_parent
+    return backup_path / subtitle_filename
 
 
 def _sanitize_segment(name: str) -> str:
@@ -287,6 +300,15 @@ def _sanitize_segment(name: str) -> str:
     return name
 
 
+def _preview_item_sort_key(item: SubtitlePreviewItem) -> tuple[int, int, str]:
+    parsed_episode = item.parsed_episode
+    return (
+        parsed_episode is None,
+        parsed_episode or 0,
+        str(item.filename or "").lower(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -294,8 +316,9 @@ def _sanitize_segment(name: str) -> str:
 def preview_subtitle_batch(
     db: Session,
     sync_group_id: int,
+    media_type: str,
     tmdb_id: int | None,
-    season: int,
+    season: int | None,
     content_category: str | None,
     resource_dir: str | None,
     filenames: list[str],
@@ -312,22 +335,26 @@ def preview_subtitle_batch(
     video_rows = _load_preview_video_rows(
         db,
         sync_group_id=sync_group_id,
+        media_type=media_type,
         tmdb_id=tmdb_id,
         season=season,
         resource_dir=resource_dir,
     )
 
     # Build (category, episode) → video record map.
+    normalized_media_type = str(media_type or "tv").strip().lower()
     selected_category = _normalize_content_category(content_category)
     cat_ep_to_video: dict[tuple[str | None, int], MediaRecord] = {}
+    category_video_rows: list[MediaRecord] = []
     available_videos: list[SubtitleVideoCandidate] = []
     for row in video_rows:
         if row.id is None or not row.target_path:
             continue
-        ep = _resolve_video_episode(row)
+        ep = _resolve_video_episode(row) if normalized_media_type == "tv" else None
         cat = _normalize_content_category(row.category)
         if cat != selected_category:
             continue
+        category_video_rows.append(row)
         if ep is not None:
             key = (cat, ep)
             if key not in cat_ep_to_video:
@@ -353,7 +380,10 @@ def preview_subtitle_batch(
         parsed_cat = _parse_category_from_subtitle(filename)
 
         matched_video: MediaRecord | None = None
-        if parsed_ep is not None:
+        if normalized_media_type == "movie":
+            if len(category_video_rows) == 1:
+                matched_video = category_video_rows[0]
+        elif parsed_ep is not None:
             matched_video = cat_ep_to_video.get((selected_category, parsed_ep))
 
         proposed_target: str | None = None
@@ -365,7 +395,10 @@ def preview_subtitle_batch(
                 str(matched_video.target_path), parsed_lang, sub_ext
             )
             backup_path = _compute_subtitle_backup(
-                target_path.name, str(matched_video.target_path), group_name
+                target_path.name,
+                str(matched_video.target_path),
+                group_name,
+                str(matched_video.type or normalized_media_type),
             )
             proposed_target = str(target_path)
             proposed_backup = str(backup_path)
@@ -394,6 +427,7 @@ def preview_subtitle_batch(
         ))
 
 
+    items.sort(key=_preview_item_sort_key)
     available_videos.sort(key=lambda item: (item.episode is None, item.episode or 0, item.stem.lower()))
     return SubtitlePreviewResult(items=items, available_videos=available_videos)
 
@@ -463,7 +497,10 @@ def _import_single_subtitle(
     # --- compute paths (server-authoritative) ---
     target_path = _compute_subtitle_target(str(video_row.target_path), lang, sub_ext)
     backup_path = _compute_subtitle_backup(
-        target_path.name, str(video_row.target_path), group_name
+        target_path.name,
+        str(video_row.target_path),
+        group_name,
+        str(video_row.type or "tv"),
     )
 
     # --- idempotency: if target exists and is already linked to backup ---

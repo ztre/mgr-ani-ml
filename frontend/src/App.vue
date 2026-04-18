@@ -1,77 +1,213 @@
 <template>
   <el-config-provider :locale="zhCn">
     <router-view v-if="isLoginPage" />
-    <el-container v-else class="app-container">
-      <el-aside width="240px" class="sidebar">
-        <div class="logo">Anime Media Manager</div>
-        <el-menu
-          :default-active="$route.path"
-          router
-          class="sidebar-menu"
-        >
-          <el-menu-item index="/">
-            <el-icon><Monitor /></el-icon>
-            <span>仪表盘</span>
-          </el-menu-item>
-          <el-menu-item index="/sync-groups">
-            <el-icon><FolderOpened /></el-icon>
-            <span>同步组</span>
-          </el-menu-item>
-          <el-menu-item index="/media">
-            <el-icon><VideoPlay /></el-icon>
-            <span>媒体记录</span>
-          </el-menu-item>
-          <el-menu-item index="/checks">
-            <el-icon><Search /></el-icon>
-            <span>检查中心</span>
-          </el-menu-item>
-          <el-menu-item index="/pending">
-            <el-icon><WarningFilled /></el-icon>
-            <span>待办清单</span>
-          </el-menu-item>
-          <el-menu-item index="/pending-logs">
-            <el-icon><Document /></el-icon>
-            <span>人工修正日志</span>
-          </el-menu-item>
-          <el-menu-item index="/inodes">
-            <el-icon><Files /></el-icon>
-            <span>Inode 管理</span>
-          </el-menu-item>
-          <el-menu-item index="/config">
-            <el-icon><Setting /></el-icon>
-            <span>配置</span>
-          </el-menu-item>
-        </el-menu>
-        <div class="sidebar-footer">
-          <el-button class="logout-btn" @click="logout">
-            <el-icon><SwitchButton /></el-icon>
-            退出登录
-          </el-button>
-        </div>
-      </el-aside>
-      <el-main class="main-content">
-        <div class="page-shell">
-          <router-view />
-        </div>
-      </el-main>
-    </el-container>
+    <template v-else>
+      <el-container class="app-container">
+        <el-aside width="240px" class="sidebar">
+          <div class="logo">Anime Media Manager</div>
+          <el-menu
+            :default-active="$route.path"
+            router
+            class="sidebar-menu"
+          >
+            <el-menu-item index="/">
+              <el-icon><Monitor /></el-icon>
+              <span>仪表盘</span>
+            </el-menu-item>
+            <el-menu-item index="/sync-groups">
+              <el-icon><FolderOpened /></el-icon>
+              <span>同步组</span>
+            </el-menu-item>
+            <el-menu-item index="/media">
+              <el-icon><VideoPlay /></el-icon>
+              <span>媒体记录</span>
+            </el-menu-item>
+            <el-menu-item index="/checks">
+              <el-icon><Search /></el-icon>
+              <span>检查中心</span>
+            </el-menu-item>
+            <el-menu-item index="/pending">
+              <el-icon><WarningFilled /></el-icon>
+              <span>待办清单</span>
+            </el-menu-item>
+            <el-menu-item index="/pending-logs">
+              <el-icon><Document /></el-icon>
+              <span>人工修正日志</span>
+            </el-menu-item>
+            <el-menu-item index="/inodes">
+              <el-icon><Files /></el-icon>
+              <span>Inode 管理</span>
+            </el-menu-item>
+            <el-menu-item index="/config">
+              <el-icon><Setting /></el-icon>
+              <span>配置</span>
+            </el-menu-item>
+          </el-menu>
+          <div class="sidebar-footer">
+            <el-button class="sidebar-tool-btn" @click="openAppLogDrawer">
+              <span class="sidebar-footer-btn__content">
+                <el-icon class="sidebar-footer-btn__icon"><Document /></el-icon>
+                <span class="sidebar-footer-btn__label">后端日志</span>
+              </span>
+            </el-button>
+            <el-button class="logout-btn" @click="logout">
+              <span class="sidebar-footer-btn__content">
+                <el-icon class="sidebar-footer-btn__icon"><SwitchButton /></el-icon>
+                <span class="sidebar-footer-btn__label">退出登录</span>
+              </span>
+            </el-button>
+          </div>
+        </el-aside>
+        <el-main class="main-content">
+          <div class="page-shell">
+            <router-view />
+          </div>
+        </el-main>
+      </el-container>
+
+      <TaskLogMonitorDrawer
+        v-model="appLogDrawerVisible"
+        title="后端应用日志"
+        size="46%"
+        drawer-class="logs-drawer"
+        :append-to-body="true"
+        :target-label="appLogTargetLabel"
+        :last-refreshed-at="appLogLastRefreshedAt"
+        :auto-refresh="appLogAutoRefresh"
+        :logs="appLogLines"
+        :logs-loading="appLogLoading"
+        :manual-refresh-disabled="false"
+        :show-status-tag="false"
+        :show-summary="false"
+        :reverse-logs="false"
+        :stick-to-bottom="true"
+        empty-text="暂无应用日志"
+        @update:autoRefresh="appLogAutoRefresh = $event"
+        @refresh="manualRefreshAppLogs"
+      >
+        <template #toolbar-left-extra>
+          <el-select
+            v-model="appLogFileName"
+            size="small"
+            style="width: 150px"
+            @change="onAppLogFileChange"
+          >
+            <el-option
+              v-for="option in appLogFiles"
+              :key="option.name"
+              :label="buildAppLogFileLabel(option)"
+              :value="option.name"
+            />
+          </el-select>
+        </template>
+      </TaskLogMonitorDrawer>
+    </template>
   </el-config-provider>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import dayjs from 'dayjs'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import { Document, Files, FolderOpened, Monitor, Search, Setting, SwitchButton, VideoPlay, WarningFilled } from '@element-plus/icons-vue'
+import { logsApi } from './api/client'
+
+const TaskLogMonitorDrawer = defineAsyncComponent(() => import('./components/TaskLogMonitorDrawer.vue'))
 
 const route = useRoute()
 const router = useRouter()
 const isLoginPage = computed(() => route.path === '/login')
 
+const appLogDrawerVisible = ref(false)
+const appLogLoading = ref(false)
+const appLogLines = ref([])
+const appLogFileName = ref('app.log')
+const appLogFiles = ref(buildDefaultAppLogFiles())
+const appLogTargetLabel = ref('logs/app.log')
+const appLogLastRefreshedAt = ref('')
+const appLogAutoRefresh = ref(true)
+let appLogTimer = null
+
+function buildDefaultAppLogFiles() {
+  return ['app.log', 'app.log.1', 'app.log.2', 'app.log.3', 'app.log.4', 'app.log.5'].map((name, index) => ({
+    name,
+    exists: index === 0,
+  }))
+}
+
+function buildAppLogFileLabel(option) {
+  const name = String(option?.name || 'app.log')
+  return option?.exists ? name : `${name}（暂无）`
+}
+
 function logout() {
+  clearAppLogTimer()
+  appLogDrawerVisible.value = false
   localStorage.removeItem('amm_token')
   router.push('/login')
 }
+
+function clearAppLogTimer() {
+  if (appLogTimer) {
+    clearInterval(appLogTimer)
+    appLogTimer = null
+  }
+}
+
+async function fetchAppLogs({ silent = false } = {}) {
+  if (!silent) appLogLoading.value = true
+  try {
+    const { data } = await logsApi.getAppLogs({ limit: 400, file_name: appLogFileName.value })
+    appLogLines.value = Array.isArray(data?.logs) ? [...data.logs] : []
+    appLogFiles.value = Array.isArray(data?.files) && data.files.length ? data.files : buildDefaultAppLogFiles()
+    appLogFileName.value = data?.name || appLogFileName.value
+    appLogTargetLabel.value = data?.name ? `logs/${data.name}` : 'logs/app.log'
+    appLogLastRefreshedAt.value = dayjs().format('HH:mm:ss')
+  } catch {
+    if (!silent) {
+      appLogLines.value = ['加载应用日志失败']
+    }
+  } finally {
+    if (!silent) appLogLoading.value = false
+  }
+}
+
+function restartAppLogAutoRefresh() {
+  clearAppLogTimer()
+  if (isLoginPage.value || !appLogDrawerVisible.value || !appLogAutoRefresh.value) return
+  appLogTimer = setInterval(async () => {
+    await fetchAppLogs({ silent: true })
+  }, 2000)
+}
+
+async function openAppLogDrawer() {
+  appLogDrawerVisible.value = true
+  await fetchAppLogs()
+  restartAppLogAutoRefresh()
+}
+
+async function onAppLogFileChange() {
+  await fetchAppLogs()
+  restartAppLogAutoRefresh()
+}
+
+async function manualRefreshAppLogs() {
+  await fetchAppLogs()
+}
+
+watch([appLogDrawerVisible, appLogAutoRefresh, isLoginPage], () => {
+  if (isLoginPage.value) {
+    appLogDrawerVisible.value = false
+    clearAppLogTimer()
+    return
+  }
+  restartAppLogAutoRefresh()
+})
+
+onBeforeUnmount(() => {
+  clearAppLogTimer()
+})
 </script>
 
 <style>
@@ -257,10 +393,46 @@ body {
 .sidebar-footer {
   margin-top: auto;
   padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
 }
 
+.sidebar-tool-btn,
 .logout-btn {
   width: 100%;
+  min-width: 0;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.sidebar-footer-btn__content {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  column-gap: 10px;
+}
+
+.sidebar-footer-btn__icon {
+  width: 18px;
+  min-width: 18px;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.sidebar-footer-btn__icon svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.sidebar-footer-btn__label {
+  min-width: 0;
+  justify-self: start;
 }
 
 .main-content {

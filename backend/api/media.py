@@ -2778,8 +2778,9 @@ def create_manual_record(req: ManualRecordIn, db: Session = Depends(get_db)):
 
 class SubtitleBatchPreviewRequest(BaseModel):
     sync_group_id: int
+    media_type: Literal["tv", "movie"] = "tv"
     tmdb_id: int | None = None
-    season: int
+    season: int | None = None
     content_category: str | None = None
     resource_dir: str | None = None
     filenames: list[str]  # bare filenames only — no file content needed for preview
@@ -2787,7 +2788,7 @@ class SubtitleBatchPreviewRequest(BaseModel):
 
 class SubtitleImportItemIn(BaseModel):
     subtitle_path: str   # filename (used to match uploaded file by name)
-    episode: int
+    episode: int | None = None
     lang: str            # e.g. ".zh-CN", ".zh-CN.ja"
     matched_video_id: int
 
@@ -2802,10 +2803,13 @@ def subtitle_batch_preview(req: SubtitleBatchPreviewRequest, db: Session = Depen
 
     if not req.filenames:
         raise HTTPException(status_code=400, detail="未提供任何字幕文件名")
+    if req.media_type == "tv" and req.season is None:
+        raise HTTPException(status_code=400, detail="TV 资源预览需要提供 season")
 
     result = preview_subtitle_batch(
         db,
         sync_group_id=req.sync_group_id,
+        media_type=req.media_type,
         tmdb_id=req.tmdb_id,
         season=req.season,
         content_category=req.content_category,
@@ -2867,27 +2871,46 @@ async def subtitle_batch_import(
         staging_token, staged_paths = stage_subtitle_uploads(files_data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        # Map staged paths by filename so we can resolve item.subtitle_path (bare filename)
+        staged_by_name = {p.name: p for p in staged_paths}
 
-    # Map staged paths by filename so we can resolve item.subtitle_path (bare filename)
-    staged_by_name = {p.name: p for p in staged_paths}
+        if not isinstance(items_data, list):
+            raise HTTPException(status_code=400, detail="items 字段必须是数组")
 
-    import_items = []
-    for it in items_data:
-        sub_name = it.get("subtitle_path", "")
-        staged_path = staged_by_name.get(sub_name)
-        if staged_path is None:
+        import_items = []
+        item_names: list[str] = []
+        for index, it in enumerate(items_data):
+            try:
+                parsed_item = SubtitleImportItemIn.model_validate(it)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"items[{index}] 无效：{exc}",
+                ) from exc
+
+            sub_name = parsed_item.subtitle_path
+            staged_path = staged_by_name.get(sub_name)
+            if staged_path is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"上传文件中未找到字幕 '{sub_name}'，请重新选择文件",
+                )
+            item_names.append(sub_name)
+            import_items.append(SubtitleImportItem(
+                subtitle_path=str(staged_path),
+                episode=parsed_item.episode,
+                lang=parsed_item.lang,
+                matched_video_id=parsed_item.matched_video_id,
+            ))
+
+        missing_preview_items = [name for name in staged_by_name if name not in item_names]
+        if missing_preview_items:
             raise HTTPException(
                 status_code=400,
-                detail=f"上传文件中未找到字幕 '{sub_name}'，请重新选择文件",
+                detail="预览解析结果中仍有未匹配字幕，请确保所有结果状态均为“已匹配”后再确认导入",
             )
-        import_items.append(SubtitleImportItem(
-            subtitle_path=str(staged_path),
-            episode=int(it["episode"]),
-            lang=str(it["lang"]),
-            matched_video_id=int(it["matched_video_id"]),
-        ))
 
-    try:
         result = import_subtitle_batch(db, sync_group_id=sync_group_id, items=import_items)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from ..config import settings
 
@@ -17,6 +17,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 current_task_id: ContextVar[int | None] = ContextVar("current_task_id", default=None)
 _last_cleanup_at: datetime | None = None
+APP_LOG_FILENAMES: tuple[str, ...] = tuple(["app.log", *(f"app.log.{index}" for index in range(1, 6))])
 
 
 def append_task_log(task_id: int | None, message: str) -> None:
@@ -47,6 +48,34 @@ def _tail_lines(path: Path, limit: int) -> list[str]:
         return lines[-limit:]
     except Exception:
         return ["读取日志失败"]
+
+
+def _build_log_file_meta(path: Path) -> dict:
+    return {
+        "name": path.name,
+        "size": path.stat().st_size if path.exists() else 0,
+        "updated_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat() if path.exists() else None,
+    }
+
+
+def _resolve_app_log_name(file_name: str | None) -> str:
+    raw_value = file_name
+    if raw_value is not None and not isinstance(raw_value, str):
+        raw_value = getattr(raw_value, "default", None)
+    normalized = str(raw_value or "app.log").strip()
+    if normalized not in APP_LOG_FILENAMES:
+        raise HTTPException(status_code=400, detail="仅支持查看 app.log 到 app.log.5")
+    return normalized
+
+
+def _list_app_log_files() -> list[dict]:
+    out = []
+    for name in APP_LOG_FILENAMES:
+        path = LOG_DIR / name
+        item = _build_log_file_meta(path)
+        item["exists"] = path.exists()
+        out.append(item)
+    return out
 
 
 def cleanup_logs_if_needed(force: bool = False) -> None:
@@ -91,11 +120,28 @@ def list_logs(limit: int = Query(200, ge=1, le=5000)):
     files = sorted(LOG_DIR.glob("task_*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
     out = []
     for p in files[:limit]:
-        out.append(
-            {
-                "name": p.name,
-                "size": p.stat().st_size if p.exists() else 0,
-                "updated_at": datetime.fromtimestamp(p.stat().st_mtime).isoformat() if p.exists() else None,
-            }
-        )
+        out.append(_build_log_file_meta(p))
     return {"items": out}
+
+
+@router.get("/app")
+def get_app_logs(
+    file_name: str = Query("app.log"),
+    limit: int = Query(400, ge=1, le=5000),
+):
+    cleanup_logs_if_needed()
+    selected_name = _resolve_app_log_name(file_name)
+    path = LOG_DIR / selected_name
+    files = _list_app_log_files()
+    if not path.exists():
+        return {
+            "name": path.name,
+            "size": 0,
+            "updated_at": None,
+            "logs": ["暂无日志"],
+            "files": files,
+        }
+    result = _build_log_file_meta(path)
+    result["logs"] = _tail_lines(path, limit)
+    result["files"] = files
+    return result

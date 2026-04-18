@@ -110,6 +110,10 @@ export const authApi = {
   login: (data) => client.post('/auth/login', data),
 }
 
+export const logsApi = {
+  getAppLogs: (params) => client.get('/logs/app', { params }),
+}
+
 export const tasksApi = {
   list: (params) => client.get('/tasks', { params }),
   getLogs: (id) => client.get(`/tasks/${id}/logs`),

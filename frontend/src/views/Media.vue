@@ -779,18 +779,20 @@
                 {{ subtitleBatchContextName || '—' }}
               </el-tag>
             </div>
-            <el-divider direction="vertical" style="height: 20px" />
-            <div class="subtitle-import-context-item">
-              <span class="subtitle-import-context-label">季度</span>
-              <el-input-number
-                v-model="subtitleBatchForm.season"
-                :min="0"
-                :max="99"
-                :controls="false"
-                @change="clearSubtitleBatchPreview"
-                style="width: 58px; font-size: 14px"
-              />
-            </div>
+            <template v-if="isSubtitleBatchTvMode">
+              <el-divider direction="vertical" style="height: 20px" />
+              <div class="subtitle-import-context-item">
+                <span class="subtitle-import-context-label">季度</span>
+                <el-input-number
+                  v-model="subtitleBatchForm.season"
+                  :min="0"
+                  :max="99"
+                  :controls="false"
+                  @change="clearSubtitleBatchPreview"
+                  style="width: 58px; font-size: 14px"
+                />
+              </div>
+            </template>
             <el-divider direction="vertical" style="height: 20px" />
             <div class="subtitle-import-context-item">
               <span class="subtitle-import-context-label">分类</span>
@@ -845,13 +847,16 @@
             </el-button>
             <template v-if="subtitleBatchPreviewItems.length">
               <el-tag size="small" type="success" effect="plain">
-                已匹配 {{ subtitleBatchPreviewItems.filter((item) => isSubtitlePreviewImportable(item)).length }}
+                已匹配 {{ subtitleBatchMatchedCount }}/{{ subtitleBatchPreviewItems.length }}
               </el-tag>
               <el-tag v-if="subtitleBatchPreviewItems.some(i => i.has_conflict)" size="small" type="warning" effect="plain">
                 冲突 {{ subtitleBatchPreviewItems.filter(i => i.has_conflict).length }}
               </el-tag>
               <el-tag v-if="subtitleBatchPreviewItems.some(i => !i.match_found)" size="small" type="danger" effect="plain">
                 无匹配 {{ subtitleBatchPreviewItems.filter(i => !i.match_found).length }}
+              </el-tag>
+              <el-tag v-if="!subtitleBatchAllMatched" size="small" type="warning" effect="plain">
+                需全部已匹配后才能导入
               </el-tag>
             </template>
           </div>
@@ -865,7 +870,7 @@
             max-height="240"
           >
             <el-table-column label="字幕文件" prop="filename" min-width="160" show-overflow-tooltip />
-            <el-table-column label="集数" width="82">
+            <el-table-column v-if="isSubtitleBatchTvMode" label="集数" width="82">
               <template #default="{ row }">
                 <el-input-number
                   v-model="row.parsed_episode"
@@ -928,12 +933,12 @@
           <el-button
             type="primary"
             :loading="subtitleBatchImporting"
-            :disabled="!subtitleBatchPreviewItems.some((item) => isSubtitlePreviewImportable(item))"
+            :disabled="!subtitleBatchAllMatched"
             @click="submitSubtitleBatch"
           >
             确认导入
-            <template v-if="subtitleBatchPreviewItems.some((item) => isSubtitlePreviewImportable(item))">
-              （{{ subtitleBatchPreviewItems.filter((item) => isSubtitlePreviewImportable(item)).length }} 项）
+            <template v-if="subtitleBatchPreviewItems.length">
+              （{{ subtitleBatchMatchedCount }}/{{ subtitleBatchPreviewItems.length }} 项）
             </template>
           </el-button>
         </template>
@@ -1077,7 +1082,7 @@ const manualRecordForm = reactive({ sync_group_id: null, original_path: '', targ
 const syncGroupOptions = ref([])
 // Subtitle batch import (Tab 2)
 const manualRecordActiveTab = ref('single')
-const subtitleBatchForm = reactive({ sync_group_id: null, tmdb_id: null, resource_dir: '', season: null, category: 'episode' })
+const subtitleBatchForm = reactive({ sync_group_id: null, tmdb_id: null, resource_dir: '', media_type: 'tv', season: null, category: 'episode' })
 const subtitleBatchContextName = ref('')    // display name shown in context bar
 const subtitleBatchFiles = ref([])          // raw File objects from el-upload
 const subtitleUploadRef = ref(null)         // el-upload component ref
@@ -1085,6 +1090,13 @@ const subtitleBatchPreviewing = ref(false)
 const subtitleBatchImporting = ref(false)
 const subtitleBatchPreviewItems = ref([])
 const subtitleBatchVideoOptions = ref([])
+const isSubtitleBatchTvMode = computed(() => subtitleBatchForm.media_type !== 'movie')
+const subtitleBatchMatchedCount = computed(() => subtitleBatchPreviewItems.value.filter((item) => isSubtitlePreviewImportable(item)).length)
+const subtitleBatchAllMatched = computed(() => {
+  const total = subtitleBatchPreviewItems.value.length
+  return total > 0 && subtitleBatchMatchedCount.value === total
+})
+const DEFAULT_SUBTITLE_BATCH_LANG = '.zh-CN'
 const SUBTITLE_LANG_OPTIONS = [
   { label: 'zh-CN', value: '.zh-CN' },
   { label: 'zh-TW', value: '.zh-TW' },
@@ -1111,10 +1123,19 @@ function normalizeSubtitleBatchCategory(category) {
 
 function buildSubtitleVideoOptionLabel(option) {
   const parts = [option?.stem || extractFilename(option?.target_path) || '未命名视频']
-  if (option?.episode != null) parts.push(`E${String(option.episode).padStart(2, '0')}`)
+  if (isSubtitleBatchTvMode.value && option?.episode != null) parts.push(`E${String(option.episode).padStart(2, '0')}`)
   if (option?.category === 'special') parts.push('SP')
   if (option?.category === 'extra') parts.push('Extra')
   return parts.join(' · ')
+}
+
+function resolveSubtitleBatchItemCategory(item) {
+  const rawCategory = String(item?.category || '').trim()
+  if (rawCategory) return normalizeSubtitleBatchCategory(rawCategory)
+  if (item?.tree_bucket === 'aux') {
+    return subtitleBatchForm.category === 'episode' ? 'special' : subtitleBatchForm.category
+  }
+  return 'episode'
 }
 
 function getSubtitleVideoOptionById(videoId) {
@@ -1136,19 +1157,32 @@ function buildSubtitlePreviewTargetPath(videoTargetPath, lang, subtitleFilename)
   return `${dir}${stem}${normalizedLang}${ext}`
 }
 
+function ensureSubtitlePreviewLang(row) {
+  const normalizedLang = String(row?.parsed_lang || '').trim()
+  if (normalizedLang) return normalizedLang
+  if (row) row.parsed_lang = DEFAULT_SUBTITLE_BATCH_LANG
+  return DEFAULT_SUBTITLE_BATCH_LANG
+}
+
 function syncSubtitlePreviewRowSelection(row, matchedVideoId) {
   const option = getSubtitleVideoOptionById(matchedVideoId)
+  const resolvedLang = ensureSubtitlePreviewLang(row)
   row.matched_video_id = option ? Number(option.id) : null
   row.matched_video_stem = option ? option.stem : null
   row.match_found = Boolean(option)
   row.has_conflict = false
-  row.proposed_target = option ? buildSubtitlePreviewTargetPath(option.target_path, row.parsed_lang, row.filename) : null
+  row.proposed_target = option ? buildSubtitlePreviewTargetPath(option.target_path, resolvedLang, row.filename) : null
   if (!option) {
     row.proposed_backup = null
   }
 }
 
 function autoMatchSubtitlePreviewRow(row) {
+  if (!isSubtitleBatchTvMode.value) {
+    const option = subtitleBatchVideoOptions.value.length === 1 ? subtitleBatchVideoOptions.value[0] : null
+    syncSubtitlePreviewRowSelection(row, option?.id ?? null)
+    return
+  }
   const normalizedEpisode = Number(row?.parsed_episode)
   if (!normalizedEpisode) {
     syncSubtitlePreviewRowSelection(row, null)
@@ -1185,15 +1219,13 @@ function buildSubtitleVideoOptionsFromCurrentNode() {
       if (!itemId || seen.has(itemId)) continue
       if (!isVideoItem(item)) continue
       if (!item?.target_path) continue
-      const category = item?.tree_bucket === 'aux'
-        ? (subtitleBatchForm.category === 'episode' ? 'special' : subtitleBatchForm.category)
-        : 'episode'
+      const category = resolveSubtitleBatchItemCategory(item)
       if (category !== subtitleBatchForm.category) continue
       seen.add(itemId)
       result.push({
         id: itemId,
         stem: extractFilename(item.target_path).replace(/\.[^.]+$/, ''),
-        episode: extractEpisodeFromVideoPath(item.target_path || item.original_path),
+        episode: isSubtitleBatchTvMode.value ? extractEpisodeFromVideoPath(item.target_path || item.original_path) : null,
         category,
         target_path: item.target_path,
       })
@@ -2361,7 +2393,8 @@ function openScanEntryFixDialog(entry) {
 }
 
 async function openManualRecordDialog(resource) {
-  const ctxSeason = currentNode.value?.season ?? resource?.season ?? null
+  const ctxMediaType = resource?.type === 'movie' ? 'movie' : 'tv'
+  const ctxSeason = ctxMediaType === 'tv' ? (currentNode.value?.season ?? resource?.season ?? null) : null
   Object.assign(manualRecordForm, {
     sync_group_id: resource?.sync_group_id ?? null,
     original_path: '',
@@ -2375,6 +2408,7 @@ async function openManualRecordDialog(resource) {
     sync_group_id: resource?.sync_group_id ?? null,
     tmdb_id: resource?.tmdb_id ?? null,
     resource_dir: resource?.resource_dir || '',
+    media_type: ctxMediaType,
     season: ctxSeason,
     category: normalizeSubtitleBatchCategory(currentNode.value?.category ?? resource?.category),
   })
@@ -2453,7 +2487,7 @@ async function previewSubtitleBatch() {
     ElMessage.warning('请先选择字幕文件')
     return
   }
-  if (!subtitleBatchForm.sync_group_id || !subtitleBatchForm.resource_dir || subtitleBatchForm.season == null) {
+  if (!subtitleBatchForm.sync_group_id || !subtitleBatchForm.resource_dir || (isSubtitleBatchTvMode.value && subtitleBatchForm.season == null)) {
     ElMessage.warning('资源上下文不完整，请从资源抽屉中重新打开此对话框')
     return
   }
@@ -2462,15 +2496,17 @@ async function previewSubtitleBatch() {
     const filenames = subtitleBatchFiles.value.map(f => f.name)
     const { data } = await manualRecordApi.subtitleBatchPreview({
       sync_group_id: subtitleBatchForm.sync_group_id,
+      media_type: subtitleBatchForm.media_type,
       tmdb_id: subtitleBatchForm.tmdb_id || null,
       resource_dir: subtitleBatchForm.resource_dir,
-      season: subtitleBatchForm.season,
+      season: isSubtitleBatchTvMode.value ? subtitleBatchForm.season : null,
       content_category: subtitleBatchForm.category,
       filenames,
     })
     subtitleBatchVideoOptions.value = mergeSubtitleVideoOptions(data.available_videos || [])
     subtitleBatchPreviewItems.value = (data.items || []).map((it) => {
       const row = { ...it }
+      ensureSubtitlePreviewLang(row)
       if (!row.matched_video_id) autoMatchSubtitlePreviewRow(row)
       return row
     })
@@ -2482,25 +2518,26 @@ async function previewSubtitleBatch() {
 }
 
 async function submitSubtitleBatch() {
-  const importable = subtitleBatchPreviewItems.value.filter((item) => isSubtitlePreviewImportable(item))
-  if (!importable.length) {
-    ElMessage.warning('没有可导入的字幕项')
+  if (!subtitleBatchPreviewItems.value.length) {
+    ElMessage.warning('请先预览解析字幕文件')
+    return
+  }
+  if (!subtitleBatchAllMatched.value) {
+    ElMessage.warning('预览解析结果中仍有未匹配或冲突项，全部状态为“已匹配”后才能确认导入')
     return
   }
   subtitleBatchImporting.value = true
   try {
     const formData = new FormData()
     formData.append('sync_group_id', subtitleBatchForm.sync_group_id)
-    formData.append('items', JSON.stringify(importable.map(it => ({
+    formData.append('items', JSON.stringify(subtitleBatchPreviewItems.value.map(it => ({
       subtitle_path: it.subtitle_path,
       episode: it.parsed_episode,
       lang: it.parsed_lang,
       matched_video_id: it.matched_video_id,
     }))))
-    // Only upload files that are actually going to be imported
-    const importNames = new Set(importable.map(it => it.subtitle_path))
     for (const file of subtitleBatchFiles.value) {
-      if (importNames.has(file.name)) formData.append('files', file)
+      formData.append('files', file)
     }
     const { data } = await manualRecordApi.subtitleBatchImport(formData)
     const { imported, errors } = data

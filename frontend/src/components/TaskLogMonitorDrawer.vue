@@ -17,8 +17,10 @@
           <span v-if="taskId" class="log-meta">任务 #{{ taskId }}</span>
           <span v-if="targetLabel" class="log-meta">{{ targetLabel }}</span>
           <span v-if="lastRefreshedAt" class="log-meta">上次刷新 {{ lastRefreshedAt }}</span>
+          <slot name="toolbar-left-extra" />
         </div>
         <div class="log-toolbar-right">
+          <slot name="toolbar-right-extra" />
           <el-switch
             :model-value="autoRefresh"
             active-text="实时刷新"
@@ -33,7 +35,7 @@
         <span v-else-if="isTerminalTaskStatus(taskStatus)" class="log-monitor-finished">{{ finishedText }}</span>
         <span v-else class="log-monitor-running">{{ runningText }}</span>
       </div>
-      <div v-loading="logsLoading" class="log-container">
+      <div ref="logContainerRef" v-loading="logsLoading" class="log-container">
         <pre v-if="displayLogs.length">{{ displayLogs.join('\n') }}</pre>
         <div v-else class="empty-logs">{{ waitingForTask || isWaitingTaskStatus(taskStatus) ? waitingEmptyText : emptyText }}</div>
       </div>
@@ -42,7 +44,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -65,6 +67,7 @@ const props = defineProps({
   showStatusTag: { type: Boolean, default: true },
   showSummary: { type: Boolean, default: true },
   reverseLogs: { type: Boolean, default: true },
+  stickToBottom: { type: Boolean, default: false },
   waitingText: { type: String, default: '正在等待任务写入日志...' },
   runningText: { type: String, default: '任务进行中，可实时查看日志进度。' },
   finishedText: { type: String, default: '任务已结束，日志面板保持打开，可继续查看输出。' },
@@ -73,6 +76,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:modelValue', 'update:autoRefresh', 'refresh'])
+const logContainerRef = ref(null)
 
 function isTerminalTaskStatus(status) {
   return ['completed', 'failed', 'cancelled'].includes(String(status || ''))
@@ -106,8 +110,32 @@ const resolvedTaskStatusTagType = computed(() => {
 
 const displayLogs = computed(() => {
   const list = Array.isArray(props.logs) ? props.logs : []
-  return props.reverseLogs ? [...list].reverse() : list
+  return props.reverseLogs ? [...list].reverse() : [...list]
 })
+
+async function scrollToBottom() {
+  if (!props.stickToBottom || !props.modelValue) return
+  await nextTick()
+  const container = logContainerRef.value
+  if (!container) return
+  container.scrollTop = container.scrollHeight
+}
+
+watch(
+  () => props.modelValue,
+  (visible) => {
+    if (!visible) return
+    void scrollToBottom()
+  },
+)
+
+watch(
+  () => props.logs,
+  () => {
+    void scrollToBottom()
+  },
+  { deep: true },
+)
 </script>
 
 <style scoped>
