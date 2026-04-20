@@ -1797,17 +1797,14 @@ const currentNodeMainSubtitleStatus = computed(() => {
   return summarizeNodeMainSubtitleCoverage(rawCurrentNode.value)
 })
 const shouldShowCurrentNodeSubtitleWarning = computed(() => {
-  return drawerVisible.value && currentNode.value?.scope?.scope_level === 'season' && currentNodeMainSubtitleStatus.value.hasMissing
+  return drawerVisible.value && !!currentNode.value && currentNodeMainSubtitleStatus.value.hasMissing
 })
 const currentNodeSubtitleWarningLabel = computed(() => {
-  const { missingVideos, totalVideos } = currentNodeMainSubtitleStatus.value
-  if (!missingVideos || !totalVideos) return '缺部分字幕'
-  return `缺字幕 ${missingVideos}/${totalVideos}`
+  return '缺部分字幕'
 })
 const currentNodeSubtitleWarningTitle = computed(() => {
-  const { missingVideos, totalVideos } = currentNodeMainSubtitleStatus.value
-  if (!missingVideos || !totalVideos) return ''
-  return `正片目录中有 ${missingVideos}/${totalVideos} 个视频缺少正片附件字幕`
+  if (!currentNodeMainSubtitleStatus.value.hasMissing) return ''
+  return '正片目录中缺少正片附件字幕'
 })
 const selectedDrawerItems = computed(() => {
   const selectedIds = new Set(drawerSelectedIds.value || [])
