@@ -259,6 +259,8 @@ body {
 .page-shell :is(
   .actions,
   .header-actions,
+  .page-actions,
+  .filter-toolbar,
   .card-footer,
   .card-header-flex,
   .drawer-toolbar,
@@ -279,6 +281,8 @@ body {
 .page-shell :is(
   .actions,
   .header-actions,
+  .page-actions,
+  .filter-toolbar,
   .card-footer,
   .card-header-flex,
   .drawer-toolbar,
@@ -299,6 +303,8 @@ body {
 .page-shell :is(
   .actions,
   .header-actions,
+  .page-actions,
+  .filter-toolbar,
   .card-footer,
   .card-header-flex,
   .drawer-toolbar,
@@ -315,6 +321,51 @@ body {
 ) :is(.el-button, .el-dropdown) {
   max-width: 100%;
   flex-shrink: 1;
+}
+
+.page-shell :is(.header-actions, .page-actions, .filter-toolbar) .toolbar-search {
+  flex: 1 1 320px;
+  min-width: 220px;
+  max-width: 420px;
+}
+
+.page-shell :is(.header-actions, .page-actions, .filter-toolbar) .toolbar-search--wide {
+  max-width: 520px;
+}
+
+.page-shell .toolbar-actions-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.page-shell .table-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.page-shell .table-actions .el-button + .el-button,
+.page-shell .table-actions .el-dropdown + .el-button,
+.page-shell .table-actions .el-button + .el-dropdown,
+.page-shell .table-actions .el-dropdown + .el-dropdown {
+  margin-left: 0;
+}
+
+.page-shell .table-actions .el-button-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.page-shell .table-actions .el-button-group > .el-button {
+  margin-left: 0 !important;
+  border-radius: 10px !important;
 }
 
 .app-container {
@@ -488,6 +539,14 @@ body {
   border-bottom: 1px solid var(--table-cell-line);
 }
 
+.el-table :is(.el-table-fixed-column--right, .el-table-fixed-column--left) {
+  background: var(--panel-bg) !important;
+}
+
+.el-table .el-table__fixed-right-patch {
+  background: var(--table-header-bg) !important;
+}
+
 .el-divider__text {
   color: var(--text-secondary);
   font-weight: 500;
@@ -563,5 +622,14 @@ body {
 
 .amm-confirm-box .el-message-box__btns {
   gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .page-shell :is(.header-actions, .page-actions, .filter-toolbar) .toolbar-search,
+  .page-shell :is(.header-actions, .page-actions, .filter-toolbar) .toolbar-search--wide {
+    flex-basis: 100%;
+    min-width: 100%;
+    max-width: none;
+  }
 }
 </style>

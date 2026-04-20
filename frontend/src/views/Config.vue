@@ -101,21 +101,7 @@
         <el-form-item label="清理检查间隔(秒)">
           <el-input-number v-model="form.log_cleanup_interval_seconds" :min="60" :max="86400" />
         </el-form-item>
-        <el-divider content-position="left">待办日志</el-divider>
-        <div class="section-desc section-gap">统一管理待办、未处理项与人工修正登记日志路径。</div>
-        <el-form-item label="Pending 日志路径">
-          <el-input v-model="form.pending_jsonl_path" placeholder="/app/pending/pending.jsonl" />
-        </el-form-item>
-        <el-form-item label="未处理项日志路径">
-          <el-input v-model="form.unprocessed_items_jsonl_path" placeholder="/app/pending/unprocessed_items.jsonl" />
-        </el-form-item>
-        <el-form-item label="人工修正日志路径">
-          <el-input v-model="form.review_jsonl_path" placeholder="/app/pending/review.jsonl" />
-        </el-form-item>
-        <el-form-item label="字幕备份根目录">
-          <el-input v-model="form.subtitle_backup_root" placeholder="/app/subtitle_backup" />
-          <div class="form-tip">手动导入字幕的备份存储目录，需与资源目标目录在同一文件系统</div>
-        </el-form-item>
+        <div class="section-desc section-gap">字幕备份根目录已迁移到“同步组管理”页面配置。</div>
 
         <el-divider content-position="left">低置信度识别兜底</el-divider>
         <div class="section-desc section-gap">
@@ -206,10 +192,6 @@ const form = ref({
   log_retention_days: 14,
   log_max_task_files: 200,
   log_cleanup_interval_seconds: 600,
-  pending_jsonl_path: '/app/pending/pending.jsonl',
-  unprocessed_items_jsonl_path: '/app/pending/unprocessed_items.jsonl',
-  review_jsonl_path: '/app/pending/review.jsonl',
-  subtitle_backup_root: '/app/subtitle_backup',
   anilist_fallback_enabled: true,
   anilist_fallback_timeout_seconds: 8,
 })
@@ -232,7 +214,7 @@ const passwordForm = ref({
 
 async function load() {
   const { data } = await configApi.get()
-  form.value = { ...data, emby_library_ids: data.emby_library_ids || [] }
+  form.value = { ...form.value, ...data, emby_library_ids: data.emby_library_ids || [] }
   if (form.value.emby_url && form.value.emby_api_key) {
     await loadEmbyLibraries(false)
   }
@@ -446,6 +428,19 @@ onMounted(load)
   margin-top: 4px;
   color: #94a3b8;
   font-size: 12px;
+  line-height: 1.5;
+}
+
+.readonly-path {
+  min-height: 32px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
   line-height: 1.5;
 }
 

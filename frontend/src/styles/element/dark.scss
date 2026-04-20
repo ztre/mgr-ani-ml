@@ -1,47 +1,47 @@
 body.theme-dark {
   color-scheme: dark;
 
-  --amm-elevation-0: #0b0e14;
-  --amm-elevation-1: #1a1d24;
-  --amm-elevation-2: #252932;
-  --amm-sidebar-bg: #141922;
-  --amm-border-soft: rgba(229, 234, 243, 0.08);
-  --amm-border-strong: #2d3139;
-  --amm-brand-soft: rgba(83, 168, 255, 0.1);
-  --amm-brand-soft-strong: rgba(83, 168, 255, 0.18);
+  --amm-elevation-0: #0f141d;
+  --amm-elevation-1: #171d27;
+  --amm-elevation-2: #202733;
+  --amm-sidebar-bg: #121823;
+  --amm-border-soft: rgba(229, 234, 243, 0.09);
+  --amm-border-strong: #313949;
+  --amm-brand-soft: rgba(99, 179, 255, 0.12);
+  --amm-brand-soft-strong: rgba(99, 179, 255, 0.22);
   --amm-success-soft: rgba(103, 194, 58, 0.12);
   --amm-warning-soft: rgba(230, 162, 60, 0.12);
   --amm-danger-soft: rgba(245, 108, 108, 0.12);
   --amm-info-soft: rgba(163, 166, 173, 0.12);
-  --amm-page-glow: radial-gradient(circle at top right, rgba(83, 168, 255, 0.1), transparent 32%), radial-gradient(circle at left top, rgba(37, 62, 96, 0.34), transparent 24%);
+  --amm-page-glow: radial-gradient(circle at top right, rgba(99, 179, 255, 0.12), transparent 34%), radial-gradient(circle at left top, rgba(35, 79, 138, 0.24), transparent 26%);
 
   --app-bg: var(--amm-elevation-0);
-  --page-backdrop: linear-gradient(180deg, #0b0e14 0%, #10141b 100%);
+  --page-backdrop: linear-gradient(180deg, #0f141d 0%, #141b25 100%);
   --page-overlay: var(--amm-page-glow);
   --panel-bg: var(--amm-elevation-1);
   --panel-raised-bg: var(--amm-elevation-2);
-  --panel-header-bg: rgba(255, 255, 255, 0.02);
-  --panel-shadow: none;
-  --button-hover-shadow: 0 10px 22px rgba(6, 10, 18, 0.28);
-  --button-press-shadow: 0 4px 10px rgba(6, 10, 18, 0.18);
-  --text-main: #e5eaf3;
-  --text-secondary: #a3a6ad;
+  --panel-header-bg: rgba(255, 255, 255, 0.035);
+  --panel-shadow: 0 18px 44px rgba(3, 7, 18, 0.22);
+  --button-hover-shadow: 0 10px 24px rgba(4, 8, 18, 0.30);
+  --button-press-shadow: 0 4px 10px rgba(4, 8, 18, 0.22);
+  --text-main: #e8edf7;
+  --text-secondary: #b4bdca;
   --line-soft: var(--amm-border-strong);
-  --brand: #53a8ff;
+  --brand: #63b3ff;
   --sidebar-bg: var(--amm-sidebar-bg);
-  --sidebar-item: #b5bcc7;
+  --sidebar-item: #c0c7d4;
   --sidebar-active-bg: var(--amm-brand-soft);
-  --table-header-bg: #20242d;
-  --table-row-hover-bg: rgba(255, 255, 255, 0.03);
-  --table-cell-line: rgba(229, 234, 243, 0.05);
-  --scrollbar-thumb: rgba(229, 234, 243, 0.14);
-  --scrollbar-thumb-hover: rgba(229, 234, 243, 0.24);
-  --stat-card-bg: linear-gradient(160deg, rgba(83, 168, 255, 0.1), rgba(83, 168, 255, 0.03));
-  --stat-card-border: rgba(83, 168, 255, 0.16);
-  --tag-tv-bg: rgba(83, 168, 255, 0.12);
-  --tag-tv-text: #93cbff;
-  --tag-movie-bg: rgba(250, 173, 20, 0.12);
-  --tag-movie-text: #ffd480;
+  --table-header-bg: #1c2431;
+  --table-row-hover-bg: rgba(99, 179, 255, 0.06);
+  --table-cell-line: rgba(229, 234, 243, 0.08);
+  --scrollbar-thumb: rgba(229, 234, 243, 0.18);
+  --scrollbar-thumb-hover: rgba(229, 234, 243, 0.28);
+  --stat-card-bg: linear-gradient(160deg, rgba(99, 179, 255, 0.12), rgba(99, 179, 255, 0.04));
+  --stat-card-border: rgba(99, 179, 255, 0.18);
+  --tag-tv-bg: rgba(99, 179, 255, 0.14);
+  --tag-tv-text: #a8d6ff;
+  --tag-movie-bg: rgba(250, 173, 20, 0.14);
+  --tag-movie-text: #ffd995;
 
   --el-bg-color: var(--amm-elevation-1);
   --el-bg-color-page: var(--amm-elevation-0);
@@ -52,24 +52,24 @@ body.theme-dark {
   --el-fill-color-extra-light: rgba(255, 255, 255, 0.06);
   --el-fill-color-dark: rgba(255, 255, 255, 0.08);
   --el-fill-color-darker: rgba(255, 255, 255, 0.12);
-  --el-text-color-primary: #e5eaf3;
-  --el-text-color-regular: #a3a6ad;
-  --el-text-color-secondary: #858b96;
-  --el-text-color-placeholder: #707784;
-  --el-text-color-disabled: #5f6672;
-  --el-border-color: #2d3139;
-  --el-border-color-light: #2d3139;
-  --el-border-color-lighter: #2d3139;
-  --el-border-color-extra-light: rgba(45, 49, 57, 0.9);
+  --el-text-color-primary: #e8edf7;
+  --el-text-color-regular: #b4bdca;
+  --el-text-color-secondary: #8e98a8;
+  --el-text-color-placeholder: #748093;
+  --el-text-color-disabled: #606b7b;
+  --el-border-color: #313949;
+  --el-border-color-light: #313949;
+  --el-border-color-lighter: #313949;
+  --el-border-color-extra-light: rgba(49, 57, 73, 0.92);
   --el-mask-color: rgba(4, 6, 10, 0.72);
   --el-mask-color-extra-light: rgba(4, 6, 10, 0.32);
-  --el-color-primary: #53a8ff;
-  --el-color-primary-light-3: #74bbff;
-  --el-color-primary-light-5: #8cc8ff;
-  --el-color-primary-light-7: #abd8ff;
-  --el-color-primary-light-8: #bee2ff;
-  --el-color-primary-light-9: rgba(83, 168, 255, 0.14);
-  --el-color-primary-dark-2: #3f93f5;
+  --el-color-primary: #63b3ff;
+  --el-color-primary-light-3: #81c2ff;
+  --el-color-primary-light-5: #9fd1ff;
+  --el-color-primary-light-7: #bddfff;
+  --el-color-primary-light-8: #cde8ff;
+  --el-color-primary-light-9: rgba(99, 179, 255, 0.16);
+  --el-color-primary-dark-2: #479ceb;
   --el-box-shadow-light: none;
   --el-box-shadow-lighter: none;
   --el-box-shadow-dark: none;
@@ -96,13 +96,17 @@ body.theme-dark .el-message-box,
 body.theme-dark .el-popover.el-popper {
   background: var(--panel-bg) !important;
   border: 1px solid var(--el-border-color) !important;
-  box-shadow: none !important;
+  box-shadow: var(--panel-shadow) !important;
 }
 
-body.theme-dark .el-card.is-hover-shadow:hover,
+body.theme-dark .el-card.is-hover-shadow:hover {
+  box-shadow: 0 24px 48px rgba(3, 7, 18, 0.24) !important;
+  border-color: rgba(99, 179, 255, 0.18) !important;
+}
+
 body.theme-dark .el-card.is-always-shadow,
 body.theme-dark .el-card.is-never-shadow {
-  box-shadow: none !important;
+  box-shadow: var(--panel-shadow) !important;
 }
 
 body.theme-dark .el-card__header,
@@ -132,6 +136,13 @@ body.theme-dark .el-date-editor.el-input__wrapper {
   background: var(--panel-raised-bg) !important;
   box-shadow: 0 0 0 1px var(--el-border-color) inset !important;
   color: var(--el-text-color-primary) !important;
+}
+
+body.theme-dark .el-input__wrapper.is-focus,
+body.theme-dark .el-select__wrapper.is-focused,
+body.theme-dark .el-textarea__inner:focus,
+body.theme-dark .el-input-number.is-focus {
+  box-shadow: 0 0 0 1px rgba(99, 179, 255, 0.52) inset, 0 0 0 4px rgba(99, 179, 255, 0.12) !important;
 }
 
 body.theme-dark .el-input__inner,
@@ -168,15 +179,15 @@ body.theme-dark .el-button:not(.el-button--primary):not(.el-button--success):not
 }
 
 body.theme-dark .el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.is-disabled):not(:disabled):hover {
-  background: rgba(255, 255, 255, 0.08) !important;
-  border-color: rgba(83, 168, 255, 0.22) !important;
+  background: rgba(99, 179, 255, 0.10) !important;
+  border-color: rgba(99, 179, 255, 0.24) !important;
   color: var(--el-color-primary-light-3) !important;
 }
 
 body.theme-dark .el-button.el-button--primary {
   background: var(--el-color-primary) !important;
   border-color: var(--el-color-primary-dark-2) !important;
-  color: #08111f !important;
+  color: #07121d !important;
 }
 
 body.theme-dark .el-button.el-button--primary:hover {
@@ -279,6 +290,11 @@ body.theme-dark .el-table__body tr:hover > td.el-table__cell {
   background: var(--table-row-hover-bg) !important;
 }
 
+body.theme-dark .el-table :is(.el-table-fixed-column--left, .el-table-fixed-column--right),
+body.theme-dark .el-table .el-table__fixed-right-patch {
+  background: var(--panel-bg) !important;
+}
+
 body.theme-dark .el-pagination,
 body.theme-dark .el-form-item__label,
 body.theme-dark .el-radio__label,
@@ -333,9 +349,9 @@ body.theme-dark .stat-icon {
 }
 
 body.theme-dark .drawer-header-sticky {
-  background: linear-gradient(180deg, rgba(26, 29, 36, 0.98) 0%, rgba(26, 29, 36, 0.95) 78%, rgba(26, 29, 36, 0.88) 100%) !important;
+  background: linear-gradient(180deg, rgba(23, 29, 39, 0.98) 0%, rgba(23, 29, 39, 0.96) 78%, rgba(23, 29, 39, 0.90) 100%) !important;
   border-bottom: 1px solid var(--el-border-color) !important;
-  box-shadow: none !important;
+  box-shadow: 0 16px 28px rgba(3, 7, 18, 0.22) !important;
 }
 
 body.theme-dark .sticky-node-nav {

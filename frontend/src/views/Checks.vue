@@ -1,40 +1,42 @@
 <template>
   <div class="checks-view">
     <div class="header">
-      <h1 class="page-title">检查中心</h1>
+      <div class="header-main">
+        <h1 class="page-title">检查中心</h1>
+        <p class="page-subtitle">汇总异常检查结果，并支持批量处理与复查。</p>
+      </div>
       <div class="header-actions">
         <el-button type="info" :loading="runningFull" @click="runFullCheck">
           <el-icon><Search /></el-icon>
-          全量检查
+          执行全量检查
         </el-button>
       </div>
     </div>
 
     <!-- Issue filter bar -->
     <el-card shadow="never" class="filter-card">
-      <el-row :gutter="12" align="middle">
-        <el-col :span="4">
-          <el-select v-model="filterStatus" placeholder="状态" clearable @change="loadIssues">
-            <el-option label="待处理 (open)" value="open" />
-            <el-option label="已忽略 (ignored)" value="ignored" />
-            <el-option label="已解决 (resolved)" value="resolved" />
-          </el-select>
-        </el-col>
-        <el-col :span="4">
-          <el-select v-model="filterChecker" placeholder="检查器" clearable @change="loadIssues">
-            <el-option label="源文件未使用" value="source_unrecorded" />
-            <el-option label="源目录未使用" value="source_dir_unrecorded" />
-            <el-option label="孤立硬链接" value="links_orphans" />
-            <el-option label="目标路径异常" value="media_path_sanity" />
-            <el-option label="目标文件无源" value="target_no_source" />
-            <el-option label="目标目录无源" value="target_dir_no_source" />
-          </el-select>
-        </el-col>
-        <el-col :span="3">
-          <el-button @click="resetFilters">重置过滤</el-button>
-          <el-button :loading="issuesLoading" :icon="Refresh" @click="loadIssues" style="margin-left:8px" />
-        </el-col>
-      </el-row>
+      <div class="filter-toolbar">
+        <el-select class="filter-select" v-model="filterStatus" placeholder="状态" clearable @change="loadIssues">
+          <el-option label="待处理 (open)" value="open" />
+          <el-option label="已忽略 (ignored)" value="ignored" />
+          <el-option label="已解决 (resolved)" value="resolved" />
+        </el-select>
+        <el-select class="filter-select" v-model="filterChecker" placeholder="检查器" clearable @change="loadIssues">
+          <el-option label="源文件未使用" value="source_unrecorded" />
+          <el-option label="源目录未使用" value="source_dir_unrecorded" />
+          <el-option label="孤立硬链接" value="links_orphans" />
+          <el-option label="目标路径异常" value="media_path_sanity" />
+          <el-option label="目标文件无源" value="target_no_source" />
+          <el-option label="目标目录无源" value="target_dir_no_source" />
+        </el-select>
+        <div class="toolbar-actions-inline">
+          <el-button @click="resetFilters">重置筛选</el-button>
+          <el-button :loading="issuesLoading" @click="loadIssues">
+            <el-icon><Refresh /></el-icon>
+            刷新问题
+          </el-button>
+        </div>
+      </div>
     </el-card>
 
     <!-- Issues table -->
@@ -104,9 +106,9 @@
           </template>
         </el-table-column>
         <!-- Operations column -->
-        <el-table-column label="操作" width="230" fixed="right">
+        <el-table-column label="操作" width="230">
           <template #default="{ row }">
-            <el-button-group v-if="row._isGroup" size="small">
+            <div v-if="row._isGroup" class="table-actions">
               <el-button type="warning" plain
                 :disabled="(row.children || []).every(c => c.status === 'ignored' || c.status === 'resolved')"
                 @click="batchActionGroup(row, 'ignore')">批量忽略</el-button>
@@ -116,13 +118,13 @@
               <el-button plain
                 v-if="filterStatus !== 'open'"
                 @click="batchActionGroup(row, 'reopen')">批量转待处理</el-button>
-            </el-button-group>
-            <el-button-group v-else-if="!row._isDirRow" size="small">
+            </div>
+            <div v-else-if="!row._isDirRow" class="table-actions">
               <el-button v-if="row.status !== 'ignored' && row.status !== 'resolved'" plain @click="ignoreIssue(row)">忽略</el-button>
               <el-button v-if="row.status !== 'resolved'" type="success" plain @click="resolveIssue(row)">解决</el-button>
               <el-button v-if="row.status === 'ignored' || row.status === 'resolved'" type="primary" plain @click="reopenIssue(row)">转为待处理</el-button>
-            </el-button-group>
-            <el-button-group v-else size="small">
+            </div>
+            <div v-else class="table-actions">
               <el-button plain
                 :disabled="row.status === 'ignored' || row.status === 'resolved'"
                 @click="ignoreIssue(row)">忽略</el-button>
@@ -130,7 +132,7 @@
                 :disabled="row.status === 'resolved'"
                 @click="resolveIssue(row)">解决</el-button>
               <el-button v-if="row.status === 'ignored' || row.status === 'resolved'" type="primary" plain @click="reopenIssue(row)">转为待处理</el-button>
-            </el-button-group>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -149,8 +151,10 @@
     <!-- Recent check runs -->
     <el-card shadow="never" class="runs-card">
       <template #header>
-        <span>近期检查记录</span>
-        <el-button style="float: right" size="small" @click="loadRuns">刷新</el-button>
+        <div class="card-header">
+          <span>近期检查记录</span>
+          <el-button size="small" @click="loadRuns">刷新记录</el-button>
+        </div>
       </template>
       <el-table :data="runs" stripe size="small" style="width:100%">
         <el-table-column prop="id" label="ID" width="50" />
@@ -472,7 +476,16 @@ function formatTime(t) {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
+  gap: 16px;
+  flex-wrap: wrap;
 }
+
+.header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .header-actions {
   display: flex;
   gap: 8px;
@@ -483,15 +496,42 @@ function formatTime(t) {
   font-weight: 600;
   margin: 0;
 }
+
+.page-subtitle {
+  margin: 0;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
 .filter-card {
   margin-bottom: 16px;
 }
+
+.filter-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-select {
+  width: 180px;
+}
+
 .table-card {
   margin-bottom: 16px;
 }
 .runs-card {
   margin-bottom: 16px;
 }
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .pagination {
   display: flex;
   justify-content: flex-end;
@@ -548,5 +588,15 @@ function formatTime(t) {
 .muted {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+@media (max-width: 900px) {
+  .filter-select {
+    width: 100%;
+  }
+
+  .header-actions {
+    width: 100%;
+  }
 }
 </style>

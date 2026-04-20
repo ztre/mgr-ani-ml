@@ -44,7 +44,9 @@ export const syncGroupsApi = {
   list: () => client.get('/sync-groups'),
   create: (data) => client.post('/sync-groups', data),
   get: (id) => client.get(`/sync-groups/${id}`),
+  getSettings: () => client.get('/sync-groups/settings'),
   update: (id, data) => client.put(`/sync-groups/${id}`, data),
+  updateSettings: (data) => client.put('/sync-groups/settings', data),
   delete: (id) => client.delete(`/sync-groups/${id}`),
 }
 

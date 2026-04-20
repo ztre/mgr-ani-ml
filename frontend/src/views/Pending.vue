@@ -1,22 +1,22 @@
 <template>
   <div class="pending-page">
     <div class="header">
-      <h1 class="page-title">待办清单</h1>
+      <div class="header-main">
+        <h1 class="page-title">待办清单</h1>
+      </div>
       <div class="header-actions">
         <el-input
+          class="toolbar-search"
           v-model="search"
           placeholder="按源路径筛选"
           clearable
-          style="width: 320px"
           @keyup.enter="handleSearch"
           @clear="handleSearch"
-        >
-          <template #append>
-            <el-button @click="handleSearch">
-              <el-icon><Search /></el-icon>
-            </el-button>
-          </template>
-        </el-input>
+        />
+        <el-button type="primary" @click="handleSearch">
+          <el-icon><Search /></el-icon>
+          搜索
+        </el-button>
         <el-tag type="warning" effect="dark">共 {{ total }} 条</el-tag>
         <el-button plain @click="resetSearch">重置</el-button>
         <el-button @click="loadPending" :loading="loading">
@@ -50,17 +50,19 @@
             {{ formatTime(row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right" align="center">
+        <el-table-column label="操作" width="260" align="center">
           <template #default="{ row }">
-            <el-button type="primary" plain @click="openOrganizeDialog(row)">手动整理</el-button>
-            <el-button
-              type="danger"
-              plain
-              :loading="deletingId === row.id"
-              @click="deletePending(row)"
-            >
-              删除
-            </el-button>
+            <div class="table-actions">
+              <el-button type="primary" plain @click="openOrganizeDialog(row)">手动整理</el-button>
+              <el-button
+                type="danger"
+                plain
+                :loading="deletingId === row.id"
+                @click="deletePending(row)"
+              >
+                删除
+              </el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -980,17 +982,27 @@ watch(organizeMonitorTaskStatus, async (status) => {
 }
 .header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  flex-direction: column;
   margin-bottom: 24px;
   gap: 24px;
   flex-wrap: wrap;
 }
+
+.header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .header-actions {
   display: flex;
   gap: 12px;
   align-items: center;
+  justify-content: flex-start;
   flex-wrap: wrap;
+  width: 100%;
 }
 .table-card {
   border: none;

@@ -1,7 +1,10 @@
 <template>
   <div class="dashboard">
     <div class="header-actions">
-      <h1 class="page-title">仪表盘</h1>
+      <div class="header-main">
+        <h1 class="page-title">仪表盘</h1>
+        <p class="page-subtitle">集中查看运行状态，并快速发起扫描、检查和媒体库刷新。</p>
+      </div>
       <div class="actions">
         <el-switch
           class="theme-switch"
@@ -12,19 +15,19 @@
         />
         <el-button type="primary" :loading="scanning" @click="runFullScan">
           <el-icon><Refresh /></el-icon>
-          全量扫描
+          扫描全库
         </el-button>
         <el-button type="info" :loading="checkingFull" @click="runFullCheck">
           <el-icon><Search /></el-icon>
-          全量检查
+          检查全库
         </el-button>
         <el-button type="success" :loading="refreshing" @click="refreshEmby">
           <el-icon><VideoPlay /></el-icon>
-          刷新 Emby
+          刷新 Emby 库
         </el-button>
         <el-button @click="$router.push('/sync-groups')">
           <el-icon><Setting /></el-icon>
-          管理同步组
+          同步组设置
         </el-button>
       </div>
     </div>
@@ -69,13 +72,13 @@
       </el-col>
     </el-row>
 
-    <el-card shadow="hover" class="pending-card">
+    <el-card v-if="showPendingOverview" shadow="hover" class="pending-card">
       <template #header>
         <div class="card-header-flex">
           <span>待办清单概览</span>
-          <div style="display: flex; gap: 8px; align-items: center;">
+          <div class="pending-summary">
             <el-tag type="warning" effect="dark">待办 {{ stats.pending_manual_count || 0 }}</el-tag>
-            <el-button size="small" @click="$router.push('/pending')">进入待办清单</el-button>
+            <el-button size="small" @click="$router.push('/pending')">查看待办</el-button>
           </div>
         </div>
       </template>
@@ -93,11 +96,13 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="110" align="center" fixed="right">
+        <el-table-column label="操作" width="110" align="center">
           <template #default="{ row }">
-            <el-button size="small" @click="$router.push({ path: '/pending', query: { search: row.original_path } })">
-              查看
-            </el-button>
+            <div class="table-actions">
+              <el-button size="small" @click="$router.push({ path: '/pending', query: { search: row.original_path } })">
+                查看
+              </el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -135,10 +140,10 @@
               :disabled="!group.enabled"
               @click="runGroupScan(group.id)"
             >
-              扫描
+              扫描本组
             </el-button>
             <el-button size="small" @click="$router.push(`/sync-groups?edit=${group.id}`)">
-              编辑
+              编辑规则
             </el-button>
           </div>
         </el-card>
@@ -159,7 +164,7 @@
               <el-option label="已完成" value="completed" />
               <el-option label="失败" value="failed" />
             </el-select>
-            <el-button size="small" @click="loadTasks">刷新</el-button>
+            <el-button size="small" @click="loadTasks">刷新任务</el-button>
           </div>
         </div>
       </template>
@@ -194,20 +199,22 @@
             {{ formatTime(row.finished_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="操作" width="180">
           <template #default="{ row }">
-            <el-button
-              v-if="isInterruptibleScanTask(row)"
-              size="small"
-              type="danger"
-              plain
-              :loading="interruptingTaskId === row.id"
-              :disabled="row.status === 'cancelling'"
-              @click="cancelTask(row)"
-            >
-              {{ row.status === 'queued' ? '取消排队' : (row.status === 'cancelling' ? '中断中' : '中断') }}
-            </el-button>
-            <el-button size="small" @click="viewLogs(row)">查看日志</el-button>
+            <div class="table-actions">
+              <el-button
+                v-if="isInterruptibleScanTask(row)"
+                size="small"
+                type="danger"
+                plain
+                :loading="interruptingTaskId === row.id"
+                :disabled="row.status === 'cancelling'"
+                @click="cancelTask(row)"
+              >
+                {{ row.status === 'queued' ? '取消排队' : (row.status === 'cancelling' ? '中断中' : '中断') }}
+              </el-button>
+              <el-button size="small" @click="viewLogs(row)">查看日志</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -247,7 +254,7 @@
 </template>
 
 <script setup>
-import { defineAsyncComponent, ref, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { DataLine, Film, Monitor, MoonNight, Refresh, Search, Setting, Sunny, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
 import { syncGroupsApi, scanApi, embyApi, tasksApi, mediaApi, checksApi } from '../api/client'
@@ -278,6 +285,7 @@ const stats = reactive({
   total_size: 0,
 })
 const pendingItems = ref([])
+const showPendingOverview = computed(() => Number(stats.pending_manual_count || 0) > 0)
 
 // Logs Drawer
 const drawerVisible = ref(false)
@@ -707,11 +715,28 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
+.header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.page-title {
+  margin: 0;
+}
+
+.page-subtitle {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
 .actions {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
 }
 
 .stat-card {
@@ -834,6 +859,13 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
+.pending-summary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .history-toolbar :deep(.el-select) {
   width: 140px;
   flex-shrink: 0;
@@ -851,5 +883,12 @@ onBeforeUnmount(() => {
 
 .theme-switch {
   margin-right: 4px;
+}
+
+@media (max-width: 960px) {
+  .actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 </style>

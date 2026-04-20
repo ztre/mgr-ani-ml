@@ -100,6 +100,11 @@ def _migrate_legacy_pending_path(path_value: str | None, default_value: str) -> 
   return raw
 
 
+DEFAULT_PENDING_JSONL_PATH = '/app/pending/pending.jsonl'
+DEFAULT_UNPROCESSED_ITEMS_JSONL_PATH = '/app/pending/unprocessed_items.jsonl'
+DEFAULT_REVIEW_JSONL_PATH = '/app/pending/review.jsonl'
+
+
 @dataclass
 class Settings:
   media_root: str = '/media'
@@ -137,11 +142,11 @@ class Settings:
   preserve_original_index: bool = True
   max_auto_remap_attempts: int = 3
   special_index_max_digits: int = 3
-  pending_jsonl_path: str = '/app/pending/pending.jsonl'
-  unprocessed_items_jsonl_path: str = '/app/pending/unprocessed_items.jsonl'
-  review_jsonl_path: str = '/app/pending/review.jsonl'
+  pending_jsonl_path: str = DEFAULT_PENDING_JSONL_PATH
+  unprocessed_items_jsonl_path: str = DEFAULT_UNPROCESSED_ITEMS_JSONL_PATH
+  review_jsonl_path: str = DEFAULT_REVIEW_JSONL_PATH
   # Backward-compatible alias. Prefer `unprocessed_items_jsonl_path`.
-  unhandled_jsonl_path: str = '/app/pending/unprocessed_items.jsonl'
+  unhandled_jsonl_path: str = DEFAULT_UNPROCESSED_ITEMS_JSONL_PATH
   use_file_lock: bool = False
   worker_autostart: bool = True
   season_aware_research_enabled: bool = True
@@ -209,29 +214,11 @@ class Settings:
       data.get(f'{p}SPECIAL_INDEX_MAX_DIGITS'),
       self.special_index_max_digits,
     )
-    self.pending_jsonl_path = _migrate_legacy_pending_path(
-      data.get(f'{p}PENDING_JSONL_PATH', self.pending_jsonl_path),
-      self.pending_jsonl_path,
-    )
-    legacy_unhandled = data.get(f'{p}UNHANDLED_JSONL_PATH')
-    self.unprocessed_items_jsonl_path = _migrate_legacy_pending_path(
-      data.get(
-        f'{p}UNPROCESSED_ITEMS_JSONL_PATH',
-        legacy_unhandled or self.unprocessed_items_jsonl_path,
-      ),
-      self.unprocessed_items_jsonl_path,
-    )
-    self.review_jsonl_path = _migrate_legacy_pending_path(
-      data.get(
-        f'{p}REVIEW_JSONL_PATH',
-        self.review_jsonl_path,
-      ),
-      self.review_jsonl_path,
-    )
-    self.unhandled_jsonl_path = _migrate_legacy_pending_path(
-      legacy_unhandled or self.unprocessed_items_jsonl_path,
-      self.unprocessed_items_jsonl_path,
-    )
+    # Pending log paths are fixed to application defaults and are no longer user-configurable.
+    self.pending_jsonl_path = DEFAULT_PENDING_JSONL_PATH
+    self.unprocessed_items_jsonl_path = DEFAULT_UNPROCESSED_ITEMS_JSONL_PATH
+    self.review_jsonl_path = DEFAULT_REVIEW_JSONL_PATH
+    self.unhandled_jsonl_path = DEFAULT_UNPROCESSED_ITEMS_JSONL_PATH
     self.use_file_lock = _parse_bool(
       data.get(f'{p}USE_FILE_LOCK'),
       self.use_file_lock,
@@ -302,11 +289,6 @@ class Settings:
       f'{prefix}PRESERVE_ORIGINAL_INDEX': str(bool(self.preserve_original_index)).lower(),
       f'{prefix}MAX_AUTO_REMAP_ATTEMPTS': str(int(self.max_auto_remap_attempts)),
       f'{prefix}SPECIAL_INDEX_MAX_DIGITS': str(int(self.special_index_max_digits)),
-      f'{prefix}PENDING_JSONL_PATH': self.pending_jsonl_path,
-      f'{prefix}UNPROCESSED_ITEMS_JSONL_PATH': self.unprocessed_items_jsonl_path,
-      f'{prefix}REVIEW_JSONL_PATH': self.review_jsonl_path,
-      # Backward-compatible alias.
-      f'{prefix}UNHANDLED_JSONL_PATH': self.unhandled_jsonl_path,
       f'{prefix}USE_FILE_LOCK': str(bool(self.use_file_lock)).lower(),
       f'{prefix}WORKER_AUTOSTART': str(bool(self.worker_autostart)).lower(),
       f'{prefix}SEASON_AWARE_RESEARCH_ENABLED': str(bool(self.season_aware_research_enabled)).lower(),
@@ -326,6 +308,10 @@ class Settings:
       f'{prefix}AI_GEMINI_API_KEY',
       f'{prefix}AI_GEMINI_BASE_URL',
       f'{prefix}AI_GEMINI_MODEL',
+      f'{prefix}PENDING_JSONL_PATH',
+      f'{prefix}UNPROCESSED_ITEMS_JSONL_PATH',
+      f'{prefix}REVIEW_JSONL_PATH',
+      f'{prefix}UNHANDLED_JSONL_PATH',
     }
 
     out: list[str] = []

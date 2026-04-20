@@ -1,28 +1,26 @@
 <template>
   <div class="pending-logs-page">
     <div class="page-header">
-      <div>
+      <div class="header-main">
         <h1 class="page-title">人工修正日志</h1>
-        <p class="page-subtitle">查看 `待办 / 未处理项 / 人工修正` 日志，并登记人工处理结果。</p>
+        <p class="page-subtitle">查看待办、未处理项和人工修正日志，并登记人工处理结果。</p>
       </div>
       <div class="page-actions">
         <el-input
+          class="toolbar-search toolbar-search--wide"
           v-model="search"
           placeholder="按路径、原因、备注、TMDB ID 搜索"
           clearable
-          style="width: 320px"
           @keyup.enter="handleSearch"
           @clear="handleSearch"
-        >
-          <template #append>
-            <el-button @click="handleSearch">
-              <el-icon><Search /></el-icon>
-            </el-button>
-          </template>
-        </el-input>
+        />
+        <el-button type="primary" @click="handleSearch">
+          <el-icon><Search /></el-icon>
+          搜索
+        </el-button>
         <el-button :loading="loading" @click="loadLogs">
           <el-icon><Refresh /></el-icon>
-          刷新
+          刷新日志
         </el-button>
       </div>
     </div>
@@ -34,7 +32,7 @@
             {{ kindLabel(option.kind) }}
           </el-radio-button>
         </el-radio-group>
-        <el-tag effect="dark" type="info">{{ currentPath || '未配置路径' }}</el-tag>
+        <el-tag effect="plain" type="info" class="path-tag">{{ currentPath || '未配置路径' }}</el-tag>
       </div>
     </el-card>
 
@@ -136,7 +134,7 @@
             </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="submitting" :disabled="!currentItem" @click="submitReview">
-                写入 Review 日志
+                登记处理结果
               </el-button>
             </el-form-item>
           </el-form>
@@ -364,15 +362,23 @@ onMounted(loadLogs)
   align-items: flex-start;
   gap: 16px;
   flex-wrap: wrap;
+  flex-direction: column;
+}
+
+.header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .page-title {
   font-size: 28px;
   font-weight: 700;
-  margin-bottom: 6px;
+  margin: 0;
 }
 
 .page-subtitle {
+  margin: 0;
   color: #64748b;
 }
 
@@ -381,6 +387,7 @@ onMounted(loadLogs)
   gap: 12px;
   align-items: center;
   flex-wrap: wrap;
+  width: 100%;
 }
 
 .toolbar-card,
@@ -396,6 +403,18 @@ onMounted(loadLogs)
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
+}
+
+.path-tag {
+  max-width: min(100%, 520px);
+}
+
+.path-tag :deep(.el-tag__content) {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .content-grid {
@@ -431,6 +450,16 @@ onMounted(loadLogs)
 @media (max-width: 1080px) {
   .content-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .page-actions {
+    width: 100%;
+  }
+
+  .path-tag {
+    max-width: 100%;
   }
 }
 </style>

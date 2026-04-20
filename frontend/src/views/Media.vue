@@ -1,13 +1,16 @@
 <template>
   <div class="media-page">
     <div class="header">
-      <h1 class="page-title">媒体记录</h1>
+      <div class="header-main">
+        <h1 class="page-title">媒体记录</h1>
+        <p class="page-subtitle">按资源浏览记录，并在抽屉内完成筛选、批量修正和删除操作。</p>
+      </div>
       <div class="header-actions">
         <el-input
+          class="toolbar-search"
           v-model="filters.search"
           placeholder="搜索资源或文件名..."
           clearable
-          style="width: 240px"
           @clear="onFilterChanged"
           @keyup.enter="onFilterChanged"
         />
@@ -20,9 +23,14 @@
           <el-option label="正片" value="main" />
           <el-option label="SPs/Extras" value="sps" />
         </el-select>
-        <el-button plain @click="resetMainFilters">重置</el-button>
+        <el-button type="primary" @click="onFilterChanged">
+          <el-icon><Search /></el-icon>
+          搜索
+        </el-button>
+        <el-button plain @click="resetMainFilters">重置筛选</el-button>
         <el-button :loading="loading" @click="loadResources">
           <el-icon><Refresh /></el-icon>
+          刷新列表
         </el-button>
       </div>
     </div>
@@ -66,17 +74,19 @@
           <template #default="{ row }">{{ formatTime(row.latest_updated_at) }}</template>
         </el-table-column>
 
-        <el-table-column label="操作" width="130" align="center" fixed="right">
+        <el-table-column label="操作" width="130" align="center">
           <template #default="{ row }">
-            <el-dropdown trigger="click" @command="(cmd) => onDeleteResourceCommand(row, cmd)">
-              <el-button type="danger" plain size="small">删除资源</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="records">仅删除该资源记录</el-dropdown-item>
-                  <el-dropdown-item command="records_and_links">删除该资源 + 硬链接</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+            <div class="table-actions">
+              <el-dropdown trigger="click" @command="(cmd) => onDeleteResourceCommand(row, cmd)">
+                <el-button type="danger" plain size="small">删除资源</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="records">仅删除该资源记录</el-dropdown-item>
+                    <el-dropdown-item command="records_and_links">删除该资源 + 硬链接</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -106,32 +116,33 @@
         <div class="drawer-path">{{ drawerResource?.resource_dir || '-' }}</div>
         <div class="drawer-toolbar">
           <div class="drawer-toolbar-left">
-            <el-input v-model="drawerSearch" placeholder="搜索当前资源内文件..." clearable style="width: 240px" />
-            <el-select v-model="drawerCategory" placeholder="分类" style="width: 120px">
+            <el-input class="drawer-search" v-model="drawerSearch" placeholder="搜索当前资源内文件..." clearable />
+            <el-select v-model="drawerCategory" placeholder="分类" class="drawer-category-select">
               <el-option label="全部" value="all" />
               <el-option label="正片" value="main" />
               <el-option label="SPs/Extras" value="sps" />
             </el-select>
-            <el-button plain @click="resetDrawerFilters">重置</el-button>
+            <el-button plain @click="resetDrawerFilters">重置筛选</el-button>
             <el-button :loading="drawerLoading" @click="reloadDrawer">
               <el-icon><Refresh /></el-icon>
+              刷新当前资源
             </el-button>
             <el-button v-if="drawerResource?.type === 'movie'" type="primary" plain :disabled="!drawerResource?.resource_dir" @click="openDirFixDialog">
-              修正整个资源
+              修正资源
             </el-button>
             <el-button v-if="drawerResource?.type === 'movie'" type="warning" plain :disabled="!drawerResource?.tmdb_id" @click="openWashDialog(drawerResource, null)">
-              发起洗版
+              洗版资源
             </el-button>
             <el-button type="success" plain :disabled="!drawerResource" @click="openManualRecordDialog(drawerResource)">
-              新增记录
+              新增条目
             </el-button>
           </div>
           <div class="drawer-toolbar-right">
             <span class="selection-summary">已选 {{ selectedDrawerItems.length }} 条</span>
-            <el-button plain size="small" :disabled="!selectedDrawerItems.length" @click="clearDrawerSelection">清空选择</el-button>
-            <el-button type="primary" plain size="small" :disabled="!selectedDrawerItems.length" @click="openBatchFixDialog">批量修正选中</el-button>
+            <el-button plain size="small" :disabled="!selectedDrawerItems.length" @click="clearDrawerSelection">清空已选</el-button>
+            <el-button type="primary" plain size="small" :disabled="!selectedDrawerItems.length" @click="openBatchFixDialog">批量修正已选</el-button>
             <el-dropdown trigger="click" :disabled="!selectedDrawerItems.length" @command="deleteSelectedItems">
-              <el-button type="warning" plain size="small">删除选中</el-button>
+              <el-button type="warning" plain size="small">删除已选</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="records">仅删除选中记录</el-dropdown-item>
@@ -140,7 +151,7 @@
               </template>
             </el-dropdown>
             <el-dropdown trigger="click" @command="onDeleteDrawerResourceCommand">
-              <el-button type="danger" plain size="small">删除当前资源</el-button>
+              <el-button type="danger" plain size="small">删除资源</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="records">仅删除该资源记录</el-dropdown-item>
@@ -151,8 +162,8 @@
           </div>
         </div>
         <div v-if="displayNodes.length > 0" class="node-nav sticky-node-nav">
-          <el-radio-group v-model="selectedNodeKey" size="small">
-            <el-radio-button v-for="node in displayNodes" :key="node.key" :label="node.key">
+          <el-radio-group v-model="selectedNodeKey" size="small" class="node-nav-group">
+            <el-radio-button v-for="node in displayNodes" :key="node.key" :label="node.key" class="node-nav-item">
               {{ node.label }} ({{ node.visibleCount }})
             </el-radio-button>
           </el-radio-group>
@@ -165,7 +176,20 @@
         <el-card v-if="currentNode" shadow="never" class="node-card">
           <div class="node-card-header">
             <div>
-              <div class="node-title">{{ currentNode.label }}</div>
+              <div class="node-title">
+                <div class="node-title-row">
+                  <span class="node-title-text">{{ currentNode.label }}</span>
+                  <el-tag
+                    v-if="shouldShowCurrentNodeSubtitleWarning"
+                    size="small"
+                    type="warning"
+                    effect="plain"
+                    :title="currentNodeSubtitleWarningTitle"
+                  >
+                    {{ currentNodeSubtitleWarningLabel }}
+                  </el-tag>
+                </div>
+              </div>
               <div class="node-summary">
                 实际 {{ currentNode.record_count }} 条 / 当前可见 {{ currentNode.visibleCount }} 条 / 正片 {{ currentNode.main_count || 0 }} / SP {{ currentNode.aux_count || 0 }}
               </div>
@@ -290,7 +314,7 @@
                   </template>
                 </el-table-column>
 
-                <el-table-column label="操作" width="130" align="center" fixed="right">
+                <el-table-column label="操作" width="130" align="center">
                   <template #default="{ row }">
                     <div class="row-actions">
                       <el-button class="row-action-button" type="primary" plain size="small" @click="openFixDialog(row)">修正</el-button>
@@ -1299,6 +1323,16 @@ const VIDEO_FILE_EXTENSIONS = new Set([
   '.wmv',
 ])
 
+const SUBTITLE_ATTACHMENT_EXTENSIONS = new Set([
+  '.ass',
+  '.idx',
+  '.srt',
+  '.ssa',
+  '.sub',
+  '.sup',
+  '.vtt',
+])
+
 function extractFilename(path) {
   return String(path || '').split(/[/\\]/).pop() || ''
 }
@@ -1307,6 +1341,18 @@ function extractFileExt(path) {
   const filename = extractFilename(path)
   const dotIndex = filename.lastIndexOf('.')
   return dotIndex >= 0 ? filename.slice(dotIndex) : ''
+}
+
+function extractParentDir(path) {
+  const normalized = String(path || '').replace(/\\/g, '/').split('?')[0]
+  const slashIndex = normalized.lastIndexOf('/')
+  return slashIndex >= 0 ? normalized.slice(0, slashIndex) : ''
+}
+
+function extractPathStem(path) {
+  const filename = extractFilename(String(path || '').split('?')[0])
+  const dotIndex = filename.lastIndexOf('.')
+  return dotIndex >= 0 ? filename.slice(0, dotIndex) : filename
 }
 
 function setResourceIconRef(resource, el) {
@@ -1636,6 +1682,45 @@ function isVideoItem(item) {
   return VIDEO_FILE_EXTENSIONS.has(extractItemExtension(item))
 }
 
+function isSubtitleAttachmentItem(item) {
+  return !isVideoItem(item) && SUBTITLE_ATTACHMENT_EXTENSIONS.has(extractItemExtension(item))
+}
+
+function attachmentMatchesVideoStem(attachmentItem, videoItem) {
+  const videoStem = extractPathStem(videoItem?.target_path || videoItem?.original_path)
+  const attachmentStem = extractPathStem(attachmentItem?.target_path || attachmentItem?.original_path)
+  if (!videoStem || !attachmentStem) return false
+
+  const videoDir = extractParentDir(videoItem?.target_path || videoItem?.original_path)
+  const attachmentDir = extractParentDir(attachmentItem?.target_path || attachmentItem?.original_path)
+  if (videoDir && attachmentDir && videoDir !== attachmentDir) return false
+
+  const escapedStem = videoStem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`^${escapedStem}(?:$|[ .])`, 'i').test(attachmentStem)
+}
+
+function summarizeNodeMainSubtitleCoverage(node) {
+  const mainItems = (node?.groups || [])
+    .flatMap((group) => group.items || [])
+    .filter((item) => item?.tree_bucket === 'main')
+
+  const mainVideos = mainItems.filter((item) => isVideoItem(item))
+  if (!mainVideos.length) {
+    return { totalVideos: 0, missingVideos: 0, hasMissing: false }
+  }
+
+  const subtitleAttachments = mainItems.filter((item) => isSubtitleAttachmentItem(item))
+  const missingVideos = mainVideos.filter(
+    (videoItem) => !subtitleAttachments.some((attachmentItem) => attachmentMatchesVideoStem(attachmentItem, videoItem)),
+  )
+
+  return {
+    totalVideos: mainVideos.length,
+    missingVideos: missingVideos.length,
+    hasMissing: missingVideos.length > 0,
+  }
+}
+
 function ownershipLabel(item) {
   if (!isVideoItem(item)) {
     if (item?.tree_bucket === 'main') return '正片附件'
@@ -1699,7 +1784,31 @@ const displayNodes = computed(() => {
     .filter((node) => node.groups.length > 0)
 })
 
+const rawCurrentNode = computed(() => {
+  const nodes = drawerTree.value || []
+  return nodes.find((node) => node.key === selectedNodeKey.value) || nodes[0] || null
+})
+
 const currentNode = computed(() => displayNodes.value.find((node) => node.key === selectedNodeKey.value) || displayNodes.value[0] || null)
+const currentNodeMainSubtitleStatus = computed(() => {
+  if (!drawerVisible.value) {
+    return { totalVideos: 0, missingVideos: 0, hasMissing: false }
+  }
+  return summarizeNodeMainSubtitleCoverage(rawCurrentNode.value)
+})
+const shouldShowCurrentNodeSubtitleWarning = computed(() => {
+  return drawerVisible.value && currentNode.value?.scope?.scope_level === 'season' && currentNodeMainSubtitleStatus.value.hasMissing
+})
+const currentNodeSubtitleWarningLabel = computed(() => {
+  const { missingVideos, totalVideos } = currentNodeMainSubtitleStatus.value
+  if (!missingVideos || !totalVideos) return '缺部分字幕'
+  return `缺字幕 ${missingVideos}/${totalVideos}`
+})
+const currentNodeSubtitleWarningTitle = computed(() => {
+  const { missingVideos, totalVideos } = currentNodeMainSubtitleStatus.value
+  if (!missingVideos || !totalVideos) return ''
+  return `正片目录中有 ${missingVideos}/${totalVideos} 个视频缺少正片附件字幕`
+})
 const selectedDrawerItems = computed(() => {
   const selectedIds = new Set(drawerSelectedIds.value || [])
   const items = []
@@ -2616,8 +2725,13 @@ onBeforeUnmount(() => {
   gap: 16px;
 }
 
+.header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .header,
-.header-actions,
 .drawer-toolbar,
 .drawer-toolbar-left,
 .drawer-toolbar-right,
@@ -2632,10 +2746,30 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.header {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
 .page-title {
   margin: 0;
   font-size: 28px;
   font-weight: 600;
+}
+
+.page-subtitle {
+  margin: 0;
+  color: #64748b;
+  font-size: 14px;
 }
 
 .resource-cell {
@@ -2688,6 +2822,17 @@ onBeforeUnmount(() => {
   color: #1f2937;
 }
 
+.node-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.node-title-text {
+  min-width: 0;
+}
+
 .resource-meta,
 .resource-dir,
 .drawer-path,
@@ -2734,6 +2879,25 @@ onBeforeUnmount(() => {
 .drawer-toolbar {
   padding: 0;
   margin: 0;
+}
+
+.drawer-toolbar-left {
+  flex: 1 1 620px;
+  justify-content: flex-start;
+}
+
+.drawer-toolbar-right {
+  flex: 0 1 auto;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.drawer-search {
+  width: 260px;
+}
+
+.drawer-category-select {
+  width: 128px;
 }
 
 .selection-summary {
@@ -2917,7 +3081,7 @@ onBeforeUnmount(() => {
 
 .node-nav {
   margin: 12px 0 16px;
-  overflow-x: auto;
+  overflow: visible;
 }
 
 .sticky-node-nav {
@@ -2926,27 +3090,36 @@ onBeforeUnmount(() => {
   border-top: 1px solid rgba(148, 163, 184, 0.18);
 }
 
-:deep(.sticky-node-nav .el-radio-group) {
-  display: inline-flex;
+:deep(.sticky-node-nav .node-nav-group) {
+  display: flex;
   gap: 8px;
-  flex-wrap: nowrap;
-  min-width: max-content;
+  flex-wrap: wrap;
+  width: 100%;
+  align-items: flex-start;
 }
 
-:deep(.sticky-node-nav .el-radio-button__inner) {
+:deep(.sticky-node-nav .node-nav-item) {
+  flex: 0 0 auto;
+  max-width: 100%;
+}
+
+:deep(.sticky-node-nav .node-nav-item .el-radio-button__inner) {
   border-radius: 999px !important;
   border: 1px solid #dbe3ef !important;
   box-shadow: none !important;
   background: #f8fafc;
   color: #334155;
+  margin-left: 0 !important;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
-:deep(.sticky-node-nav .el-radio-button:first-child .el-radio-button__inner),
-:deep(.sticky-node-nav .el-radio-button:last-child .el-radio-button__inner) {
+:deep(.sticky-node-nav .node-nav-item:first-child .el-radio-button__inner),
+:deep(.sticky-node-nav .node-nav-item:last-child .el-radio-button__inner) {
   border-radius: 999px !important;
 }
 
-:deep(.sticky-node-nav .el-radio-button__original-radio:checked + .el-radio-button__inner) {
+:deep(.sticky-node-nav .node-nav-item .el-radio-button__original-radio:checked + .el-radio-button__inner) {
   background: #1d4ed8;
   border-color: #1d4ed8 !important;
   color: #ffffff;
@@ -3078,6 +3251,18 @@ onBeforeUnmount(() => {
   .group-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .drawer-toolbar-left,
+  .drawer-toolbar-right {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+
+  .drawer-search,
+  .drawer-category-select {
+    width: 100%;
   }
 }
 

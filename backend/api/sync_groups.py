@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..models import SyncGroup
 
@@ -23,6 +24,31 @@ class SyncGroupIn(BaseModel):
     exclude: str | None = ""
     enabled: bool | None = True
     enabled_checks: list[str] | None = None  # None = keep existing / use defaults
+
+
+class SyncGroupSettingsResponse(BaseModel):
+    subtitle_backup_root: str
+
+
+class SyncGroupSettingsUpdate(BaseModel):
+    subtitle_backup_root: str
+
+
+@router.get("/settings", response_model=SyncGroupSettingsResponse)
+def get_sync_group_settings():
+    return SyncGroupSettingsResponse(
+        subtitle_backup_root=str(settings.subtitle_backup_root or "/app/subtitle_backup"),
+    )
+
+
+@router.put("/settings")
+def update_sync_group_settings(data: SyncGroupSettingsUpdate):
+    subtitle_backup_root = (data.subtitle_backup_root or "").strip()
+    if not subtitle_backup_root:
+        raise HTTPException(status_code=400, detail="字幕备份根目录不能为空")
+    settings.subtitle_backup_root = subtitle_backup_root
+    settings.save_to_env()
+    return {"ok": True, "subtitle_backup_root": subtitle_backup_root}
 
 
 @router.get("")

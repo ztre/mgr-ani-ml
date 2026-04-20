@@ -26,12 +26,8 @@ class ConfigResponse(BaseModel):
     log_retention_days: int
     log_max_task_files: int
     log_cleanup_interval_seconds: int
-    pending_jsonl_path: str
-    unprocessed_items_jsonl_path: str
-    review_jsonl_path: str
     anilist_fallback_enabled: bool
     anilist_fallback_timeout_seconds: float
-    subtitle_backup_root: str
 
 
 class ConfigUpdate(BaseModel):
@@ -48,12 +44,8 @@ class ConfigUpdate(BaseModel):
     log_retention_days: int | None = None
     log_max_task_files: int | None = None
     log_cleanup_interval_seconds: int | None = None
-    pending_jsonl_path: str | None = None
-    unprocessed_items_jsonl_path: str | None = None
-    review_jsonl_path: str | None = None
     anilist_fallback_enabled: bool | None = None
     anilist_fallback_timeout_seconds: float | None = None
-    subtitle_backup_root: str | None = None
 
 
 class TestConnectionRequest(BaseModel):
@@ -85,12 +77,8 @@ def get_config():
         log_retention_days=int(settings.log_retention_days or 14),
         log_max_task_files=int(settings.log_max_task_files or 200),
         log_cleanup_interval_seconds=int(settings.log_cleanup_interval_seconds or 600),
-        pending_jsonl_path=str(settings.pending_jsonl_path or ""),
-        unprocessed_items_jsonl_path=str(settings.unprocessed_items_jsonl_path or ""),
-        review_jsonl_path=str(settings.review_jsonl_path or ""),
         anilist_fallback_enabled=bool(settings.anilist_fallback_enabled),
         anilist_fallback_timeout_seconds=float(settings.anilist_fallback_timeout_seconds or 8.0),
-        subtitle_backup_root=str(settings.subtitle_backup_root or "/app/subtitle_backup"),
     )
 
 
@@ -122,20 +110,10 @@ def update_config(data: ConfigUpdate):
         settings.log_max_task_files = max(10, data.log_max_task_files)
     if data.log_cleanup_interval_seconds is not None:
         settings.log_cleanup_interval_seconds = max(60, data.log_cleanup_interval_seconds)
-    if data.pending_jsonl_path is not None:
-        settings.pending_jsonl_path = data.pending_jsonl_path.strip()
-    if data.unprocessed_items_jsonl_path is not None:
-        settings.unprocessed_items_jsonl_path = data.unprocessed_items_jsonl_path.strip()
-        # Keep legacy alias synced.
-        settings.unhandled_jsonl_path = settings.unprocessed_items_jsonl_path
-    if data.review_jsonl_path is not None:
-        settings.review_jsonl_path = data.review_jsonl_path.strip()
     if data.anilist_fallback_enabled is not None:
         settings.anilist_fallback_enabled = data.anilist_fallback_enabled
     if data.anilist_fallback_timeout_seconds is not None:
         settings.anilist_fallback_timeout_seconds = max(1.0, float(data.anilist_fallback_timeout_seconds))
-    if data.subtitle_backup_root is not None and data.subtitle_backup_root.strip():
-        settings.subtitle_backup_root = data.subtitle_backup_root.strip()
 
     settings.save_to_env()
     return {"ok": True}

@@ -1,19 +1,25 @@
 <template>
   <div class="inodes-page">
     <div class="header">
-      <h1 class="page-title">Inode 管理</h1>
+      <div class="header-main">
+        <h1 class="page-title">Inode 管理</h1>
+      </div>
       <div class="header-actions">
         <el-input
+          class="toolbar-search"
           v-model="filters.search"
           placeholder="搜索源路径或目标路径..."
           clearable
-          style="width: 260px"
           @clear="onFilterChanged"
           @keyup.enter="onFilterChanged"
         />
         <el-select v-model="filters.syncGroupId" clearable placeholder="同步组" style="width: 160px" @change="onFilterChanged">
           <el-option v-for="group in syncGroups" :key="group.id" :label="group.name" :value="group.id" />
         </el-select>
+        <el-button type="primary" @click="onFilterChanged">
+          <el-icon><Search /></el-icon>
+          搜索
+        </el-button>
         <el-button plain @click="resetMainFilters">重置</el-button>
         <el-button type="warning" :loading="cleaning" @click="cleanupInodes">清理无效记录</el-button>
         <el-button :loading="loading" @click="loadResources">
@@ -59,9 +65,11 @@
           <template #default="{ row }">{{ formatTime(row.latest_updated_at) }}</template>
         </el-table-column>
 
-        <el-table-column label="操作" width="120" align="center" fixed="right">
+        <el-table-column label="操作" width="120" align="center">
           <template #default="{ row }">
-            <el-button type="danger" plain size="small" @click.stop="deleteResourceRow(row)">删除资源</el-button>
+            <div class="table-actions">
+              <el-button type="danger" plain size="small" @click.stop="deleteResourceRow(row)">删除资源</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -168,7 +176,7 @@
                   <template #default="{ row }">{{ formatTime(row.updated_at || row.created_at) }}</template>
                 </el-table-column>
 
-                <el-table-column label="操作" width="90" align="center" fixed="right">
+                <el-table-column label="操作" width="90" align="center">
                   <template #default="{ row }">
                     <div class="row-actions">
                       <el-button class="row-action-button" type="danger" plain size="small" @click="deleteItem(row)">删除</el-button>
@@ -206,7 +214,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Film, Monitor, Refresh } from '@element-plus/icons-vue'
+import { Film, Monitor, Refresh, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { inodesApi, mediaApi, syncGroupsApi } from '../api/client'
 import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
@@ -544,7 +552,6 @@ onMounted(async () => {
 }
 
 .header,
-.header-actions,
 .drawer-toolbar,
 .drawer-toolbar-left,
 .drawer-toolbar-right,
@@ -557,6 +564,26 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.header {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
 }
 
 .page-title {
