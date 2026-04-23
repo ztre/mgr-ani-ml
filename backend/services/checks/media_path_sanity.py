@@ -11,11 +11,14 @@ mismatch their original group's source_type).
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from ...models import MediaRecord
+from ...models import MediaRecord, SyncGroup
+from ..media_record_metadata import MainVideoSlot, build_main_video_slot_from_record
+from ..resource_tree import extract_show_dir
 from .base import CheckerBase, IssueData
 from .path_filters import is_subtitle_related_issue
 
@@ -25,19 +28,15 @@ class MediaPathSanityChecker(CheckerBase):
 
     def run(self, db: Session, groups: list[SyncGroup]) -> list[IssueData]:
         issues: list[IssueData] = []
+        duplicate_slots: dict[MainVideoSlot, list[MediaRecord]] = defaultdict(list)
 
-        records = (
-            db.query(
-                MediaRecord.id,
-                MediaRecord.original_path,
-                MediaRecord.target_path,
-                MediaRecord.tmdb_id,
-            )
-            .filter(MediaRecord.target_path.isnot(None))
-            .all()
-        )
+        records = db.query(MediaRecord).filter(MediaRecord.target_path.isnot(None)).all()
 
-        for rec_id, orig_path, tgt_path, tmdb_id in records:
+        for row in records:
+            rec_id = row.id
+            orig_path = row.original_path
+            tgt_path = row.target_path
+            tmdb_id = row.tmdb_id
             if not tgt_path:
                 continue
             if is_subtitle_related_issue(source_path=orig_path, target_path=tgt_path):
@@ -57,5 +56,42 @@ class MediaPathSanityChecker(CheckerBase):
                         payload={"media_record_id": rec_id},
                     )
                 )
+            slot = build_main_video_slot_from_record(row)
+            if slot is not None:
+                duplicate_slots[slot].append(row)
+
+        for slot, slot_rows in duplicate_slots.items():
+            original_paths = sorted({
+                str(getattr(row, "original_path", "") or "").strip()
+                for row in slot_rows
+                if str(getattr(row, "original_path", "") or "").strip()
+            })
+            if len(original_paths) <= 1:
+                continue
+            target_paths = sorted({
+                str(getattr(row, "target_path", "") or "").strip()
+                for row in slot_rows
+                if str(getattr(row, "target_path", "") or "").strip()
+            })
+            sample_target = target_paths[0] if target_paths else None
+            issues.append(
+                IssueData(
+                    checker_code=self.checker_code,
+                    issue_code="duplicate_main_video_slot",
+                    severity="warning",
+                    sync_group_id=slot.sync_group_id,
+                    source_path=original_paths[0] if original_paths else None,
+                    target_path=sample_target,
+                    resource_dir=extract_show_dir(sample_target),
+                    tmdb_id=slot.tmdb_id,
+                    season=slot.season,
+                    episode=slot.episode,
+                    payload={
+                        "media_record_ids": [int(getattr(row, "id")) for row in slot_rows],
+                        "original_paths": original_paths,
+                        "target_paths": target_paths,
+                    },
+                )
+            )
 
         return issues

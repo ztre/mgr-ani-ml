@@ -22,7 +22,9 @@ from ..config import settings
 from ..database import get_db
 from ..models import CheckIssue, DirectoryState, InodeRecord, ManualAttachmentBackup, MediaRecord, ScanTask, SyncGroup
 from ..services.group_routing import resolve_movie_target_root, resolve_tv_target_root
-from ..services.linker import get_inode, path_excluded
+from ..services.library_mutations import find_inode_record_by_path
+from ..services.linker import is_same_inode, path_excluded
+from ..services.media_record_metadata import infer_media_record_metadata
 from ..services.parser import _extract_subtitle_lang, classify_extra_from_text, parse_movie_filename, parse_tv_filename
 from ..services.resource_tree import build_resource_summaries, build_resource_tree, extract_tv_primary_season
 from ..services.renamer import compute_movie_target_path, compute_tv_target_path
@@ -1318,18 +1320,27 @@ def _run_single_reidentify(
 
     # Clean up check issues that pointed at the old target path (before overwriting it)
     _cleanup_check_issues_for_records(db, [row])
+    row_metadata = infer_media_record_metadata(
+        media_type=media_type,
+        original_path=src,
+        target_path=dst,
+        parse_result=pr,
+        file_type="video",
+    )
     row.tmdb_id = data.tmdb_id
     row.type = media_type
     row.target_path = str(dst)
     row.status = "manual_fixed"
+    row.season = row_metadata.season
+    row.episode = row_metadata.episode
+    row.category = row_metadata.category
+    row.file_type = row_metadata.file_type
     row.updated_at = datetime.now(timezone.utc)
 
-    ino = get_inode(src)
-    if ino:
-        inode_row = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
-        if inode_row:
-            inode_row.target_path = str(dst)
-            inode_row.sync_group_id = group.id
+    inode_row = find_inode_record_by_path(db, src)
+    if inode_row:
+        inode_row.target_path = str(dst)
+        inode_row.sync_group_id = group.id
 
     # 处理随行附件（字幕/音轨等）
     companion_processed = 0
@@ -1366,13 +1377,23 @@ def _run_single_reidentify(
                 att_row.type = media_type
                 att_row.target_path = str(att_dst)
                 att_row.status = "manual_fixed"
+                att_metadata = infer_media_record_metadata(
+                    media_type=media_type,
+                    original_path=att_src,
+                    target_path=att_dst,
+                    parse_result=att_pr,
+                    category=att_row.category or row_metadata.category,
+                    file_type="attachment",
+                )
+                att_row.season = att_metadata.season
+                att_row.episode = att_metadata.episode
+                att_row.category = att_metadata.category
+                att_row.file_type = att_metadata.file_type
                 att_row.updated_at = datetime.now(timezone.utc)
-                att_ino = get_inode(att_src)
-                if att_ino:
-                    att_inode_row = db.query(InodeRecord).filter(InodeRecord.inode == att_ino).first()
-                    if att_inode_row:
-                        att_inode_row.target_path = str(att_dst)
-                        att_inode_row.sync_group_id = group.id
+                att_inode_row = find_inode_record_by_path(db, att_src)
+                if att_inode_row:
+                    att_inode_row.target_path = str(att_dst)
+                    att_inode_row.sync_group_id = group.id
                 append_log(f"附件修正完成: {att_src.name} -> {att_dst}")
                 companion_processed += 1
             except Exception as exc:
@@ -1465,15 +1486,24 @@ def _run_single_adjust(
             append_log(f"WARNING: 旧目标文件清理失败: {old_target} | {exc}")
 
     # Update database record
+    row_metadata = infer_media_record_metadata(
+        media_type=row.type,
+        original_path=src,
+        target_path=dst,
+        parse_result=pr,
+        file_type="video",
+    )
     row.target_path = str(dst)
     row.status = "manual_fixed"
+    row.season = row_metadata.season
+    row.episode = row_metadata.episode
+    row.category = row_metadata.category
+    row.file_type = row_metadata.file_type
     row.updated_at = datetime.now(timezone.utc)
 
-    ino = get_inode(src)
-    if ino:
-        inode_row = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
-        if inode_row:
-            inode_row.target_path = str(dst)
+    inode_row = find_inode_record_by_path(db, src)
+    if inode_row:
+        inode_row.target_path = str(dst)
 
     # 处理随行附件：从磁盘找同目录同 stem 的附件文件，再按 original_path 查 DB 更新记录。
     # 不依赖 file_type / sync_group_id 列，与识别修正的附件处理方式一致。
@@ -1510,12 +1540,22 @@ def _run_single_adjust(
                 _link_or_fail(att_src, att_dst)
                 att_row.target_path = str(att_dst)
                 att_row.status = "manual_fixed"
+                att_metadata = infer_media_record_metadata(
+                    media_type=row.type,
+                    original_path=att_src,
+                    target_path=att_dst,
+                    parse_result=att_pr,
+                    category=att_row.category or row_metadata.category,
+                    file_type="attachment",
+                )
+                att_row.season = att_metadata.season
+                att_row.episode = att_metadata.episode
+                att_row.category = att_metadata.category
+                att_row.file_type = att_metadata.file_type
                 att_row.updated_at = datetime.now(timezone.utc)
-                att_ino = get_inode(att_src)
-                if att_ino:
-                    att_inode_row = db.query(InodeRecord).filter(InodeRecord.inode == att_ino).first()
-                    if att_inode_row:
-                        att_inode_row.target_path = str(att_dst)
+                att_inode_row = find_inode_record_by_path(db, att_src)
+                if att_inode_row:
+                    att_inode_row.target_path = str(att_dst)
                 append_log(f"随行附件调整完成: {att_src.name} -> {att_dst}")
                 att_companion_count += 1
             except Exception as exc:
@@ -2742,6 +2782,7 @@ class ManualRecordIn(BaseModel):
     original_path: str
     target_path: str
     season: int | None = None
+    episode: int | None = None
     category: Literal["episode", "special", "extra"] | None = None
     file_type: Literal["video", "attachment"] | None = None
 
@@ -2757,6 +2798,7 @@ def create_manual_record(req: ManualRecordIn, db: Session = Depends(get_db)):
             original_path=req.original_path,
             target_path=req.target_path,
             season=req.season,
+            episode=req.episode,
             category=req.category,
             file_type=req.file_type,
         )
@@ -3050,7 +3092,7 @@ def _link_or_fail(src: Path, dst: Path) -> None:
         raise RuntimeError("source not found")
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
-        if get_inode(src) == get_inode(dst):
+        if is_same_inode(src, dst):
             return
         raise RuntimeError("target exists with different inode")
     import os
@@ -3287,6 +3329,7 @@ def _media_to_dict(row: MediaRecord) -> dict:
         "bangumi_id": row.bangumi_id,
         "status": row.status,
         "size": row.size,
+        "episode": row.episode,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "is_directory_pending": is_dir_pending,

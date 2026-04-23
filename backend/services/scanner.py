@@ -15,7 +15,7 @@ from contextlib import nullcontext
 from typing import Literal
 
 import httpx
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, object_session
@@ -26,7 +26,9 @@ from ..database import SessionLocal
 from ..models import DirectoryState, InodeRecord, MediaRecord, ScanTask, SyncGroup
 from .emby import refresh_emby_library
 from .group_routing import resolve_movie_target_root, resolve_tv_target_root
-from .linker import get_inode, is_same_inode, path_excluded
+from .library_mutations import find_inode_record_by_identity, find_inode_record_by_path
+from .linker import get_file_identity, get_inode, is_same_inode, path_excluded
+from .media_record_metadata import build_main_video_slot, build_main_video_slot_from_record, infer_media_record_metadata
 from .metadata import scrape_movie_metadata, scrape_tv_metadata
 from .search_name_builder import build_search_name
 from .parser import (
@@ -513,6 +515,72 @@ def _summarize_main_video_conflict(
 
     summary = "；".join(clause for clause in clauses if clause)
     return summary or "已尝试自动区分版本但仍无法解冲突"
+
+
+def _find_semantic_main_video_conflict(
+    db: Session,
+    *,
+    sync_group_id: int,
+    tmdb_id: int | None,
+    media_type: str,
+    src_path: Path,
+    dst_path: Path,
+    parse_result: ParseResult,
+) -> MediaRecord | None:
+    slot = build_main_video_slot(
+        sync_group_id=sync_group_id,
+        tmdb_id=tmdb_id,
+        media_type=media_type,
+        original_path=src_path,
+        target_path=dst_path,
+        parse_result=parse_result,
+        file_type="video",
+    )
+    if slot is None:
+        return None
+
+    try:
+        query = db.query(MediaRecord)
+        if query is None or not hasattr(query, "filter"):
+            return None
+        rows = query.filter(
+            MediaRecord.sync_group_id == slot.sync_group_id,
+            MediaRecord.type == media_type,
+            MediaRecord.target_path.isnot(None),
+            MediaRecord.target_path != "",
+            MediaRecord.original_path != str(src_path),
+            or_(
+                MediaRecord.tmdb_id == slot.tmdb_id,
+                and_(
+                    MediaRecord.tmdb_id.is_(None),
+                    MediaRecord.target_path.contains(f"[tmdbid={slot.tmdb_id}]"),
+                ),
+            ),
+        )
+        rows = rows.all() if hasattr(rows, "all") else []
+    except Exception:
+        return None
+    for row in rows:
+        existing_slot = build_main_video_slot_from_record(row)
+        if existing_slot is None:
+            continue
+        if existing_slot == slot:
+            return row
+    return None
+
+
+def _format_semantic_main_video_conflict_details(conflict_row: MediaRecord) -> str:
+    parts: list[str] = []
+    original_path = str(getattr(conflict_row, "original_path", "") or "").strip()
+    target_path = str(getattr(conflict_row, "target_path", "") or "").strip()
+    updated_at = getattr(conflict_row, "updated_at", None)
+    if original_path:
+        parts.append(f"已占位源: {original_path}")
+    if target_path:
+        parts.append(f"已占位目标: {target_path}")
+    if updated_at:
+        parts.append(f"已占位记录更新时间: {updated_at}")
+    return " | ".join(parts)
 
 
 def tag_task_type_with_issue(task_type: str) -> str:
@@ -1695,12 +1763,16 @@ def _process_file(
     if ext not in MEDIA_EXTS:
         return
 
-    ino = get_inode(src_path)
     record_status_ctx = str(context.get("record_status") or "scraped")
-    if ino and record_status_ctx != "manual_fixed":
+    source_identity = _resolve_scanner_file_identity(src_path)
+    if source_identity is not None and record_status_ctx != "manual_fixed":
         # 幂等保护：已处理文件直接跳过
         # manual_fixed 场景（批量/单文件修正）由用户显式触发，允许覆盖旧链接，跳过幂等保护。
-        existing = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
+        existing = find_inode_record_by_identity(
+            db,
+            device=source_identity[0],
+            inode=source_identity[1],
+        )
         if existing:
             if dir_runtime is not None:
                 dir_runtime["inode_skip_count"] = int(dir_runtime.get("inode_skip_count") or 0) + 1
@@ -1999,7 +2071,17 @@ def _process_file(
                 display_title=context.get("title"),
                 op_log=op_log,
             )
-            _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
+            _upsert_media_record(
+                db,
+                sync_group_id,
+                src_path,
+                dst_path,
+                media_type,
+                tmdb_id,
+                parse_result=parse_result,
+                is_attachment=True,
+                status=record_status,
+            )
             _upsert_inode_record(db, sync_group_id, src_path, dst_path)
             append_log(
                 f"INFO: 附件跟随正片: {src_path.name} -> {dst_path} "
@@ -2277,6 +2359,36 @@ def _process_file(
             return
 
     should_scrape = (not is_attachment) and _should_scrape_for_target(media_type, dst_path, parse_result)
+    semantic_conflict_row: MediaRecord | None = None
+    if not is_attachment and media_type == "tv" and record_status != "manual_fixed":
+        semantic_conflict_row = _find_semantic_main_video_conflict(
+            db,
+            sync_group_id=sync_group_id,
+            tmdb_id=tmdb_id if isinstance(tmdb_id, int) else None,
+            media_type=media_type,
+            src_path=src_path,
+            dst_path=dst_path,
+            parse_result=parse_result,
+        )
+    if semantic_conflict_row is not None:
+        details = _format_semantic_main_video_conflict_details(semantic_conflict_row)
+        if details:
+            append_log(f"INFO: 主视频冲突诊断: {src_path.name} | {details}")
+        _rollback_dir_context(
+            conflict_dir=src_path.parent,
+            reason="main video semantic slot occupied",
+            seen_targets=seen_targets,
+            dir_runtime=dir_runtime or {},
+            op_log=op_log,
+        )
+        append_log(f"WARNING: 主视频目标冲突已回滚并转待办: {src_path.name} | 目标: {dst_path}")
+        context["_has_issues"] = True
+        raise DirectoryProcessError(
+            "主视频目标冲突: "
+            f"{src_path.name} -> {dst_path}"
+            f"（同一语义位点已被占用: {str(getattr(semantic_conflict_row, 'target_path', '') or '').strip()}）"
+        )
+
     try:
         _execute_transactional_outputs(
             src_path=src_path,
@@ -2307,7 +2419,17 @@ def _process_file(
             return
         raise
 
-    _upsert_media_record(db, sync_group_id, src_path, dst_path, media_type, tmdb_id, status=record_status)
+    _upsert_media_record(
+        db,
+        sync_group_id,
+        src_path,
+        dst_path,
+        media_type,
+        tmdb_id,
+        parse_result=parse_result,
+        is_attachment=is_attachment,
+        status=record_status,
+    )
     _upsert_inode_record(db, sync_group_id, src_path, dst_path)
     if ext in VIDEO_EXTS:
         _register_video_anchor(src_path, dst_path, parse_result, dir_runtime, raw_label=original_special_label)
@@ -2797,9 +2919,19 @@ def _upsert_media_record(
     dst_path: Path,
     media_type: str,
     tmdb_id: int | None,
+    parse_result: ParseResult | None = None,
+    is_attachment: bool = False,
     status: str = "scraped",
 ) -> None:
     src_size = _safe_file_size(src_path)
+    metadata = infer_media_record_metadata(
+        media_type=media_type,
+        original_path=src_path,
+        target_path=dst_path,
+        parse_result=parse_result,
+        file_type="attachment" if is_attachment else "video",
+        is_attachment=is_attachment,
+    )
     existing = db.query(MediaRecord).filter(
         MediaRecord.sync_group_id == sync_group_id,
         MediaRecord.original_path == str(src_path),
@@ -2811,6 +2943,10 @@ def _upsert_media_record(
         existing.tmdb_id = tmdb_id
         existing.status = status
         existing.size = src_size
+        existing.season = metadata.season
+        existing.episode = metadata.episode
+        existing.category = metadata.category
+        existing.file_type = metadata.file_type
         return
 
     db.add(
@@ -2823,6 +2959,10 @@ def _upsert_media_record(
             bangumi_id=None,
             status=status,
             size=src_size,
+            season=metadata.season,
+            episode=metadata.episode,
+            category=metadata.category,
+            file_type=metadata.file_type,
         )
     )
 
@@ -2855,14 +2995,30 @@ def _extract_year(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _resolve_scanner_file_identity(path: Path) -> tuple[int | None, int] | None:
+    ino = get_inode(path)
+    if ino is None:
+        return None
+    identity = get_file_identity(path)
+    if identity is None:
+        return None, int(ino)
+    device, actual_ino = identity
+    if int(actual_ino) != int(ino):
+        return None, int(ino)
+    return int(device), int(actual_ino)
+
+
 def _upsert_inode_record(db: Session, sync_group_id: int, src_path: Path, dst_path: Path) -> None:
-    ino = get_inode(src_path)
-    if not ino:
+    identity = _resolve_scanner_file_identity(src_path)
+    if identity is None:
         return
+    device, ino = identity
 
     src_size = _safe_file_size(src_path)
-    existing = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
+    existing = find_inode_record_by_identity(db, device=device, inode=ino)
     if existing:
+        existing.device = int(device) if device is not None else None
+        existing.inode = int(ino)
         existing.source_path = str(src_path)
         existing.target_path = str(dst_path)
         existing.sync_group_id = sync_group_id
@@ -2871,7 +3027,8 @@ def _upsert_inode_record(db: Session, sync_group_id: int, src_path: Path, dst_pa
 
     db.add(
         InodeRecord(
-            inode=ino,
+            device=int(device) if device is not None else None,
+            inode=int(ino),
             source_path=str(src_path),
             target_path=str(dst_path),
             sync_group_id=sync_group_id,

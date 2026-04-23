@@ -35,6 +35,7 @@ class InodeDeleteScopeRequest(BaseModel):
 def _inode_to_dict(row: InodeRecord) -> dict:
     return {
         "id": row.id,
+        "device": row.device,
         "inode": row.inode,
         "source_path": row.source_path,
         "original_path": row.source_path,

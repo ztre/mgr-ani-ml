@@ -55,6 +55,7 @@ class MediaRecord(Base):
     status = Column(String(50), default="pending")
     size = Column(Integer, default=0)
     season = Column(Integer, nullable=True)
+    episode = Column(Integer, nullable=True)
     category = Column(String(50), nullable=True)   # episode | special | extra
     file_type = Column(String(20), nullable=True)  # video | attachment
     created_at = Column(DateTime, default=_utcnow_naive)
@@ -65,7 +66,8 @@ class InodeRecord(Base):
     __tablename__ = "inode_records"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    inode = Column(Integer, nullable=False, unique=True, index=True)
+    device = Column(Integer, nullable=True)
+    inode = Column(Integer, nullable=False)
     source_path = Column(String(2048), nullable=False)
     target_path = Column(String(2048), nullable=True)
     sync_group_id = Column(Integer, nullable=True)

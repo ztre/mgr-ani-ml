@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import ManualAttachmentBackup, MediaRecord, SyncGroup
 from .library_mutations import upsert_inode_record, upsert_media_record
-from .linker import get_inode
+from .linker import is_same_inode
 from .media_content_types import EXTRA_CATEGORIES, SPECIAL_CATEGORIES
 from .parser import _extract_subtitle_lang, extract_bracket_episode, parse_tv_filename
 from .resource_tree import extract_movie_resource_dir, extract_show_dir
@@ -505,9 +505,7 @@ def _import_single_subtitle(
 
     # --- idempotency: if target exists and is already linked to backup ---
     if target_path.exists():
-        t_ino = get_inode(target_path)
-        b_ino = get_inode(backup_path) if backup_path.exists() else None
-        if t_ino is not None and t_ino == b_ino:
+        if backup_path.exists() and is_same_inode(target_path, backup_path):
             _log.info("字幕导入幂等跳过: %s", target_path)
             return False  # skipped, not an error
         raise ValueError(f"目标路径已存在且非本次备份硬链接: {target_path}")
@@ -538,13 +536,18 @@ def _import_single_subtitle(
     record = upsert_media_record(
         db,
         sync_group_id=sync_group_id,
-        src_path=sub_path,
+        src_path=backup_path,
         dst_path=target_path,
         media_type=str(video_row.type or "tv"),
         tmdb_id=video_row.tmdb_id,
         status="manual_fixed",
+        season=video_row.season,
+        episode=video_row.episode,
+        category=video_row.category,
+        file_type="attachment",
     )
     record.season = video_row.season
+    record.episode = video_row.episode
     record.category = video_row.category
     record.file_type = "attachment"
     db.flush()
@@ -561,7 +564,7 @@ def _import_single_subtitle(
     upsert_inode_record(
         db,
         sync_group_id=sync_group_id,
-        src_path=sub_path,
+        src_path=backup_path,
         dst_path=target_path,
     )
 

@@ -18,7 +18,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from ..models import DirectoryState, InodeRecord, MediaRecord
-from .linker import get_inode
+from .linker import get_file_identity, get_inode
+from .media_record_metadata import infer_media_record_metadata
 
 _log = logging.getLogger(__name__)
 
@@ -35,6 +36,11 @@ def upsert_media_record(
     media_type: str,
     tmdb_id: int | None,
     status: str = "scraped",
+    *,
+    season: int | None = None,
+    episode: int | None = None,
+    category: str | None = None,
+    file_type: str | None = None,
 ) -> MediaRecord:
     """Insert or update a MediaRecord; returns the (possibly existing) row."""
     src_path = Path(src_path)
@@ -44,6 +50,16 @@ def upsert_media_record(
         src_size = src_path.stat().st_size
     except OSError:
         src_size = 0
+
+    metadata = infer_media_record_metadata(
+        media_type=media_type,
+        original_path=src_path,
+        target_path=dst_path,
+        season=season,
+        episode=episode,
+        category=category,
+        file_type=file_type,
+    )
 
     existing = (
         db.query(MediaRecord)
@@ -60,6 +76,10 @@ def upsert_media_record(
         existing.tmdb_id = tmdb_id
         existing.status = status
         existing.size = src_size
+        existing.season = metadata.season
+        existing.episode = metadata.episode
+        existing.category = metadata.category
+        existing.file_type = metadata.file_type
         existing.updated_at = datetime.now(timezone.utc)
         return existing
 
@@ -72,6 +92,10 @@ def upsert_media_record(
         bangumi_id=None,
         status=status,
         size=src_size,
+        season=metadata.season,
+        episode=metadata.episode,
+        category=metadata.category,
+        file_type=metadata.file_type,
     )
     db.add(row)
     db.flush()  # populate row.id without committing
@@ -89,6 +113,39 @@ def delete_media_record(db: Session, record_id: int) -> None:
 # InodeRecord helpers
 # ---------------------------------------------------------------------------
 
+def find_inode_record_by_identity(
+    db: Session,
+    *,
+    device: int | None,
+    inode: int | None,
+) -> InodeRecord | None:
+    if inode is None:
+        return None
+    if device is None:
+        try:
+            return db.query(InodeRecord).filter(InodeRecord.inode == int(inode)).first()
+        except Exception:
+            return None
+    try:
+        return (
+            db.query(InodeRecord)
+            .filter(InodeRecord.device == int(device), InodeRecord.inode == int(inode))
+            .first()
+        )
+    except Exception:
+        try:
+            return db.query(InodeRecord).filter(InodeRecord.inode == int(inode)).first()
+        except Exception:
+            return None
+
+
+def find_inode_record_by_path(db: Session, path: Path | str) -> InodeRecord | None:
+    identity = get_file_identity(path)
+    if identity is None:
+        return None
+    return find_inode_record_by_identity(db, device=identity[0], inode=identity[1])
+
+
 def upsert_inode_record(
     db: Session,
     sync_group_id: int,
@@ -99,17 +156,20 @@ def upsert_inode_record(
     src_path = Path(src_path)
     dst_path = Path(dst_path)
 
-    ino = get_inode(src_path)
-    if not ino:
+    identity = get_file_identity(src_path)
+    if identity is None:
         return None
+    device, ino = identity
 
     try:
         src_size = src_path.stat().st_size
     except OSError:
         src_size = 0
 
-    existing = db.query(InodeRecord).filter(InodeRecord.inode == ino).first()
+    existing = find_inode_record_by_identity(db, device=device, inode=ino)
     if existing:
+        existing.device = int(device)
+        existing.inode = int(ino)
         existing.source_path = str(src_path)
         existing.target_path = str(dst_path)
         existing.sync_group_id = sync_group_id
@@ -118,6 +178,7 @@ def upsert_inode_record(
         return existing
 
     row = InodeRecord(
+        device=int(device),
         inode=ino,
         source_path=str(src_path),
         target_path=str(dst_path),

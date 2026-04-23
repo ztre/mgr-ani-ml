@@ -132,8 +132,12 @@ def init_db() -> None:
   _migrate_scan_tasks_to_task_db()
   if sqlite_path is not None:
     _migrate_schema()
+    _ensure_inode_identity_indexes()
     _ensure_directory_states_unique_index()
     _ensure_resource_lookup_indexes()
+    _backfill_media_record_metadata()
+    _backfill_attachment_backup_sources_and_inodes()
+    _backfill_inode_record_devices()
 
 
 def _apply_sqlite_pragmas() -> None:
@@ -164,6 +168,7 @@ def _migrate_schema() -> None:
       _migrate_check_issues_columns(conn)
       _migrate_check_issues_fingerprint_index(conn)
       _migrate_media_records_columns(conn)
+      _migrate_inode_records_columns(conn)
       conn.commit()
   except Exception:
     _log.exception("Schema migration failed — database may be in an inconsistent state")
@@ -257,6 +262,7 @@ def _migrate_check_issues_fingerprint_index(conn) -> None:
 def _migrate_media_records_columns(conn) -> None:
   new_cols = [
     ("season", "INTEGER"),
+    ("episode", "INTEGER"),
     ("category", "VARCHAR(50)"),
     ("file_type", "VARCHAR(20)"),
   ]
@@ -265,6 +271,15 @@ def _migrate_media_records_columns(conn) -> None:
     if col_name not in cols:
       _log.info("Migration: adding column media_records.%s", col_name)
       conn.execute(text(f"ALTER TABLE media_records ADD COLUMN {col_name} {col_type}"))
+
+
+def _migrate_inode_records_columns(conn) -> None:
+  if not _table_exists(conn, "inode_records"):
+    return
+  cols = _table_columns(conn, "inode_records")
+  if "device" not in cols:
+    _log.info("Migration: adding column inode_records.device")
+    conn.execute(text("ALTER TABLE inode_records ADD COLUMN device INTEGER"))
 
 
 def _migrate_scan_tasks_to_task_db() -> None:
@@ -360,6 +375,200 @@ def _ensure_resource_lookup_indexes() -> None:
     for statement in statements:
       conn.execute(text(statement))
     conn.commit()
+
+
+def _ensure_inode_identity_indexes() -> None:
+  with engine.connect() as conn:
+    if not _table_exists(conn, "inode_records"):
+      return
+    rows = conn.execute(text("PRAGMA index_list('inode_records')")).fetchall()
+    for row in rows:
+      index_name = str(row[1] or "")
+      if index_name.lower() == "ix_inode_records_inode":
+        _log.info("Migration: dropping legacy unique index ix_inode_records_inode")
+        conn.execute(text("DROP INDEX IF EXISTS ix_inode_records_inode"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_inode_records_inode ON inode_records (inode)"))
+    conn.execute(
+      text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_inode_records_device_inode "
+        "ON inode_records (device, inode)"
+      )
+    )
+    conn.commit()
+
+
+def _backfill_media_record_metadata() -> None:
+  from .models import MediaRecord
+  from .services.media_record_metadata import infer_media_record_metadata
+
+  db = SessionLocal()
+  updated = 0
+  try:
+    rows = db.query(MediaRecord).yield_per(500)
+    for row in rows:
+      metadata = infer_media_record_metadata(
+        media_type=str(getattr(row, "type", "") or "tv"),
+        original_path=getattr(row, "original_path", None),
+        target_path=getattr(row, "target_path", None),
+        season=getattr(row, "season", None),
+        episode=getattr(row, "episode", None),
+        category=getattr(row, "category", None),
+        file_type=getattr(row, "file_type", None),
+      )
+      changed = False
+      if getattr(row, "season", None) != metadata.season:
+        row.season = metadata.season
+        changed = True
+      if getattr(row, "episode", None) != metadata.episode:
+        row.episode = metadata.episode
+        changed = True
+      if getattr(row, "category", None) != metadata.category:
+        row.category = metadata.category
+        changed = True
+      if getattr(row, "file_type", None) != metadata.file_type:
+        row.file_type = metadata.file_type
+        changed = True
+      if changed:
+        updated += 1
+    if updated:
+      _log.info("Migration: backfilled structured media metadata for %d rows", updated)
+      db.commit()
+    else:
+      db.rollback()
+  except Exception:
+    db.rollback()
+    _log.exception("MediaRecord metadata backfill failed")
+    raise
+  finally:
+    db.close()
+
+
+def _backfill_attachment_backup_sources_and_inodes() -> None:
+  from .models import InodeRecord, ManualAttachmentBackup, MediaRecord
+  from .services.library_mutations import upsert_inode_record
+  from .services.linker import get_file_identity
+
+  db = SessionLocal()
+  media_updates = 0
+  inode_updates = 0
+  inode_creates = 0
+  try:
+    attachment_rows = (
+      db.query(MediaRecord, ManualAttachmentBackup)
+      .join(ManualAttachmentBackup, ManualAttachmentBackup.media_record_id == MediaRecord.id)
+      .filter(MediaRecord.file_type == "attachment")
+      .all()
+    )
+    backup_by_target: dict[str, str] = {}
+    for media_row, backup_row in attachment_rows:
+      backup_path = str(getattr(backup_row, "backup_path", "") or "").strip()
+      if not backup_path:
+        continue
+      target_path = str(getattr(media_row, "target_path", "") or "").strip()
+      if target_path:
+        backup_by_target[target_path] = backup_path
+      if str(getattr(media_row, "original_path", "") or "").strip() != backup_path:
+        media_row.original_path = backup_path
+        media_updates += 1
+
+    inode_rows = db.query(InodeRecord).yield_per(500)
+    for inode_row in inode_rows:
+      target_path = str(getattr(inode_row, "target_path", "") or "").strip()
+      backup_path = backup_by_target.get(target_path)
+      if backup_path and str(getattr(inode_row, "source_path", "") or "").strip() != backup_path:
+        inode_row.source_path = backup_path
+        inode_updates += 1
+      source_value = str(getattr(inode_row, "source_path", "") or "").strip()
+      identity = get_file_identity(source_value) if source_value else None
+      if identity is None and target_path:
+        identity = get_file_identity(target_path)
+      if identity is None:
+        continue
+      device, inode = identity
+      if getattr(inode_row, "device", None) != int(device):
+        inode_row.device = int(device)
+        inode_updates += 1
+      if getattr(inode_row, "inode", None) != int(inode):
+        inode_row.inode = int(inode)
+        inode_updates += 1
+
+    existing_targets = {
+      str(value[0])
+      for value in db.query(InodeRecord.target_path)
+      .filter(InodeRecord.target_path.isnot(None), InodeRecord.target_path != "")
+      .all()
+      if value and str(value[0] or "").strip()
+    }
+    for media_row, backup_row in attachment_rows:
+      target_path = str(getattr(media_row, "target_path", "") or "").strip()
+      backup_path = str(getattr(backup_row, "backup_path", "") or "").strip()
+      if not target_path or not backup_path or target_path in existing_targets:
+        continue
+      created = upsert_inode_record(
+        db,
+        sync_group_id=getattr(media_row, "sync_group_id", None),
+        src_path=backup_path,
+        dst_path=target_path,
+      )
+      if created is not None:
+        existing_targets.add(target_path)
+        inode_creates += 1
+
+    if media_updates or inode_updates or inode_creates:
+      _log.info(
+        "Migration: fixed attachment backup sources (media=%d inode_updates=%d inode_creates=%d)",
+        media_updates,
+        inode_updates,
+        inode_creates,
+      )
+      db.commit()
+    else:
+      db.rollback()
+  except Exception:
+    db.rollback()
+    _log.exception("Attachment backup/inode backfill failed")
+    raise
+  finally:
+    db.close()
+
+
+def _backfill_inode_record_devices() -> None:
+  from .models import InodeRecord
+  from .services.linker import get_file_identity
+
+  db = SessionLocal()
+  updated = 0
+  try:
+    rows = db.query(InodeRecord).yield_per(500)
+    for row in rows:
+      source_value = str(getattr(row, "source_path", "") or "").strip()
+      target_value = str(getattr(row, "target_path", "") or "").strip()
+      identity = get_file_identity(source_value) if source_value else None
+      if identity is None and target_value:
+        identity = get_file_identity(target_value)
+      if identity is None:
+        continue
+      device, inode = identity
+      changed = False
+      if getattr(row, "device", None) != int(device):
+        row.device = int(device)
+        changed = True
+      if getattr(row, "inode", None) != int(inode):
+        row.inode = int(inode)
+        changed = True
+      if changed:
+        updated += 1
+    if updated:
+      _log.info("Migration: backfilled inode device identity for %d rows", updated)
+      db.commit()
+    else:
+      db.rollback()
+  except Exception:
+    db.rollback()
+    _log.exception("InodeRecord device backfill failed")
+    raise
+  finally:
+    db.close()
 
 
 def get_db():

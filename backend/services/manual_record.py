@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..models import CheckIssue, MediaRecord, SyncGroup
 from .library_mutations import upsert_inode_record, upsert_media_record
-from .linker import get_inode
+from .linker import get_file_identity
 
 _log = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ def import_manual_record(
     original_path: str,
     target_path: str,
     season: int | None = None,
+    episode: int | None = None,
     category: str | None = None,
     file_type: str | None = None,
 ) -> ManualImportResult:
@@ -71,14 +72,14 @@ def import_manual_record(
         raise ValueError(f"target_path 不是文件: {target_path}")
 
     # --- Validate same inode ---
-    src_ino = get_inode(src)
-    dst_ino = get_inode(dst)
-    if src_ino is None or dst_ino is None:
+    src_identity = get_file_identity(src)
+    dst_identity = get_file_identity(dst)
+    if src_identity is None or dst_identity is None:
         raise ValueError("无法读取文件 inode")
-    if src_ino != dst_ino:
+    if src_identity != dst_identity:
         raise ValueError(
             f"original_path 和 target_path 不是同一 inode "
-            f"(src={src_ino}, dst={dst_ino})，拒绝导入"
+            f"(src={src_identity}, dst={dst_identity})，拒绝导入"
         )
 
     # --- Determine media type ---
@@ -136,10 +137,16 @@ def import_manual_record(
         media_type=media_type,
         tmdb_id=tmdb_id,
         status="manual_fixed",
+        season=season,
+        episode=episode,
+        category=category,
+        file_type=file_type,
     )
     # Set manually-specified metadata fields
     if season is not None:
         record.season = season
+    if episode is not None:
+        record.episode = episode
     if category is not None:
         record.category = category
     if file_type is not None:

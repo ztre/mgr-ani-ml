@@ -197,8 +197,7 @@ def test_run_single_adjust_moves_companion_attachments(tmp_path):
 
     data = AdjustRequest(season=1, episode=2)  # 把第1集调整到第2集
 
-    with patch("backend.api.media.get_inode", return_value=None), \
-         patch("backend.api.media.append_log"):
+    with patch("backend.api.media.append_log"):
         result = _run_single_adjust(db=db, row=video_row, group=group, data=data)
 
     assert result["has_issues"] is False, f"附件处理不应有失败: {result}"

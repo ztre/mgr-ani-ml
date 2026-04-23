@@ -7,16 +7,24 @@ import re
 from pathlib import Path
 
 
-def get_inode(path: str | Path) -> int | None:
+def get_file_identity(path: str | Path) -> tuple[int, int] | None:
     try:
-        return os.stat(path).st_ino
+        stat_result = os.stat(path)
     except OSError:
         return None
+    return int(stat_result.st_dev), int(stat_result.st_ino)
+
+
+def get_inode(path: str | Path) -> int | None:
+    identity = get_file_identity(path)
+    if identity is None:
+        return None
+    return identity[1]
 
 
 def is_same_inode(path1: str | Path, path2: str | Path) -> bool:
-    i1 = get_inode(path1)
-    i2 = get_inode(path2)
+    i1 = get_file_identity(path1)
+    i2 = get_file_identity(path2)
     return i1 is not None and i1 == i2
 
 
