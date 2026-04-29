@@ -149,14 +149,14 @@ _do_login() {
   body=$(cat "$RESP")
 
   if [[ ! "${code}" =~ ^2 ]]; then
-    echo "[ERROR] 登录失败 (HTTP ${code}): $(_str "$body" "detail")"
+    echo "[ERROR] 登录失败 (HTTP ${code}): $(_str "$body" "detail")" >&2
     exit 1
   fi
 
   local token
   token=$(_str "$body" "access_token")
   if [[ -z "${token}" ]]; then
-    echo "[ERROR] 登录成功但未解析到 access_token，响应: ${body}"
+    echo "[ERROR] 登录成功但未解析到 access_token，响应: ${body}" >&2
     exit 1
   fi
 
@@ -165,7 +165,7 @@ _do_login() {
   cache_file="$(_token_cache_file)"
   printf '%s\n' "$token" > "$cache_file"
   chmod 600 "$cache_file"
-  echo "[INFO] 登录成功，token 已缓存: ${cache_file}"
+  echo "[INFO] 登录成功，token 已缓存: ${cache_file}" >&2
   printf '%s' "$token"
 }
 
