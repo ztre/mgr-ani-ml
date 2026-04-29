@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..models import CheckIssue, MediaRecord, SyncGroup
@@ -195,10 +196,10 @@ def _resolve_check_issues_for_import(
     src_issues = (
         db.query(CheckIssue)
         .filter(
-            CheckIssue.sync_group_id == sync_group_id,
             CheckIssue.checker_code == "source_unrecorded",
             CheckIssue.source_path == source_path,
             CheckIssue.status.in_(("open", "claimed")),
+            or_(CheckIssue.sync_group_id == sync_group_id, CheckIssue.sync_group_id.is_(None)),
         )
         .all()
     )
@@ -212,10 +213,10 @@ def _resolve_check_issues_for_import(
     tgt_issues = (
         db.query(CheckIssue)
         .filter(
-            CheckIssue.sync_group_id == sync_group_id,
             CheckIssue.checker_code.in_(("links_orphans", "media_path_sanity")),
             CheckIssue.target_path == target_path,
             CheckIssue.status.in_(("open", "claimed")),
+            or_(CheckIssue.sync_group_id == sync_group_id, CheckIssue.sync_group_id.is_(None)),
         )
         .all()
     )

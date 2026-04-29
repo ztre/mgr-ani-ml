@@ -273,7 +273,20 @@
               </div>
 
               <el-table v-else :data="group.items" stripe style="width: 100%">
-                <el-table-column label="选中" width="72" align="center">
+                <el-table-column width="116" align="center">
+                  <template #header>
+                    <div v-if="supportsGroupFilter(group)" class="group-selection-header">
+                      <el-checkbox
+                        :model-value="areAllVisibleGroupItemsSelected(group)"
+                        :indeterminate="isVisibleGroupSelectionIndeterminate(group)"
+                        :disabled="!getVisibleGroupSelectableIds(group).length"
+                        @change="(checked) => toggleVisibleGroupSelection(group, checked)"
+                      >
+                        全选
+                      </el-checkbox>
+                    </div>
+                    <span v-else>选中</span>
+                  </template>
                   <template #default="{ row }">
                     <el-checkbox :model-value="isRowSelected(row)" @change="(checked) => toggleRowSelection(row, checked)" />
                   </template>
@@ -1933,6 +1946,41 @@ function isRowSelected(row) {
   return drawerSelectedIds.value.includes(row?.id)
 }
 
+function getVisibleGroupSelectableIds(group) {
+  return (group?.items || [])
+    .map((item) => Number(item?.id || 0))
+    .filter((id) => id > 0)
+}
+
+function areAllVisibleGroupItemsSelected(group) {
+  const ids = getVisibleGroupSelectableIds(group)
+  if (!ids.length) return false
+  const selected = new Set(drawerSelectedIds.value || [])
+  return ids.every((id) => selected.has(id))
+}
+
+function isVisibleGroupSelectionIndeterminate(group) {
+  const ids = getVisibleGroupSelectableIds(group)
+  if (!ids.length) return false
+  const selected = new Set(drawerSelectedIds.value || [])
+  const selectedCount = ids.filter((id) => selected.has(id)).length
+  return selectedCount > 0 && selectedCount < ids.length
+}
+
+function toggleVisibleGroupSelection(group, checked) {
+  const ids = getVisibleGroupSelectableIds(group)
+  if (!ids.length) return
+  const selected = new Set(drawerSelectedIds.value || [])
+  ids.forEach((id) => {
+    if (checked) {
+      selected.add(id)
+    } else {
+      selected.delete(id)
+    }
+  })
+  drawerSelectedIds.value = Array.from(selected)
+}
+
 function toggleRowSelection(row, checked) {
   const rowId = Number(row?.id || 0)
   if (!rowId) return
@@ -3147,6 +3195,11 @@ onBeforeUnmount(() => {
 
 .group-filter-select {
   width: 144px;
+}
+
+.group-selection-header {
+  display: flex;
+  justify-content: center;
 }
 
 .path-row {

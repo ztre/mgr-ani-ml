@@ -1,6 +1,8 @@
 """Scan trigger APIs."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..database import get_db
@@ -9,6 +11,7 @@ from ..services.scanner import run_scan
 from ..services.task_queue import enqueue_task
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 
 @router.post("/run")
@@ -20,6 +23,14 @@ def trigger_scan(db=Depends(get_db)):
         target_name="全量扫描",
         queued_message="全量扫描任务已进入队列，等待执行",
         runner=lambda worker_db, queued_task: run_scan(worker_db, task=queued_task),
+    )
+    _log.info(
+        "scan api queued: endpoint=run task_type=%s target_id=%s target_name=%s task_id=%s status=%s",
+        "full",
+        None,
+        "全量扫描",
+        task.id,
+        task.status,
     )
     return {"message": "全量扫描任务已进入队列", "task_id": task.id, "status": task.status}
 
@@ -37,5 +48,15 @@ def trigger_group_scan(group_id: int, db=Depends(get_db)):
         target_name=group.name,
         queued_message=f"同步组 {group.name} 扫描任务已进入队列，等待执行",
         runner=lambda worker_db, queued_task: run_scan(worker_db, group_id=group_id, task=queued_task),
+    )
+    _log.info(
+        "scan api queued: endpoint=run_group task_type=%s group_id=%s group_name=%s target_id=%s target_name=%s task_id=%s status=%s",
+        "group",
+        group_id,
+        group.name,
+        group_id,
+        group.name,
+        task.id,
+        task.status,
     )
     return {"message": f"同步组 {group.name} 扫描任务已进入队列", "task_id": task.id, "status": task.status}

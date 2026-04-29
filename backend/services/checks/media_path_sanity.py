@@ -49,7 +49,7 @@ class MediaPathSanityChecker(CheckerBase):
                         checker_code=self.checker_code,
                         issue_code="target_missing",
                         severity="error",
-                        sync_group_id=None,
+                        sync_group_id=row.sync_group_id,
                         source_path=orig_path,
                         target_path=tgt_path,
                         tmdb_id=tmdb_id,

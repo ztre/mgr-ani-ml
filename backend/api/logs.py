@@ -18,6 +18,20 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 current_task_id: ContextVar[int | None] = ContextVar("current_task_id", default=None)
 _last_cleanup_at: datetime | None = None
 APP_LOG_FILENAMES: tuple[str, ...] = tuple(["app.log", *(f"app.log.{index}" for index in range(1, 6))])
+TASK_ACCESS_LOG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("POST", re.compile(r"^/api/scan/run(?:/\d+)?$")),
+    ("POST", re.compile(r"^/api/checks/run$")),
+    ("POST", re.compile(r"^/api/media/\d+/reidentify$")),
+    ("POST", re.compile(r"^/api/media/\d+/adjust$")),
+    ("POST", re.compile(r"^/api/media/\d+/manual-organize$")),
+    ("POST", re.compile(r"^/api/media/reidentify-by-target-dir$")),
+    ("POST", re.compile(r"^/api/media/reidentify-scope$")),
+    ("POST", re.compile(r"^/api/media/batch-reidentify$")),
+    ("POST", re.compile(r"^/api/media/wash/execute$")),
+    ("POST", re.compile(r"^/api/media/wash/source-dir-organize$")),
+    ("POST", re.compile(r"^/api/tasks/\d+/cancel$")),
+    ("POST", re.compile(r"^/sendTask$")),
+)
 
 
 def append_task_log(task_id: int | None, message: str) -> None:
@@ -48,6 +62,42 @@ def _tail_lines(path: Path, limit: int) -> list[str]:
         return lines[-limit:]
     except Exception:
         return ["读取日志失败"]
+
+
+def _extract_access_log_request(line: str) -> tuple[str, str] | None:
+    text = str(line or "")
+    if "uvicorn.access:" not in text:
+        return None
+    match = re.search(r'"([A-Z]+)\s+([^\s"]+)', text)
+    if not match:
+        return None
+    method = match.group(1).upper()
+    raw_path = match.group(2)
+    path = raw_path.split("?", 1)[0]
+    return method, path
+
+
+def _is_task_related_access_log(line: str) -> bool:
+    request = _extract_access_log_request(line)
+    if request is None:
+        return False
+    method, path = request
+    return any(expected_method == method and pattern.match(path) for expected_method, pattern in TASK_ACCESS_LOG_PATTERNS)
+
+
+def _should_hide_app_log_line(line: str) -> bool:
+    text = str(line or "")
+    if "uvicorn.access:" not in text:
+        return False
+    return not _is_task_related_access_log(text)
+
+
+def _tail_visible_app_lines(path: Path, limit: int) -> list[str]:
+    lines = _tail_lines(path, limit=5000)
+    if lines == ["读取日志失败"]:
+        return lines
+    visible_lines = [line for line in lines if not _should_hide_app_log_line(line)]
+    return visible_lines[-limit:]
 
 
 def _build_log_file_meta(path: Path) -> dict:
@@ -142,6 +192,6 @@ def get_app_logs(
             "files": files,
         }
     result = _build_log_file_meta(path)
-    result["logs"] = _tail_lines(path, limit)
+    result["logs"] = _tail_visible_app_lines(path, limit)
     result["files"] = files
     return result

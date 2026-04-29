@@ -22,6 +22,14 @@ from .services.scanner import run_scan
 from .services.task_queue import enqueue_task, ensure_task_queue_worker
 
 
+def _has_rotating_file_handler(logger: logging.Logger, log_file: Path) -> bool:
+    return any(
+        isinstance(handler, logging.handlers.RotatingFileHandler)
+        and getattr(handler, "baseFilename", None) == str(log_file)
+        for handler in logger.handlers
+    )
+
+
 def _setup_file_logging() -> None:
     """将 app 运行日志输出到 logs/app.log（Rotating，10MB×5）。"""
     log_file = LOG_DIR / "app.log"
@@ -37,10 +45,16 @@ def _setup_file_logging() -> None:
     )
     handler.setFormatter(formatter)
     root_logger = logging.getLogger()
-    if not any(isinstance(h, logging.handlers.RotatingFileHandler) and getattr(h, "baseFilename", None) == str(log_file) for h in root_logger.handlers):
+    if not _has_rotating_file_handler(root_logger, log_file):
         root_logger.addHandler(handler)
     if root_logger.level == logging.NOTSET:
         root_logger.setLevel(logging.INFO)
+
+    access_logger = logging.getLogger("uvicorn.access")
+    if not access_logger.propagate and not _has_rotating_file_handler(access_logger, log_file):
+        access_logger.addHandler(handler)
+    if access_logger.level == logging.NOTSET:
+        access_logger.setLevel(logging.INFO)
 
 
 @asynccontextmanager

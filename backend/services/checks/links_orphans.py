@@ -3,7 +3,7 @@
 Mirrors the logic in tdocs/check_links_orphans.sh:
   Scan the target (links) directory for each sync group and report:
   - orphan_file  : file exists in FS but no DB record has that target_path
-  - broken_link  : DB record exists but the target file is missing from FS
+    - dir_orphan_target : whole leaf dir exists in FS but none of its files are recorded
 
 DFS leaf-dir traversal (mirrors scanner._collect_video_leaf_dirs).
 """
@@ -13,9 +13,9 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from ...models import MediaRecord, SyncGroup
+from ...models import InodeRecord, MediaRecord, SyncGroup
 from .base import CheckerBase, IssueData
-from .path_filters import is_subtitle_related_issue, is_subtitle_related_path
+from .path_filters import is_subtitle_related_path
 
 VIDEO_EXTS = frozenset({".mkv", ".mp4", ".avi", ".mov", ".webm", ".flv"})
 ATTACHMENT_EXTS = frozenset({".ass", ".srt", ".ssa", ".vtt", ".mka", ".sup", ".idx", ".sub"})
@@ -69,6 +69,12 @@ class LinksOrphansChecker(CheckerBase):
             .filter(MediaRecord.target_path.isnot(None))
             .all()
         }
+        recorded_targets.update({
+            row[0]
+            for row in db.query(InodeRecord.target_path)
+            .filter(InodeRecord.target_path.isnot(None))
+            .all()
+        })
 
         # --- orphan check: FS files not in DB ---
         seen_target_roots: set[str] = set()
@@ -103,7 +109,7 @@ class LinksOrphansChecker(CheckerBase):
                             checker_code="target_dir_no_source",
                             issue_code="dir_orphan_target",
                             severity="warning",
-                            sync_group_id=None,
+                            sync_group_id=group.id,
                             resource_dir=str(leaf_dir),
                             payload={"group_name": group.name, "file_count": len(orphan_files)},
                         )
@@ -115,33 +121,11 @@ class LinksOrphansChecker(CheckerBase):
                                 checker_code=self.checker_code,
                                 issue_code="orphan_file",
                                 severity="warning",
-                                sync_group_id=None,
+                                sync_group_id=group.id,
                                 target_path=str(entry),
                                 resource_dir=str(leaf_dir),
                                 payload={"group_name": group.name},
                             )
                         )
 
-        # --- broken link check: DB records whose FS file is missing ---
-        db_records = (
-            db.query(MediaRecord.id, MediaRecord.original_path, MediaRecord.target_path, MediaRecord.tmdb_id)
-            .filter(MediaRecord.target_path.isnot(None))
-            .all()
-        )
-        for rec_id, orig_path, tgt_path, tmdb_id in db_records:
-            if is_subtitle_related_issue(source_path=orig_path, target_path=tgt_path):
-                continue
-            if tgt_path and not Path(tgt_path).exists():
-                issues.append(
-                    IssueData(
-                        checker_code=self.checker_code,
-                        issue_code="broken_link",
-                        severity="error",
-                        sync_group_id=None,
-                        source_path=orig_path,
-                        target_path=tgt_path,
-                        tmdb_id=tmdb_id,
-                        payload={"media_record_id": rec_id},
-                    )
-                )
         return issues
