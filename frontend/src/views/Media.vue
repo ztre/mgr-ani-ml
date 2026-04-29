@@ -272,7 +272,7 @@
                 当前筛选下没有项目。
               </div>
 
-              <el-table v-else :data="group.items" stripe style="width: 100%">
+              <el-table v-else :data="getVisibleGroupItems(group)" stripe style="width: 100%">
                 <el-table-column width="116" align="center">
                   <template #header>
                     <div v-if="supportsGroupFilter(group)" class="group-selection-header">
@@ -1946,8 +1946,15 @@ function isRowSelected(row) {
   return drawerSelectedIds.value.includes(row?.id)
 }
 
+function getVisibleGroupItems(group) {
+  const groupKey = String(group?.key || '')
+  if (!groupKey) return Array.isArray(group?.items) ? group.items : []
+  const latestGroup = (currentNode.value?.groups || []).find((entry) => String(entry?.key || '') === groupKey)
+  return Array.isArray(latestGroup?.items) ? latestGroup.items : (Array.isArray(group?.items) ? group.items : [])
+}
+
 function getVisibleGroupSelectableIds(group) {
-  return (group?.items || [])
+  return getVisibleGroupItems(group)
     .map((item) => Number(item?.id || 0))
     .filter((id) => id > 0)
 }
