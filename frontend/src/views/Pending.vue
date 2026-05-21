@@ -321,6 +321,7 @@ import { Document, Refresh, Search } from '@element-plus/icons-vue'
 import TaskLogMonitorDrawer from '../components/TaskLogMonitorDrawer.vue'
 import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 import dayjs from 'dayjs'
+import { formatTime, formatSize as formatFileSize, extractDirName } from '../utils/formatters'
 
 const route = useRoute()
 const loading = ref(false)
@@ -628,25 +629,7 @@ function openOrganizeMonitor(spec) {
   restartOrganizeMonitorAutoRefresh()
 }
 
-function extractDirName(path) {
-  if (!path) return '-'
-  const parts = path.split(/[/\\]/).filter(Boolean)
-  return parts[parts.length - 1] || '-'
-}
 
-function formatTime(t) {
-  if (!t) return '-'
-  return dayjs(t).format('YYYY-MM-DD HH:mm')
-}
-
-function formatFileSize(size) {
-  const value = Number(size || 0)
-  if (value <= 0) return '-'
-  if (value < 1024) return `${value} B`
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`
-  if (value < 1024 ** 3) return `${(value / (1024 ** 2)).toFixed(1)} MB`
-  return `${(value / (1024 ** 3)).toFixed(2)} GB`
-}
 
 async function openOrganizeDialog(row) {
   currentRow.value = row

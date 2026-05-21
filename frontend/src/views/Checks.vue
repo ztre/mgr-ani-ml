@@ -189,9 +189,10 @@
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Search } from '@element-plus/icons-vue'
-import dayjs from 'dayjs'
 import { checksApi, syncGroupsApi } from '../api/client'
+import { formatTime as _formatTime } from '../utils/formatters'
 
+const formatTime = (t) => _formatTime(t, 'MM-DD HH:mm:ss')
 const groups = ref([])
 const issues = ref([])
 const runs = ref([])
@@ -483,14 +484,6 @@ function parseSummary(json) {
   }
 }
 
-function formatTime(t) {
-  if (!t) return '-'
-  // Backend stores UTC naive datetimes (no tz suffix). Append 'Z' so dayjs
-  // parses as UTC and auto-converts to local time.
-  const s = String(t)
-  const normalized = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z'
-  return dayjs(normalized).format('MM-DD HH:mm:ss')
-}
 </script>
 
 <style scoped>

@@ -1,5 +1,4 @@
 import { createApp } from 'vue'
-import { createPinia } from 'pinia'
 import { ElLoadingDirective } from 'element-plus'
 import 'element-plus/es/components/loading/style/css'
 import 'element-plus/es/components/message/style/css'
@@ -13,9 +12,6 @@ const storedTheme = localStorage.getItem('amm_theme')
 document.body.classList.toggle('theme-dark', storedTheme === 'dark')
 
 const app = createApp(App)
-const pinia = createPinia()
-
-app.use(pinia)
 app.use(router)
 app.directive('loading', ElLoadingDirective)
 app.mount('#app')

@@ -148,8 +148,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Search } from '@element-plus/icons-vue'
-import dayjs from 'dayjs'
 import { mediaApi } from '../api/client'
+import { formatTime } from '../utils/formatters'
 
 const kind = ref('pending')
 const kindOptions = ref([])
@@ -230,10 +230,7 @@ function resolutionLabel(status) {
   return RESOLUTION_MAP[status] || status
 }
 
-function formatTime(value) {
-  if (!value) return '-'
-  return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
-}
+
 
 function formatSeasonEpisode(row) {
   const season = row?.season ?? '-'

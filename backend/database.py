@@ -66,52 +66,26 @@ request_task_engine = create_engine(
 RequestTaskSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=request_task_engine)
 
 
-if _IS_SQLITE:
-  @event.listens_for(engine, "connect")
-  def _set_sqlite_pragmas(dbapi_connection, connection_record) -> None:
+def _register_sqlite_pragmas(eng, busy_ms: int) -> None:
+  """Register a SQLite 'connect' event that applies WAL, NORMAL sync, and busy_timeout."""
+  @event.listens_for(eng, "connect")
+  def _set_pragmas(dbapi_connection, connection_record) -> None:
     cursor = dbapi_connection.cursor()
     try:
       cursor.execute("PRAGMA journal_mode=WAL")
       cursor.execute("PRAGMA synchronous=NORMAL")
-      cursor.execute("PRAGMA busy_timeout=30000")
+      cursor.execute(f"PRAGMA busy_timeout={busy_ms}")
     finally:
       cursor.close()
 
 
 if _IS_SQLITE:
-  @event.listens_for(request_engine, "connect")
-  def _set_request_sqlite_pragmas(dbapi_connection, connection_record) -> None:
-    cursor = dbapi_connection.cursor()
-    try:
-      cursor.execute("PRAGMA journal_mode=WAL")
-      cursor.execute("PRAGMA synchronous=NORMAL")
-      cursor.execute(f"PRAGMA busy_timeout={_sqlite_busy_timeout_ms(_REQUEST_DB_TIMEOUT_SECONDS)}")
-    finally:
-      cursor.close()
-
+  _register_sqlite_pragmas(engine, 30000)
+  _register_sqlite_pragmas(request_engine, _sqlite_busy_timeout_ms(_REQUEST_DB_TIMEOUT_SECONDS))
 
 if _IS_TASK_SQLITE:
-  @event.listens_for(task_engine, "connect")
-  def _set_task_sqlite_pragmas(dbapi_connection, connection_record) -> None:
-    cursor = dbapi_connection.cursor()
-    try:
-      cursor.execute("PRAGMA journal_mode=WAL")
-      cursor.execute("PRAGMA synchronous=NORMAL")
-      cursor.execute("PRAGMA busy_timeout=30000")
-    finally:
-      cursor.close()
-
-
-if _IS_TASK_SQLITE:
-  @event.listens_for(request_task_engine, "connect")
-  def _set_request_task_sqlite_pragmas(dbapi_connection, connection_record) -> None:
-    cursor = dbapi_connection.cursor()
-    try:
-      cursor.execute("PRAGMA journal_mode=WAL")
-      cursor.execute("PRAGMA synchronous=NORMAL")
-      cursor.execute(f"PRAGMA busy_timeout={_sqlite_busy_timeout_ms(_REQUEST_DB_TIMEOUT_SECONDS)}")
-    finally:
-      cursor.close()
+  _register_sqlite_pragmas(task_engine, 30000)
+  _register_sqlite_pragmas(request_task_engine, _sqlite_busy_timeout_ms(_REQUEST_DB_TIMEOUT_SECONDS))
 
 
 def init_db() -> None:
@@ -121,12 +95,12 @@ def init_db() -> None:
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     if not sqlite_path.exists():
       sqlite_path.touch()
-    _apply_sqlite_pragmas()
+    _apply_sqlite_pragmas_to(engine)
   if task_sqlite_path is not None:
     task_sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     if not task_sqlite_path.exists():
       task_sqlite_path.touch()
-    _apply_task_sqlite_pragmas()
+    _apply_sqlite_pragmas_to(task_engine)
   Base.metadata.create_all(bind=engine)
   ScanTask.__table__.create(bind=task_engine, checkfirst=True)
   _migrate_scan_tasks_to_task_db()
@@ -140,15 +114,8 @@ def init_db() -> None:
     _backfill_inode_record_devices()
 
 
-def _apply_sqlite_pragmas() -> None:
-  with engine.connect() as conn:
-    conn.execute(text("PRAGMA journal_mode=WAL"))
-    conn.execute(text("PRAGMA synchronous=NORMAL"))
-    conn.execute(text("PRAGMA busy_timeout=30000"))
-
-
-def _apply_task_sqlite_pragmas() -> None:
-  with task_engine.connect() as conn:
+def _apply_sqlite_pragmas_to(eng) -> None:
+  with eng.connect() as conn:
     conn.execute(text("PRAGMA journal_mode=WAL"))
     conn.execute(text("PRAGMA synchronous=NORMAL"))
     conn.execute(text("PRAGMA busy_timeout=30000"))

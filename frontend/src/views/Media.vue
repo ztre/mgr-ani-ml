@@ -990,6 +990,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Film, Monitor, Refresh, Search, UploadFilled } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { mediaApi, syncGroupsApi, tasksApi, washApi, manualRecordApi } from '../api/client'
+import { formatTime, formatSize, extractFilename } from '../utils/formatters'
 import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
 import { useResourcePoster } from '../utils/resourcePosterStore'
@@ -1346,10 +1347,6 @@ const SUBTITLE_ATTACHMENT_EXTENSIONS = new Set([
   '.vtt',
 ])
 
-function extractFilename(path) {
-  return String(path || '').split(/[/\\]/).pop() || ''
-}
-
 function extractFileExt(path) {
   const filename = extractFilename(path)
   const dotIndex = filename.lastIndexOf('.')
@@ -1380,26 +1377,6 @@ function onFloatingPosterEnter(el, done) {
 function onFloatingPosterLeave(el, done) {
   const targetEl = resourceIconElements.get(resourceIdentityKey(drawerResource.value))
   animateFloatingPosterLeave(el, targetEl, done)
-}
-
-function formatTime(value) {
-  if (!value) return '-'
-  const s = String(value)
-  const normalized = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z'
-  return dayjs(normalized).format('YYYY-MM-DD HH:mm')
-}
-
-function formatSize(size) {
-  const value = Number(size || 0)
-  if (!value) return '-'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let next = value
-  let index = 0
-  while (next >= 1024 && index < units.length - 1) {
-    next /= 1024
-    index += 1
-  }
-  return `${next.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
 function clearFixMonitorTimer() {

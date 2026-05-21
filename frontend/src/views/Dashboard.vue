@@ -259,6 +259,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { DataLine, Film, Monitor, MoonNight, Refresh, Search, Setting, Sunny, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
 import { syncGroupsApi, scanApi, embyApi, tasksApi, mediaApi, checksApi } from '../api/client'
 import dayjs from 'dayjs'
+import { formatTime, formatSize, extractDirName } from '../utils/formatters'
 
 const TaskLogMonitorDrawer = defineAsyncComponent(() => import('../components/TaskLogMonitorDrawer.vue'))
 
@@ -645,27 +646,7 @@ function taskTargetText(row) {
   return row?.target_name || '-'
 }
 
-function formatTime(t) {
-  if (!t) return '-'
-  return dayjs(t).format('YYYY-MM-DD HH:mm:ss')
-}
 
-function formatSize(bytes) {
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  while (bytes >= 1024 && i < units.length - 1) {
-    bytes /= 1024
-    i++
-  }
-  return bytes.toFixed(2) + ' ' + units[i]
-}
-
-function extractDirName(path) {
-  if (!path) return '-'
-  const parts = path.split(/[/\\]/).filter(Boolean)
-  return parts[parts.length - 1] || '-'
-}
 
 function applyTheme(isDark) {
   document.body.classList.toggle('theme-dark', !!isDark)

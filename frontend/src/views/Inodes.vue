@@ -215,8 +215,8 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Film, Monitor, Refresh, Search } from '@element-plus/icons-vue'
-import dayjs from 'dayjs'
 import { inodesApi, mediaApi, syncGroupsApi } from '../api/client'
+import { formatTime, extractFilename } from '../utils/formatters'
 import { buildConfirmDialogOptions, buildConfirmMessage } from '../utils/confirmMessage'
 import { animateFloatingPosterEnter, animateFloatingPosterLeave, resourceIdentityKey, setResourceIconElement } from '../utils/floatingPosterMotion'
 import { useResourcePoster } from '../utils/resourcePosterStore'
@@ -249,9 +249,7 @@ const { ensurePosterForResource, hydrateCachedPosterMeta, resourcePosterUrl, res
   (params) => mediaApi.poster(params).then(({ data }) => data),
 )
 
-function extractFilename(path) {
-  return String(path || '').split(/[/\\]/).pop() || ''
-}
+
 
 function setResourceIconRef(resource, el) {
   setResourceIconElement(resourceIconElements, resource, el)
@@ -267,10 +265,7 @@ function onFloatingPosterLeave(el, done) {
   animateFloatingPosterLeave(el, targetEl, done)
 }
 
-function formatTime(value) {
-  if (!value) return '-'
-  return dayjs(value).format('YYYY-MM-DD HH:mm')
-}
+
 
 function bucketTagType(bucket) {
   if (bucket === 'main') return 'primary'
