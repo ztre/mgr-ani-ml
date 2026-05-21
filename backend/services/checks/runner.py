@@ -17,8 +17,6 @@ from sqlalchemy.orm import Session
 
 from ...models import CheckIssue, CheckRun, SyncGroup
 from .base import IssueData
-from .links_orphans import LinksOrphansChecker
-from .media_path_sanity import MediaPathSanityChecker
 from .source_unrecorded import SourceUnrecordedChecker
 from .target_no_source import TargetNoSourceChecker
 
@@ -27,11 +25,9 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-_ALL_CHECKER_CODES = ["source_unrecorded", "media_path_sanity", "target_no_source", "links_orphans"]
+_ALL_CHECKER_CODES = ["source_unrecorded", "target_no_source"]
 _CHECKER_MAP = {
     "source_unrecorded": SourceUnrecordedChecker(),
-    "links_orphans": LinksOrphansChecker(),
-    "media_path_sanity": MediaPathSanityChecker(),
     "target_no_source": TargetNoSourceChecker(),
 }
 # Checkers that emit issues with a *derived* checker_code (different from their own).
@@ -41,7 +37,6 @@ _CHECKER_MAP = {
 _DERIVED_CHECKER_CODES: dict[str, set[str]] = {
     "source_unrecorded": {"source_dir_unrecorded"},
     "target_no_source": {"target_dir_no_source"},
-    "links_orphans": {"target_dir_no_source"},
 }
 
 

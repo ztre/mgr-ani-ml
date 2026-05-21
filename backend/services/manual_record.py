@@ -187,7 +187,6 @@ def _resolve_check_issues_for_import(
     """Auto-resolve check issues that are now fixed by this import.
 
     - source_unrecorded issues with matching sync_group_id + source_path → resolved
-    - links_orphans / media_path_sanity issues with matching sync_group_id + target_path → resolved
     """
     now = datetime.now(timezone.utc)
     closed = 0
@@ -204,23 +203,6 @@ def _resolve_check_issues_for_import(
         .all()
     )
     for issue in src_issues:
-        issue.status = "resolved"
-        issue.resolved_at = now
-        issue.updated_at = now
-        closed += 1
-
-    # links_orphans + media_path_sanity: target_path match
-    tgt_issues = (
-        db.query(CheckIssue)
-        .filter(
-            CheckIssue.checker_code.in_(("links_orphans", "media_path_sanity")),
-            CheckIssue.target_path == target_path,
-            CheckIssue.status.in_(("open", "claimed")),
-            or_(CheckIssue.sync_group_id == sync_group_id, CheckIssue.sync_group_id.is_(None)),
-        )
-        .all()
-    )
-    for issue in tgt_issues:
         issue.status = "resolved"
         issue.resolved_at = now
         issue.updated_at = now

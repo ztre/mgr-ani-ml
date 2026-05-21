@@ -27,8 +27,6 @@
         <el-select class="filter-select" v-model="filterChecker" placeholder="检查器" clearable @change="loadIssues">
           <el-option label="源文件未使用" value="source_unrecorded" />
           <el-option label="源目录未使用" value="source_dir_unrecorded" />
-          <el-option label="孤立硬链接" value="links_orphans" />
-          <el-option label="目标路径异常" value="media_path_sanity" />
           <el-option label="目标文件无源" value="target_no_source" />
           <el-option label="目标目录无源" value="target_dir_no_source" />
         </el-select>
@@ -438,8 +436,6 @@ function checkerLabel(code) {
   const map = {
     source_unrecorded: '源文件未使用',
     source_dir_unrecorded: '源目录未使用',
-    links_orphans: '孤立硬链接',
-    media_path_sanity: '目标路径异常',
     target_no_source: '目标文件无源',
     target_dir_no_source: '目标目录无源',
   }
