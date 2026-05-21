@@ -10,6 +10,9 @@
           <el-icon><Search /></el-icon>
           执行全量检查
         </el-button>
+        <el-button type="danger" plain :loading="resettingData" @click="resetCheckData">
+          重置数据
+        </el-button>
       </div>
     </div>
 
@@ -186,7 +189,7 @@
 
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { checksApi, syncGroupsApi } from '../api/client'
@@ -196,6 +199,7 @@ const issues = ref([])
 const runs = ref([])
 const issuesLoading = ref(false)
 const runningFull = ref(false)
+const resettingData = ref(false)
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(200)
@@ -323,6 +327,32 @@ async function runFullCheck() {
   } catch {
     ElMessage.error('启动失败')
     runningFull.value = false
+  }
+}
+
+async function resetCheckData() {
+  try {
+    await ElMessageBox.confirm(
+      '该操作将清空检查中心中的全部问题和检查记录，且无法恢复。是否继续？',
+      '重置检查数据',
+      {
+        type: 'warning',
+        confirmButtonText: '确认清空',
+        cancelButtonText: '取消',
+      }
+    )
+
+    resettingData.value = true
+    await checksApi.deleteAll()
+    page.value = 1
+    await Promise.all([loadIssues(), loadRuns()])
+    ElMessage.success('检查中心数据已清空')
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      ElMessage.error(e?.response?.data?.detail || '清空检查数据失败')
+    }
+  } finally {
+    resettingData.value = false
   }
 }
 
