@@ -1,6 +1,7 @@
 """Checks center API."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -15,6 +16,8 @@ from ..services.checks.path_filters import build_subtitle_issue_filter
 from ..services.task_queue import enqueue_task
 
 router = APIRouter()
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +51,7 @@ def delete_all_checks(db: Session = Depends(get_db)):
     db.query(CheckIssue).delete()
     db.query(CheckRun).delete()
     db.commit()
+    _log.info("[AUDIT] checks_all_cleared")
     return {"message": "检查中心数据已清空"}
 
 
@@ -153,6 +157,7 @@ def ignore_issue(issue_id: int, db: Session = Depends(get_db)):
     issue.status = "ignored"
     issue.updated_at = datetime.now(timezone.utc)
     db.commit()
+    _log.info("[AUDIT] issue_ignored id=%d", issue_id)
     return _issue_to_dict(issue)
 
 
@@ -164,6 +169,7 @@ def resolve_issue(issue_id: int, db: Session = Depends(get_db)):
     issue.updated_at = now
     issue.resolved_at = now
     db.commit()
+    _log.info("[AUDIT] issue_resolved id=%d", issue_id)
     return _issue_to_dict(issue)
 
 
@@ -176,6 +182,7 @@ def reopen_issue(issue_id: int, db: Session = Depends(get_db)):
     issue.resolved_at = None
     issue.updated_at = datetime.now(timezone.utc)
     db.commit()
+    _log.info("[AUDIT] issue_reopened id=%d", issue_id)
     return _issue_to_dict(issue)
 
 
@@ -210,4 +217,5 @@ def batch_issue_action(req: BatchIssueActionRequest, db: Session = Depends(get_d
         issue.updated_at = now
         updated += 1
     db.commit()
+    _log.info("[AUDIT] issue_batch_action action=%s count=%d", req.action, updated)
     return {"updated": updated}

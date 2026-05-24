@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import time
 from typing import Any
 
@@ -14,6 +15,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .config import settings
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+_log = logging.getLogger(__name__)
 
 
 def is_auth_enabled() -> bool:
@@ -48,9 +51,11 @@ def require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(bear
         raise HTTPException(status_code=401, detail="未登录或登录已过期")
     payload = verify_access_token(credentials.credentials)
     if not payload:
+        _log.warning("[AUTH] token_invalid")
         raise HTTPException(status_code=401, detail="认证令牌无效")
     sub = str(payload.get("sub") or "")
     if not sub:
+        _log.warning("[AUTH] token_invalid reason=empty_sub")
         raise HTTPException(status_code=401, detail="认证令牌无效")
     return sub
 

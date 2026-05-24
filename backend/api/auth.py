@@ -1,12 +1,16 @@
 """Auth endpoints."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..security import authenticate_user, create_access_token, is_auth_enabled, require_auth
 
 router = APIRouter()
+
+_log = logging.getLogger(__name__)
 
 
 class LoginRequest(BaseModel):
@@ -24,7 +28,9 @@ def login(data: LoginRequest):
     if not is_auth_enabled():
         return {"auth_enabled": False, "access_token": ""}
     if not authenticate_user(data.username, data.password):
+        _log.warning("[AUTH] login_failed user=%s", data.username)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    _log.info("[AUTH] login_success user=%s", data.username)
     token = create_access_token(data.username)
     return {"auth_enabled": True, "access_token": token, "token_type": "bearer"}
 

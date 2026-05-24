@@ -2466,6 +2466,7 @@ def batch_delete(data: BatchDeleteRequest, db: Session = Depends(get_db)):
     if data.delete_resource_scope:
         rows = _expand_rows_to_resource_scope(db, rows)
 
+    _log.info("[AUDIT] media_batch_delete records=%d delete_files=%s", len(rows), bool(data.delete_files))
     return _execute_batch_delete(db, rows, delete_files=bool(data.delete_files))
 
 
@@ -2481,6 +2482,7 @@ def delete_media_scope(data: DeleteScopeRequest, db: Session = Depends(get_db)):
             "pruned_dirs": 0,
             "pruned_metadata_files": 0,
         }
+    _log.info("[AUDIT] media_delete_scope records=%d delete_files=%s", len(rows), bool(data.delete_files))
     return _execute_batch_delete(db, rows, delete_files=bool(data.delete_files))
 
 
@@ -2508,6 +2510,7 @@ def delete_all_media(db: Session = Depends(get_db)):
         except OSError:
             pass
 
+    _log.info("[AUDIT] media_delete_all records=%d", count)
     return {
         "message": f"已删除 {count} 条媒体记录，清理 {dir_state_count} 条目录状态",
         "cleared_logs": cleared,
@@ -2537,6 +2540,7 @@ def deduplicate_media(db: Session = Depends(get_db)):
     result = db.execute(sql)
     db.commit()
     deleted = result.rowcount or 0
+    _log.info("[AUDIT] media_deduplicate deleted=%d", deleted)
     return {"message": f"去重完成，删除 {deleted} 条重复记录", "deleted": deleted}
 
 
@@ -2651,6 +2655,7 @@ def execute_wash_endpoint(req: WashExecuteRequest, db: Session = Depends(get_db)
         runner=_runner,
         queued_message=f"洗版任务「{_group_name}」已进入队列",
     )
+    _log.info("[AUDIT] wash_enqueued task_id=%d type=%s", task.id, task_type)
     return {"task_id": task.id, "status": task.status}
 
 
@@ -2805,6 +2810,7 @@ def create_manual_record(req: ManualRecordIn, db: Session = Depends(get_db)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    _log.info("[AUDIT] manual_record_import status=%s idempotent=%s", result.status, result.idempotent)
     return {
         "id": result.id,
         "status": result.status,
@@ -2959,6 +2965,7 @@ async def subtitle_batch_import(
     finally:
         cleanup_staging(staging_token)
 
+    _log.info("[AUDIT] subtitle_batch_import sync_group=%d imported=%d errors=%d", sync_group_id, result.imported, len(result.errors))
     return {
         "imported": result.imported,
         "errors": result.errors,

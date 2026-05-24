@@ -1,6 +1,7 @@
 """Inode management APIs."""
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from ..models import InodeRecord
 from ..services.resource_tree import build_resource_summaries, build_resource_tree
 
 router = APIRouter()
+
+_log = logging.getLogger(__name__)
 
 
 class InodeBatchDeleteRequest(BaseModel):
@@ -144,6 +147,7 @@ def cleanup_inodes(db: Session = Depends(get_db)):
     if ids:
         deleted += db.query(InodeRecord).filter(InodeRecord.id.in_(ids)).delete(synchronize_session=False)
     db.commit()
+    _log.info("[AUDIT] inodes_cleanup deleted=%d", deleted)
     return {"message": f"已清理 {deleted} 条无效记录"}
 
 
@@ -151,6 +155,7 @@ def cleanup_inodes(db: Session = Depends(get_db)):
 def delete_all_inodes(db: Session = Depends(get_db)):
     count = db.query(InodeRecord).delete()
     db.commit()
+    _log.info("[AUDIT] inodes_all_deleted count=%d", count)
     return {"message": f"已删除 {count} 条记录"}
 
 
@@ -161,6 +166,7 @@ def delete_inode(inode_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="记录不存在")
     db.delete(row)
     db.commit()
+    _log.info("[AUDIT] inode_deleted id=%d", inode_id)
     return {"ok": True}
 
 
@@ -172,6 +178,7 @@ def batch_delete_inodes(data: InodeBatchDeleteRequest, db: Session = Depends(get
 
     deleted = db.query(InodeRecord).filter(InodeRecord.id.in_(ids)).delete(synchronize_session=False)
     db.commit()
+    _log.info("[AUDIT] inodes_batch_deleted count=%d", int(deleted or 0))
     return {"ok": True, "deleted": int(deleted or 0)}
 
 
@@ -183,4 +190,5 @@ def delete_inode_scope(data: InodeDeleteScopeRequest, db: Session = Depends(get_
 
     deleted = db.query(InodeRecord).filter(InodeRecord.id.in_(ids)).delete(synchronize_session=False)
     db.commit()
+    _log.info("[AUDIT] inodes_scope_deleted scope=%s count=%d", data.scope_level, int(deleted or 0))
     return {"ok": True, "deleted": int(deleted or 0)}

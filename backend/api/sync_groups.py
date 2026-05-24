@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +14,8 @@ from ..database import get_db
 from ..models import SyncGroup
 
 router = APIRouter()
+
+_log = logging.getLogger(__name__)
 
 
 class SyncGroupIn(BaseModel):
@@ -48,6 +51,7 @@ def update_sync_group_settings(data: SyncGroupSettingsUpdate):
         raise HTTPException(status_code=400, detail="字幕备份根目录不能为空")
     settings.subtitle_backup_root = subtitle_backup_root
     settings.save_to_env()
+    _log.info("[CONFIG] sync_group_settings_updated subtitle_backup_root=%s", subtitle_backup_root)
     return {"ok": True, "subtitle_backup_root": subtitle_backup_root}
 
 
@@ -82,6 +86,7 @@ def create_sync_group(data: SyncGroupIn, db: Session = Depends(get_db)):
     db.add(row)
     db.commit()
     db.refresh(row)
+    _log.info("[AUDIT] sync_group_created id=%d name=%s", row.id, row.name)
     return row
 
 
@@ -113,6 +118,7 @@ def update_sync_group(group_id: int, data: SyncGroupIn, db: Session = Depends(ge
 
     db.commit()
     db.refresh(row)
+    _log.info("[AUDIT] sync_group_updated id=%d name=%s", row.id, row.name)
     return row
 
 
@@ -121,6 +127,8 @@ def delete_sync_group(group_id: int, db: Session = Depends(get_db)):
     row = db.query(SyncGroup).filter(SyncGroup.id == group_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="同步组不存在")
+    _name = row.name
     db.delete(row)
     db.commit()
+    _log.info("[AUDIT] sync_group_deleted id=%d name=%s", group_id, _name)
     return {"ok": True}

@@ -21,6 +21,8 @@ from .security import require_auth
 from .services.scanner import run_scan
 from .services.task_queue import enqueue_task, ensure_task_queue_worker
 
+_log = logging.getLogger(__name__)
+
 
 def _has_rotating_file_handler(logger: logging.Logger, log_file: Path) -> bool:
     return any(
@@ -47,7 +49,7 @@ def _setup_file_logging() -> None:
     root_logger = logging.getLogger()
     if not _has_rotating_file_handler(root_logger, log_file):
         root_logger.addHandler(handler)
-    if root_logger.level == logging.NOTSET:
+    if root_logger.level == logging.NOTSET or root_logger.level > logging.INFO:
         root_logger.setLevel(logging.INFO)
 
     access_logger = logging.getLogger("uvicorn.access")
@@ -111,7 +113,9 @@ def _is_sqlite_busy_error(exc: OperationalError) -> bool:
 @app.exception_handler(OperationalError)
 async def handle_operational_error(request, exc: OperationalError):
     if _is_sqlite_busy_error(exc):
+        _log.warning("[DB] busy path=%s", request.url.path)
         return JSONResponse(status_code=409, content={"detail": "数据库正忙，请稍后重试"})
+    _log.error("[DB] error path=%s", request.url.path, exc_info=exc)
     return JSONResponse(status_code=500, content={"detail": "数据库操作失败"})
 
 
@@ -186,6 +190,7 @@ def send_task(dirname: str = Form(...), group: str = Form(...), _username: str =
                 target_dir_override=target_dir,
             ),
         )
+        _log.info("[AUDIT] webhook_scan_enqueued group=%s dirname=%s task_id=%d source=%s", group, dirname, task.id, source)
         return {
             "ok": True,
             "message": "webhook 扫描整理任务已进入队列",

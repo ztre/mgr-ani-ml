@@ -1,6 +1,7 @@
 """Task history APIs."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -13,6 +14,8 @@ from ..services.scanner import request_scan_cancel
 from .logs import LOG_DIR, _tail_lines, append_log, append_task_log, cleanup_logs_if_needed, current_task_id
 
 router = APIRouter()
+
+_log = logging.getLogger(__name__)
 DEFAULT_DISPLAY_TZ = timezone(timedelta(hours=8))
 
 
@@ -168,4 +171,5 @@ def delete_all_tasks(db: Session = Depends(get_task_db)):
             app_log.write_text("", encoding="utf-8")
         except OSError:
             pass
+    _log.info("[AUDIT] tasks_all_cleared count=%d", count)
     return {"message": f"已删除 {count} 条任务记录并清理日志"}

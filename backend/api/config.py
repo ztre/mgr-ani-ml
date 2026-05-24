@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -10,6 +11,8 @@ import httpx
 from ..config import settings
 
 router = APIRouter()
+
+_log = logging.getLogger(__name__)
 
 
 class ConfigResponse(BaseModel):
@@ -116,6 +119,8 @@ def update_config(data: ConfigUpdate):
         settings.anilist_fallback_timeout_seconds = max(1.0, float(data.anilist_fallback_timeout_seconds))
 
     settings.save_to_env()
+    _changed = [k for k, v in data.model_dump().items() if v is not None]
+    _log.info("[CONFIG] updated keys=%s", ",".join(_changed) if _changed else "-")
     return {"ok": True}
 
 
@@ -144,8 +149,10 @@ def test_connection(data: TestConnectionRequest):
                 results["tmdb"] = {"ok": True, "message": "连接成功"}
             else:
                 results["tmdb"] = {"ok": False, "message": f"连接失败: {resp.status_code}"}
+                _log.warning("[EXTERNAL] test_connection_failed service=tmdb status=%d", resp.status_code)
         except Exception as e:
             results["tmdb"] = {"ok": False, "message": f"连接异常: {e}"}
+            _log.warning("[EXTERNAL] test_connection_failed service=tmdb error=%s", type(e).__name__)
 
     if data.emby_url is not None or data.emby_api_key is not None:
         emby_url = (data.emby_url if data.emby_url is not None else settings.emby_url or "").rstrip("/")
@@ -160,8 +167,10 @@ def test_connection(data: TestConnectionRequest):
                     results["emby"] = {"ok": True, "message": "连接成功"}
                 else:
                     results["emby"] = {"ok": False, "message": f"连接失败: {resp.status_code}"}
+                    _log.warning("[EXTERNAL] test_connection_failed service=emby status=%d", resp.status_code)
             except Exception as e:
                 results["emby"] = {"ok": False, "message": f"连接异常: {e}"}
+                _log.warning("[EXTERNAL] test_connection_failed service=emby error=%s", type(e).__name__)
 
     if not results:
         raise HTTPException(status_code=400, detail="未提供可测试的字段")
@@ -184,4 +193,5 @@ def change_password(data: PasswordChangeRequest):
 
     settings.auth_password = new_password
     settings.save_to_env()
+    _log.info("[CONFIG] password_changed")
     return {"ok": True, "message": "密码修改成功"}

@@ -1,11 +1,14 @@
 """Emby integration service."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from ..config import settings
+
+_log = logging.getLogger(__name__)
 
 
 def _auth_headers() -> dict[str, str]:
@@ -59,6 +62,7 @@ def refresh_emby_library() -> dict:
             else:
                 client.post(f"{base}/emby/Library/Refresh", headers=headers)
     except Exception as e:
+        _log.warning("[EXTERNAL] emby_refresh_failed error=%s", type(e).__name__)
         return {"ok": False, "message": f"请求失败: {e}"}
 
     return {"ok": True, "message": "已发送 Emby 刷新请求"}
