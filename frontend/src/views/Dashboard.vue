@@ -33,8 +33,8 @@
     </div>
 
     <!-- 统计卡片 -->
-    <el-row :gutter="24" class="stats-row">
-      <el-col :span="6">
+    <div class="stats-row">
+      <div class="stat-grid-item">
         <el-card shadow="hover" class="stat-card stat-card--media">
           <div class="stat-content">
             <div class="stat-label">总媒体记录</div>
@@ -42,8 +42,8 @@
           </div>
           <el-icon class="stat-icon" :size="40"><Film /></el-icon>
         </el-card>
-      </el-col>
-      <el-col :span="6">
+      </div>
+      <div class="stat-grid-item">
         <el-card shadow="hover" class="stat-card stat-card--tv">
           <div class="stat-content">
             <div class="stat-label">TV 剧集</div>
@@ -51,8 +51,8 @@
           </div>
           <el-icon class="stat-icon" :size="40"><Monitor /></el-icon>
         </el-card>
-      </el-col>
-      <el-col :span="6">
+      </div>
+      <div class="stat-grid-item">
         <el-card shadow="hover" class="stat-card stat-card--movie">
           <div class="stat-content">
             <div class="stat-label">电影</div>
@@ -60,8 +60,8 @@
           </div>
           <el-icon class="stat-icon" :size="40"><VideoCamera /></el-icon>
         </el-card>
-      </el-col>
-      <el-col :span="6">
+      </div>
+      <div class="stat-grid-item">
         <el-card shadow="hover" class="stat-card stat-card--storage">
           <div class="stat-content">
             <div class="stat-label">总大小</div>
@@ -69,8 +69,8 @@
           </div>
           <el-icon class="stat-icon" :size="40"><DataLine /></el-icon>
         </el-card>
-      </el-col>
-    </el-row>
+      </div>
+    </div>
 
     <el-card v-if="showPendingOverview" shadow="hover" class="pending-card">
       <template #header>
@@ -720,12 +720,23 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
 }
 
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 24px;
+}
+
+.stat-grid-item {
+  min-width: 0;
+}
+
 .stat-card {
   margin-bottom: 0;
   display: flex;
   align-items: center;
   position: relative;
   overflow: hidden;
+  height: 100%;
   min-height: 118px;
   background: var(--stat-card-surface, var(--stat-card-bg)) !important;
   border-color: var(--stat-card-border) !important;
@@ -761,6 +772,8 @@ onBeforeUnmount(() => {
 }
 
 .stat-content {
+  min-width: 0;
+  padding-right: 72px;
   z-index: 1;
 }
 .stat-label {
@@ -772,6 +785,10 @@ onBeforeUnmount(() => {
   font-size: 28px;
   font-weight: 600;
   letter-spacing: 0.02em;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--stat-card-accent, var(--text-main));
 }
 .stat-icon {
